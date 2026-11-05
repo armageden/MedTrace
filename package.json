@@ -1,0 +1,19 @@
+{
+  "name": "medtrace-backend",
+  "version": "1.0.0",
+  "description": "MedTrace IEC 62304 & FDA 21 CFR Part 11 Regulatory Compliance Engine",
+  "main": "src/index.ts",
+  "scripts": {
+    "build": "tsc",
+    "lint": "forge lint"
+  },
+  "dependencies": {
+    "@forge/api": "^5.1.0",
+    "@forge/kvs": "^2.1.1",
+    "@forge/resolver": "^1.6.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.4.0"
+  }
+}
