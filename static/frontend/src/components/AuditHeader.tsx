@@ -8,6 +8,7 @@ interface AuditHeaderProps {
   onToggleView: (view: 'graph' | 'table') => void;
   onSeed: () => void;
   onOpenExport: () => void;
+  onTestTransition: () => void;
   isSeeding: boolean;
 }
 
@@ -17,6 +18,7 @@ export const AuditHeader: React.FC<AuditHeaderProps> = ({
   onToggleView,
   onSeed,
   onOpenExport,
+  onTestTransition,
   isSeeding,
 }) => {
   return (
@@ -104,6 +106,28 @@ export const AuditHeader: React.FC<AuditHeaderProps> = ({
           >
             <Sparkles size={14} />
             {isSeeding ? 'Seeding Demo Suite...' : '⚡ Seed Demo Suite'}
+          </button>
+
+          {/* Test Jira Transition Validator Lockout */}
+          <button
+            onClick={onTestTransition}
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 6,
+              padding: '7px 14px',
+              borderRadius: 6,
+              border: '1.5px solid #de350b',
+              background: '#ffebe6',
+              color: '#de350b',
+              fontWeight: 700,
+              fontSize: 12,
+              cursor: 'pointer',
+              transition: 'all 0.15s ease',
+            }}
+          >
+            <ShieldAlert size={14} />
+            🔒 Test Jira Release Gate
           </button>
 
           {/* FDA Export Button */}
