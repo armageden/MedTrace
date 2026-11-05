@@ -6,6 +6,7 @@ import { LineageGraph } from './components/LineageGraph';
 import { TraceMatrixTable } from './components/TraceMatrixTable';
 import { InspectionDrawer } from './components/InspectionDrawer';
 import { FdaExportModal } from './components/FdaExportModal';
+import { TransitionModal } from './components/TransitionModal';
 
 // Initial fallback mock data for smooth local rendering / offline previews
 const fallbackSummary: ComplianceSummary = {
@@ -198,6 +199,28 @@ export const App: React.FC = () => {
   const [isExportOpen, setIsExportOpen] = useState(false);
   const [isSeeding, setIsSeeding] = useState(false);
   const [isRemediating, setIsRemediating] = useState(false);
+  const [transitionResult, setTransitionResult] = useState<{ result: boolean; errorMessage?: string } | null>(null);
+  const [isTransitionModalOpen, setIsTransitionModalOpen] = useState(false);
+
+  // Test Jira Transition Validator Lockout
+  const handleTestTransition = async () => {
+    try {
+      const res = (await invoke('simulateTransition')) as { result: boolean; errorMessage?: string };
+      setTransitionResult(res);
+    } catch {
+      // Local preview fallback based on current state
+      if (summary.releaseBlocked) {
+        setTransitionResult({
+          result: false,
+          errorMessage:
+            '❌ [MedTrace Safety Gate] Transition Blocked!\n• IEC 62304 Critical Gap: Class C Hazard [HAZ-101] requires verified test coverage (TEST-88 is UNTESTED).\n• 21 CFR Part 11 Signature Drift: Confluence Spec modified at v3 without clinical re-certification.',
+        });
+      } else {
+        setTransitionResult({ result: true });
+      }
+    }
+    setIsTransitionModalOpen(true);
+  };
 
   // Load from Forge backend on mount
   useEffect(() => {
@@ -292,6 +315,7 @@ export const App: React.FC = () => {
         onToggleView={setActiveView}
         onSeed={handleSeed}
         onOpenExport={() => setIsExportOpen(true)}
+        onTestTransition={handleTestTransition}
         isSeeding={isSeeding}
       />
 
@@ -316,6 +340,13 @@ export const App: React.FC = () => {
       {isExportOpen && (
         <FdaExportModal summary={summary} onClose={() => setIsExportOpen(false)} />
       )}
+
+      {/* Jira Transition Safety Gate Live Intercept Modal */}
+      <TransitionModal
+        isOpen={isTransitionModalOpen}
+        onClose={() => setIsTransitionModalOpen(false)}
+        result={transitionResult}
+      />
     </div>
   );
 };

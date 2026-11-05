@@ -129,7 +129,7 @@ export const LineageGraph: React.FC<LineageGraphProps> = ({ summary, onSelectTra
   }, [summary]);
 
   return (
-    <div style={{ height: '560px', width: '100%', position: 'relative', background: '#fafbfc', borderRadius: 8, border: '1px solid #ebecf0' }}>
+    <div style={{ height: 'calc(100vh - 220px)', minHeight: '580px', width: '100%', position: 'relative', background: '#fafbfc', borderRadius: 8, border: '1px solid #ebecf0' }}>
       {/* Column Stage Headers */}
       <div
         style={{

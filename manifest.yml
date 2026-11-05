@@ -15,14 +15,12 @@ modules:
   jira:workflowValidator:
     - key: medtrace-safety-validator
       name: MedTrace IEC 62304 Safety Gate
-      description: Validates full bidirectional verification and 21 CFR Part 11
-        signatures before transitioning Jira issues to Done.
+      description: Validates full bidirectional verification and 21 CFR Part 11 signatures before transitioning Jira issues to Done.
       function: workflow-validator-fn
   rovo:agent:
     - key: medtrace-regulatory-auditor
       name: MedTrace Auditor
-      description: AI regulatory compliance officer auditing IEC 62304 traceability
-        and ISO 14971 risk mitigations.
+      description: AI regulatory compliance officer auditing IEC 62304 traceability and ISO 14971 risk mitigations.
       prompt: |
         You are the MedTrace Regulatory Compliance Officer. You enforce IEC 62304 (Medical Device Software Life Cycle Processes), ISO 14971 (Application of Risk Management to Medical Devices), and FDA 21 CFR Part 11 (Electronic Signatures).
         When the user asks you to audit an issue, component, or sprint:
@@ -40,14 +38,12 @@ modules:
   action:
     - key: get-hazard-lineage-action
       name: Get Hazard Lineage
-      description: Retrieves complete ISO 14971 hazard safety lineage, linked
-        Confluence SRS specifications, and verification test status.
+      description: Retrieves complete ISO 14971 hazard safety lineage, linked Confluence SRS specifications, and verification test status.
       actionVerb: GET
       function: rovo-action-fn
     - key: verify-iec-compliance-action
       name: Verify IEC Compliance
-      description: Checks compliance status against IEC 62304 and FDA 21 CFR Part 11
-        rules, returning broken links or signature drift.
+      description: Checks compliance status against IEC 62304 and FDA 21 CFR Part 11 rules, returning broken links or signature drift.
       actionVerb: GET
       function: rovo-action-fn
   rovo:mcp:
@@ -56,6 +52,9 @@ modules:
       tools:
         - get-hazard-lineage-action
         - verify-iec-compliance-action
+  webtrigger:
+    - key: mcp-sync-webtrigger
+      function: mcp-webtrigger-fn
   function:
     - key: resolver-fn
       handler: index.resolverHandler
@@ -63,6 +62,8 @@ modules:
       handler: index.workflowValidatorHandler
     - key: rovo-action-fn
       handler: index.rovoActionHandler
+    - key: mcp-webtrigger-fn
+      handler: index.mcpWebtriggerHandler
 resources:
   - key: main
     path: static/frontend/dist

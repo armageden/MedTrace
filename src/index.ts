@@ -16,7 +16,7 @@ resolver.define('seedDemoSuite', async () => {
   return await SeederService.seedEnterpriseDemoSuite();
 });
 
-// 3. Remediate Class C Gap (1-Click fix simulation)
+// 3. Remediate Class C Gap (Hero demo fix simulation)
 resolver.define('remediateGap', async () => {
   return await SeederService.remediateClassCGap();
 });
@@ -26,6 +26,61 @@ resolver.define('queryGraphContext', async (req) => {
   const issueKey = req.payload?.issueKey || 'HAZ-101';
   return await TeamworkGraphService.queryIssueGraphContext(issueKey);
 });
+
+// 5. Simulate Jira Release Transition / Safety Gate Check
+resolver.define('simulateTransition', async () => {
+  return await workflowValidatorHandler({ transition: 'Done' });
+});
+
+/**
+ * Webtrigger for real-time 2-way sync with local MCP Server (Cursor / Claude Desktop)
+ * Allows local AI IDE agents to fetch live compliance state directly from deployed Forge KVS!
+ */
+export async function mcpWebtriggerHandler(request: any): Promise<any> {
+  console.log('[MedTrace MCP Webtrigger] Handling external MCP sync request:', request?.method);
+
+  try {
+    // If request contains action payload to remediate
+    if (request?.method === 'POST') {
+      let body: any = {};
+      try {
+        body = JSON.parse(request.body || '{}');
+      } catch {}
+
+      if (body.action === 'remediate') {
+        const updated = await SeederService.remediateClassCGap();
+        return {
+          body: JSON.stringify({ success: true, summary: updated }),
+          headers: {
+            'Content-Type': ['application/json'],
+            'Access-Control-Allow-Origin': ['*'],
+          },
+          statusCode: 200,
+        };
+      }
+    }
+
+    // Default GET: return live compliance suite
+    const suite = await SeederService.getActiveComplianceSuite();
+    return {
+      body: JSON.stringify(suite),
+      headers: {
+        'Content-Type': ['application/json'],
+        'Access-Control-Allow-Origin': ['*'],
+      },
+      statusCode: 200,
+    };
+  } catch (err: any) {
+    return {
+      body: JSON.stringify({ error: err?.message || 'Failed to fetch MCP state' }),
+      headers: {
+        'Content-Type': ['application/json'],
+        'Access-Control-Allow-Origin': ['*'],
+      },
+      statusCode: 500,
+    };
+  }
+}
 
 // Export handlers matching manifest.yml functions
 export const resolverHandler = resolver.getDefinitions();
