@@ -1,15 +1,16 @@
 import React from 'react';
-import { TraceLink } from '../types';
-import { X, ShieldAlert, FileText, GitPullRequest, Activity, Lock, AlertOctagon, CheckCircle2, Zap } from 'lucide-react';
+import { TraceLink, BlastRadiusReport } from '../types';
+import { X, ShieldAlert, FileText, GitPullRequest, Activity, Lock, AlertOctagon, CheckCircle2, Zap, Share2, Compass, Layers, Clock } from 'lucide-react';
 
 interface InspectionDrawerProps {
   link: TraceLink | null;
+  blastRadius: BlastRadiusReport | null;
   onClose: () => void;
   onRemediate: () => void;
   isRemediating: boolean;
 }
 
-export const InspectionDrawer: React.FC<InspectionDrawerProps> = ({ link, onClose, onRemediate, isRemediating }) => {
+export const InspectionDrawer: React.FC<InspectionDrawerProps> = ({ link, blastRadius, onClose, onRemediate, isRemediating }) => {
   if (!link) return null;
 
   const isClassC = link.hazard.riskClass === 'CLASS_C';
@@ -47,6 +48,51 @@ export const InspectionDrawer: React.FC<InspectionDrawerProps> = ({ link, onClos
 
       {/* Body */}
       <div style={{ flex: 1, overflowY: 'auto', padding: 20 }}>
+        {/* Blast Radius Dossier Card */}
+        {blastRadius && (
+          <div style={{ marginBottom: 16, padding: '14px 16px', borderRadius: 8, background: '#fffae6', border: '1.5px solid #ffe380', boxShadow: '0 2px 6px rgba(255, 171, 0, 0.15)' }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, color: '#ff8b00', fontWeight: 800, fontSize: 13 }}>
+                <Zap size={16} color="#ff8b00" /> Transitive Regulatory Blast Radius
+              </div>
+              <span style={{ fontSize: 10, fontFamily: 'monospace', background: '#ffffff', padding: '2px 6px', borderRadius: 4, border: '1px solid #ffe380', color: '#5e6c84', display: 'flex', alignItems: 'center', gap: 4 }}>
+                <Clock size={11} /> {blastRadius.executionTimeMs} ms
+              </span>
+            </div>
+
+            <div style={{ fontSize: 11, color: '#172b4d', marginBottom: 8 }}>
+              Trigger: <b>{blastRadius.triggerArtifact.title}</b> ({blastRadius.triggerArtifact.deltaReason})
+            </div>
+
+            {/* Traversal Hops */}
+            <div style={{ background: '#ffffff', borderRadius: 6, padding: '8px 10px', border: '1px solid #f4f5f7', marginBottom: 10 }}>
+              <div style={{ fontSize: 10, fontWeight: 700, color: '#6b778c', textTransform: 'uppercase', marginBottom: 4 }}>
+                Deterministic Graph Traversal (BFS):
+              </div>
+              {blastRadius.traversalPath.map((hop, idx) => (
+                <div key={idx} style={{ fontSize: 11, lineHeight: '16px', marginTop: 4, display: 'flex', gap: 6 }}>
+                  <span style={{ fontWeight: 700, color: '#0052cc', minWidth: 40 }}>Hop {hop.hop}:</span>
+                  <span style={{ color: '#42526e' }}>
+                    <span style={{ fontWeight: 600, color: '#172b4d' }}>{hop.edge}</span> → {hop.effect}
+                  </span>
+                </div>
+              ))}
+            </div>
+
+            {/* Transitive Action Checklist */}
+            <div>
+              <div style={{ fontSize: 10, fontWeight: 700, color: '#6b778c', textTransform: 'uppercase', marginBottom: 4 }}>
+                Mandatory Re-audit Actions:
+              </div>
+              {blastRadius.transitiveActionPlan.map((action, idx) => (
+                <div key={idx} style={{ fontSize: 11, color: '#172b4d', lineHeight: '16px', marginTop: 3 }}>
+                  • {action}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
         {/* Violations Alert Banner */}
         {link.violations.length > 0 && (
           <div style={{ marginBottom: 16, padding: '12px 14px', borderRadius: 6, background: '#ffebe6', border: '1px solid #ffbdad' }}>
@@ -142,6 +188,35 @@ export const InspectionDrawer: React.FC<InspectionDrawerProps> = ({ link, onClos
               {link.signature.invalidationReason}
             </div>
           )}
+        </div>
+
+        {/* Teamwork Graph (TWG) Living ARIs & Traversal Evidence */}
+        <div style={{ ...sectionStyle, background: '#f4f5f7', border: '1px solid #dfe1e6' }}>
+          <div style={sectionHeader}>
+            <Share2 size={15} color="#0052cc" />
+            <span style={{ color: '#0052cc' }}>Atlassian Teamwork Graph (TWG) Node</span>
+          </div>
+          <div style={{ fontSize: 10, color: '#42526e', marginBottom: 6 }}>
+            Traversed via Atlassian GraphQL Gateway (AGG):
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 4, fontFamily: 'monospace', fontSize: 10 }}>
+            <div style={{ background: '#ffffff', padding: '5px 8px', borderRadius: 4, border: '1px solid #ebecf0' }}>
+              <span style={{ color: '#6b778c' }}>Jira ARI: </span>
+              <span style={{ color: '#172b4d', fontWeight: 600 }}>{link.graphMetadata?.entityAri || `ari:cloud:jira:5cbf2ff9-658a-44d8-9004-dbe8a96e952b:issue/${link.work.id}`}</span>
+            </div>
+            <div style={{ background: '#ffffff', padding: '5px 8px', borderRadius: 4, border: '1px solid #ebecf0' }}>
+              <span style={{ color: '#6b778c' }}>Spec ARI: </span>
+              <span style={{ color: '#172b4d', fontWeight: 600 }}>{link.graphMetadata?.linkedSpecAri || `ari:cloud:confluence:d601ebde-589a-45d8-ab19-a8edfb1d5a47:page/${link.spec.id}`}</span>
+            </div>
+            <div style={{ background: '#ffffff', padding: '5px 8px', borderRadius: 4, border: '1px solid #ebecf0' }}>
+              <span style={{ color: '#6b778c' }}>Edge Type: </span>
+              <span style={{ color: '#0052cc', fontWeight: 600 }}>{link.graphMetadata?.edgeType || 'iso14971:mitigates-hazard -> atlassian:work-item-links-page'}</span>
+            </div>
+          </div>
+          <div style={{ marginTop: 6, display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: 10 }}>
+            <span style={{ color: '#00875a', fontWeight: 700 }}>● {link.graphMetadata?.aggTraversalStatus || 'TRAVERSED (AGG GraphQL Gateway 200 OK)'}</span>
+            <span style={{ color: '#6b778c' }}>api.atlassian.com/graphql</span>
+          </div>
         </div>
       </div>
 

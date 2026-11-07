@@ -54,6 +54,13 @@ export interface Part11Signature {
   invalidationReason?: string;
 }
 
+export interface GraphMetadata {
+  entityAri: string;
+  linkedSpecAri: string;
+  edgeType: string;
+  aggTraversalStatus: string;
+}
+
 export interface TraceLink {
   id: string;
   hazard: IsoHazard;
@@ -63,6 +70,7 @@ export interface TraceLink {
   signature: Part11Signature;
   complianceState: 'VERIFIED' | 'SAFETY_VIOLATION' | 'SIGNATURE_DRIFT' | 'INCOMPLETE';
   violations: string[];
+  graphMetadata?: GraphMetadata;
 }
 
 export interface ComplianceSummary {
@@ -78,4 +86,28 @@ export interface ComplianceSummary {
   signatureDriftCount: number;
   traceLinks: TraceLink[];
   lastAuditTimestamp: string;
+}
+
+export interface BlastRadiusReport {
+  triggerArtifact: {
+    type: 'HAZARD' | 'SPEC' | 'WORK' | 'TEST' | 'SIGNATURE';
+    id: string;
+    key: string;
+    title: string;
+    deltaReason: string;
+  };
+  impactSeverity: 'CRITICAL_CATASTROPHIC' | 'MAJOR_SERIOUS' | 'MINOR';
+  affectedHazardKeys: string[];
+  blockedWorkItemKeys: string[];
+  invalidatedTestKeys: string[];
+  invalidatedSignatureIds: string[];
+  traversalPath: {
+    hop: number;
+    from: string;
+    edge: 'MITIGATES' | 'IMPLEMENTS' | 'VERIFIES' | 'SIGNS';
+    to: string;
+    effect: string;
+  }[];
+  transitiveActionPlan: string[];
+  executionTimeMs: number;
 }

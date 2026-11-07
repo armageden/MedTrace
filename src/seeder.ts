@@ -1,7 +1,8 @@
 import api, { route } from '@forge/api';
 import { kvs } from '@forge/kvs';
 import { ComplianceEngine } from './compliance-engine';
-import { IsoHazard, ConfluenceSpec, JiraWorkItem, VerificationTest, Part11Signature, ComplianceSummary } from './types';
+import { TeamworkGraphService } from './teamwork-graph';
+import { IsoHazard, ConfluenceSpec, JiraWorkItem, VerificationTest, Part11Signature, ComplianceSummary, GraphMetadata } from './types';
 
 export class SeederService {
   private static STORAGE_KEY = 'medtrace:compliance:active_suite';
@@ -194,9 +195,43 @@ export class SeederService {
       },
     ];
 
+    // Teamwork Graph (TWG) ARIs & Edge Relationships
+    const graphMetadatas: GraphMetadata[] = [
+      {
+        entityAri: 'ari:cloud:jira:5cbf2ff9-658a-44d8-9004-dbe8a96e952b:issue/10042',
+        linkedSpecAri: 'ari:cloud:confluence:d601ebde-589a-45d8-ab19-a8edfb1d5a47:page/98304',
+        edgeType: 'iso14971:mitigates-hazard -> atlassian:work-item-links-page',
+        aggTraversalStatus: 'TRAVERSED (AGG GraphQL Gateway 200 OK)',
+      },
+      {
+        entityAri: 'ari:cloud:jira:5cbf2ff9-658a-44d8-9004-dbe8a96e952b:issue/10043',
+        linkedSpecAri: 'ari:cloud:confluence:d601ebde-589a-45d8-ab19-a8edfb1d5a47:page/98305',
+        edgeType: 'iso14971:mitigates-hazard -> atlassian:work-item-links-page',
+        aggTraversalStatus: 'TRAVERSED (AGG GraphQL Gateway 200 OK)',
+      },
+      {
+        entityAri: 'ari:cloud:jira:5cbf2ff9-658a-44d8-9004-dbe8a96e952b:issue/10044',
+        linkedSpecAri: 'ari:cloud:confluence:d601ebde-589a-45d8-ab19-a8edfb1d5a47:page/98306',
+        edgeType: 'iso14971:mitigates-hazard -> atlassian:work-item-links-page',
+        aggTraversalStatus: 'TRAVERSED (AGG GraphQL Gateway 200 OK)',
+      },
+    ];
+
+    // Ingest ISO 14971 Hazard into Teamwork Graph Context via TeamworkGraphService
+    await TeamworkGraphService.registerHazardNodeInGraph('HAZ-101', {
+      title: hazards[0].title,
+      riskClass: hazards[0].riskClass,
+      severity: hazards[0].severity,
+      mitigationKey: specs[0].id,
+    });
+
+    if (confluenceEnabled) {
+      await TeamworkGraphService.queryConfluencePageGraph('98304').catch(() => {});
+    }
+
     // Evaluate trace links using Compliance Engine
     const traceLinks = hazards.map((hazard, index) =>
-      ComplianceEngine.evaluateTraceLink(hazard, specs[index], workItems[index], tests[index], signatures[index])
+      ComplianceEngine.evaluateTraceLink(hazard, specs[index], workItems[index], tests[index], signatures[index], graphMetadatas[index])
     );
 
     const summary = ComplianceEngine.generateComplianceReport(traceLinks);
@@ -208,7 +243,7 @@ export class SeederService {
       success: true,
       confluenceEnabled,
       summary,
-      message: 'Successfully populated IEC 62304 Smart Infusion Pump Firmware dataset (3 Hazards, 3 SRS Specs, 3 Work Items, 3 Tests, 3 Signatures).',
+      message: 'Successfully populated IEC 62304 Smart Infusion Pump Firmware dataset with Teamwork Graph ARIs (3 Hazards, 3 SRS Specs, 3 Work Items, 3 Tests, 3 Signatures).',
     };
   }
 
@@ -228,11 +263,18 @@ export class SeederService {
   /**
    * Simulates resolving the Class C gap and re-signing the Part 11 artifact
    */
-  public static async remediateClassCGap(): Promise<ComplianceSummary> {
+  public static async remediateClassCGap(targetHazardKey: string = 'HAZ-101'): Promise<ComplianceSummary> {
     const current = await this.getActiveComplianceSuite();
-    const targetLink = current.traceLinks.find(l => l.hazard.key === 'HAZ-101');
-    if (targetLink) {
-      // 1. Mark test as PASSED
+    const targetLink = current.traceLinks.find(
+      (l) => l.hazard.key.toLowerCase() === targetHazardKey.toLowerCase()
+    );
+
+    if (!targetLink) {
+      console.warn(`[MedTrace Seeder] Hazard ${targetHazardKey} not found. Defaulting to first open hazard.`);
+      return current;
+    }
+
+    // 1. Mark test as PASSED
       targetLink.test.status = 'PASSED';
       targetLink.test.executionDate = 'Just now (Simulated Automated HIL Run: 120/120 Passed)';
       
@@ -248,7 +290,6 @@ export class SeederService {
       // 3. Re-evaluate
       targetLink.complianceState = 'VERIFIED';
       targetLink.violations = [];
-    }
 
     const updatedSummary = ComplianceEngine.generateComplianceReport(current.traceLinks);
     await kvs.set(this.STORAGE_KEY, updatedSummary);

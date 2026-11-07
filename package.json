@@ -5,7 +5,9 @@
   "main": "src/index.ts",
   "scripts": {
     "build": "tsc",
-    "lint": "forge lint"
+    "lint": "forge lint",
+    "test": "node --test tests/*.test.cjs",
+    "docs:check": "node scripts/docs-check.mjs"
   },
   "dependencies": {
     "@forge/api": "^5.1.0",
