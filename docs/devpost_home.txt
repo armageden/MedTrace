@@ -1,0 +1,433 @@
+
+
+ Codegeist 2026: Build with context. Ship with confidence.: Build on Forge, extend Atlassian products, and turn connected context into powerful new apps for teams — win your share of $120K. - Devpost
+
+ Log in
+
+ Sign up
+
+ Join a hackathon
+
+Devpost
+
+Participate in our public hackathons
+
+ Hackathons 
+
+ Projects 
+
+Devpost for Teams
+
+Access your company's private hackathons
+
+ Login 
+
+ Host a hackathon
+
+Devpost
+
+Grow your developer ecosystem and promote your platform
+
+ Host a public hackathon 
+
+Devpost for Teams
+
+Drive innovation, collaboration, and retention within your organization
+
+ Host an internal hackathon 
+
+By use case
+
+ AI hackathons 
+
+ Customer hackathons 
+
+ Employee hackathons 
+
+ Public hackathons 
+
+ Resources
+
+ Blog
+
+ Insights into hackathon planning and participation
+
+ Customer stories
+
+ Inspiration from peers and other industry leaders
+
+ Planning guides
+
+ Best practices for planning online and in-person hackathons
+
+ Webinars & events
+
+ Upcoming events and on-demand recordings
+
+ Help desk
+
+ Common questions and support documentation
+
+ Join a hackathon
+
+Devpost
+
+Participate in our public hackathons
+
+ Hackathons 
+
+ Projects 
+
+Devpost for Teams
+
+Access your company's private hackathons
+
+ Login 
+
+ Host a hackathon
+
+Devpost
+
+Grow your developer ecosystem and promote your platform
+
+ Host a public hackathon 
+
+Devpost for Teams
+
+Drive innovation, collaboration, and retention within your organization
+
+ Host an internal hackathon 
+
+By use case
+
+ AI hackathons 
+
+ Customer hackathons 
+
+ Employee hackathons 
+
+ Public hackathons 
+
+ Resources
+
+ Blog
+
+ Insights into hackathon planning and participation
+
+ Customer stories
+
+ Inspiration from peers and other industry leaders
+
+ Planning guides
+
+ Best practices for planning online and in-person hackathons
+
+ Webinars & events
+
+ Upcoming events and on-demand recordings
+
+ Help desk
+
+ Common questions and support documentation
+
+ Log in
+
+ Sign up
+
+ Codegeist 2026: Build with context. Ship with confidence.
+
+ Deadline: Dec 22, 2026 @ 12:00pm PST
+
+ Join hackathon
+
+ Descend
+
+Overview
+
+ My projects
+
+Participants (707)
+
+Resources
+
+Rules
+
+ Project gallery
+
+ Updates
+
+ Discussions
+
+Codegeist 2026: Build with context. Ship with confidence.
+
+Build on Forge, extend Atlassian products, and turn connected context into powerful new apps for teams — win your share of $120K.
+
+ Join hackathon
+
+ Who can participate
+
+Above legal age of majority in country of residence
+
+ Specific
+ countries/territories excluded 
+
+ ×
+
+Specific countries/territories excluded
+
+Belarus
+
+Brazil
+
+Crimea
+
+Cuba
+
+Iran Islamic Republic of
+
+Korea Democratic People's Republic of
+
+Myanmar
+
+Quebec
+
+Russia
+
+Sudan
+
+Syrian Arab Republic
+
+No countries/territories match your search.
+
+ View full rules
+
+ December 22 at 3:00pm EST to deadline
+
+ View schedule
+
+ Deadline: Dec 22, 2026 @ 12:00pm PST
+
+ Apple
+
+ Google
+
+ Outlook
+
+ Online
+
+ Public
+
+ $120,000 in cash
+
+ 707
+ participants
+
+ Atlassian
+
+ Managed by Devpost
+
+ Machine Learning/AI
+
+ Enterprise
+
+ Productivity
+
+What is Codegeist? 
+
+Codegeist is Atlassian’s annual hackathon where developers from around the world unleash creativity on Forge, Atlassian’s serverless app development platform. By extending Atlassian products with custom apps and integrations, participants reimagine how teams plan, track, and deliver work. 
+
+The Challenge 
+
+AI can think. But knowing what to do – really knowing – takes context. Atlassian’s Teamwork Graph connects goals, work, people, decisions, and outcomes like associative memory for your organization, giving teams the shared understanding of who’s doing what, what’s already been decided, and what needs to happen next. 
+
+That's the problem Atlassian is built to solve. And it's the problem we're inviting you to tackle. 
+
+Build an app on Atlassian’s Forge platform that uses that context to help teams ship with confidence – whether that’s surfacing the right knowledge at the right moment, connecting work across silos, or turning organizational data into a decision that actually moves work forward. 
+
+ Requirements
+
+What to Build
+
+Build an app using Atlassian’s Forge platform and integrate with at least one Atlassian product or platform capability (Jira, Confluence, Jira Service Management, Bitbucket, Teamwork Graph, Rovo) in one of the following categories.
+
+Categories
+
+Apps for Software Teams: Give dev teams the context to ship with confidence. Think smarter code reviews, deployment awareness, issue triage that actually understands what matters. 
+
+Apps for Business Teams: Give business teams the context to act decisively. Help colleagues in marketing, sales, HR, finance, support, or legal move faster with the right information in front of them. 
+
+Apps for Specialized Industries: Give experts in healthcare, finance, manufacturing, automotive, or other fields the context to do their best work. Turn insider knowledge into solutions built for your world.
+
+Bonus Prizes
+
+6 Best Agents - Rovo/Assignable agents: $1500 to 6 projects that use a Forge app including the rovo:agent module, the rovo:agentConnector module, or apps with reusable rovo:skill and rovo:action modules that other agents can invoke as tools. 
+
+6 Best app with Atlassian MCP: $1500 to 6 projects that use a Forge app exposing an MCP server.
+
+6 Best apps with Teamwork Graph integration: $1500 to 6 projects that connects data into the graph and/or consumes data from the TWG API.
+
+6 Best Marketplace published app: $1500 to 6 projects that must be published to the Marketplace or submitted for listing. Provide either the link to the listing or link to the Marketplace review ticket.
+
+What to Submit
+
+Access. Provide access and include all necessary instructions to an installation link for the judges and review team to test your application. To create an installation link, follow the instructions to Start sharing your app.
+
+Demo Video. Include a video (under 5 minutes) that demonstrates your project and any relevant bonus prize specifics. Videos must be uploaded to YouTube and made public.
+
+Category. Identify which category and bonus prizes you are submitting to. Provide any necessary materials for the bonus prizes.
+
+Explanation. Describe how your project meets the main technology requirement. 
+
+Submit. Before the deadline, complete the entire submission form on Devpost.
+
+ Hackathon Sponsors
+
+ Prizes
+
+$120,000+ in prizes
+
++ other prizes
+
+ 1st Place
+
+ $15,000 in cash
+
+ 3 winners
+
+• $15,000 USD
+• 2 tickets per winning team to Team 2027 (AMER) for first-place winners (travel not included)
+• Recognition on Atlassian’s blog
+• Signed limited edition Atlassian Williams Racing swag 
+
+ 2nd Place
+
+ $8,000 in cash
+
+ 3 winners
+
+• $8,000 USD
+• Opportunity to be featured on the winner announcement on the Atlassian blog
+
+ 3rd Place
+
+ $5,000 in cash
+
+ 3 winners
+
+• $5,000 USD
+• Opportunity to be featured on the winner announcement on the Atlassian blog
+
+ Best Agents - Rovo/Assignable agents
+
+ $1,500 in cash
+
+ 6 winners
+
+ Best app with Atlassian MCP
+
+ $1,500 in cash
+
+ 6 winners
+
+ Best apps with Teamwork Graph integration
+
+ $1,500 in cash
+
+ 6 winners
+
+ Best Marketplace published app
+
+ $1,500 in cash
+
+ 6 winners
+
+ Participation Prize
+
+ 300 winners
+
+• Atlassian Developer Swag Pack - Awarded on a first-come, first-serve basis to Entrants of Eligible Submissions, including participating members of a Team or Organization, while supplies last (max 4 per Submission)
+
+ Devpost Achievements
+
+Submitting to this hackathon could earn you:
+
+ Judges
+
+ A qualified panel of judges
+
+ Judging Criteria
+
+ Technological Implementation - 20%
+ How thoroughly and skillfully does the project use the Atlassian’s Forge platform and at least one Atlassian product or platform capability? Does the project reflect genuine effort and a working, non-trivial implementation?
+
+ Design - 20%
+ Does the project deliver a complete, coherent product experience — not just a technical proof of concept?
+
+ Potential Impact - 20%
+ Does the project make a credible, specific case for solving a real problem for a real audience — and does the solution actually address that problem based on what's demonstrated?
+
+ Innovation/Idea - 20%
+ How creative and novel is the concept and does the project differ from existing concepts?
+
+ Presentation - 20%
+ Does the video clearly demonstrate the project working end-to-end? Does the pitch communicate what problem is solved, who it's for, and why it matters? Is the overall presentation easy to follow?
+
+ Questions?
+ Email the hackathon manager
+
+ Invite others to compete
+
+ This site is protected by reCAPTCHA and the Google
+ Privacy Policy and
+ Terms of Service apply.
+
+Devpost
+
+About
+
+Careers
+
+Contact
+
+Help
+
+Hackathons
+
+Browse hackathons
+
+Explore projects
+
+Host a hackathon
+
+Hackathon guides
+
+Portfolio
+
+Your projects
+
+Your hackathons
+
+Settings
+
+Connect
+
+ Twitter
+
+ Discord
+
+ Facebook
+
+ LinkedIn
+
+© 2026 Devpost, Inc. All rights reserved.
+
+Community guidelines
+
+Security
+
+CA notice
+
+Privacy policy
+
+Terms of service
+

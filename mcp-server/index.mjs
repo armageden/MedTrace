@@ -7,6 +7,7 @@
  */
 
 import readline from 'readline';
+import crypto from 'node:crypto';
 
 const rl = readline.createInterface({
   input: process.stdin,
@@ -16,6 +17,7 @@ const rl = readline.createInterface({
 
 const SERVER_NAME = 'medtrace-mcp-server';
 const SERVER_VERSION = '1.0.0';
+const MCP_SECRET = process.env.MEDTRACE_MCP_SECRET || 'medtrace-sec-2026';
 
 // Live Production Webtrigger endpoint on Atlassian Cloud
 const FORGE_WEBTRIGGER_URL =
@@ -29,7 +31,10 @@ async function fetchLiveComplianceState() {
   try {
     const resp = await fetch(FORGE_WEBTRIGGER_URL, {
       method: 'GET',
-      headers: { 'Accept': 'application/json' },
+      headers: {
+        'Accept': 'application/json',
+        'x-medtrace-key': MCP_SECRET,
+      },
       signal: AbortSignal.timeout(4000), // 4s timeout
     });
     if (resp.ok) {
@@ -47,10 +52,19 @@ async function fetchLiveComplianceState() {
  */
 async function postCloudRemediation(hazardKey) {
   try {
+    const timestamp = Date.now().toString();
+    const payload = JSON.stringify({ action: 'remediate', hazardKey });
+    const signature = crypto.createHmac('sha256', MCP_SECRET).update(`${timestamp}.${payload}`).digest('hex');
+
     const resp = await fetch(FORGE_WEBTRIGGER_URL, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action: 'remediate', hazardKey }),
+      headers: {
+        'Content-Type': 'application/json',
+        'x-medtrace-key': MCP_SECRET,
+        'x-medtrace-timestamp': timestamp,
+        'x-medtrace-signature': `sha256=${signature}`,
+      },
+      body: payload,
       signal: AbortSignal.timeout(4000),
     });
     if (resp.ok) {
@@ -211,13 +225,27 @@ async function handleMessage(message) {
     }
 
     if (name === 'medtrace_verify_iec_compliance') {
-      const prDiff = args?.prDiff || '';
+      const prDiff = (args?.prDiff || '').toLowerCase();
       const touchesBolus =
-        prDiff.includes('bolus') || prDiff.includes('flow') || prDiff.includes('dose') || prDiff.includes('5.5');
+        prDiff.includes('bolus') || prDiff.includes('flow') || prDiff.includes('dose') || prDiff.includes('5.5') ||
+        prDiff.includes('pwm') || prDiff.includes('clamp') || prDiff.includes('motor');
+      const touchesDroplet =
+        prDiff.includes('droplet') || prDiff.includes('sensor') || prDiff.includes('stall') || prDiff.includes('photodiode');
+      const touchesPower =
+        prDiff.includes('oled') || prDiff.includes('battery') || prDiff.includes('voltage') || prDiff.includes('spi');
 
       const isBlocked = liveSuite ? liveSuite.releaseBlocked : true;
       const verifiedPct = liveSuite ? liveSuite.verifiedPercentage : 67;
       const violations = liveSuite ? liveSuite.blockingReasons : [];
+
+      let safetyWarning = 'Normal inspection: no unmitigated Class C hazard triggered.';
+      if (touchesBolus && isBlocked) {
+        safetyWarning = '⚠️ CRITICAL REGULATORY LOCKOUT: Diff modifies bolus delivery logic governed by ISO 14971 Class C Hazard HAZ-101. Confluence spec modified without re-certification and TEST-88 is UNTESTED. Merge is physically blocked!';
+      } else if (touchesDroplet) {
+        safetyWarning = 'ℹ️ ISO 14971 Class B Scope: Diff modifies optical droplet sensing routine governed by HAZ-102. Verification test TEST-89 required.';
+      } else if (touchesPower) {
+        safetyWarning = 'ℹ️ ISO 14971 Class A Scope: Diff modifies display/power rail routine governed by HAZ-103.';
+      }
 
       return {
         jsonrpc: '2.0',
@@ -236,10 +264,13 @@ async function handleMessage(message) {
                   ],
                   releaseGateStatus: isBlocked ? '🚨 BLOCKED BY JIRA SAFETY GATE' : '✅ 510(k) AUTHORIZED',
                   verifiedCoverage: `${verifiedPct}%`,
-                  touchesSafetyCriticalCode: touchesBolus,
-                  safetyWarning: touchesBolus && isBlocked
-                    ? '⚠️ CRITICAL REGULATORY LOCKOUT: Diff modifies bolus delivery logic governed by ISO 14971 Class C Hazard HAZ-101. Confluence spec modified without re-certification and TEST-88 is UNTESTED. Merge is physically blocked!'
-                    : 'Normal inspection: no unmitigated Class C hazard triggered.',
+                  touchesSafetyCriticalCode: touchesBolus || touchesDroplet,
+                  affectedHazards: [
+                    touchesBolus ? 'HAZ-101 (Class C)' : null,
+                    touchesDroplet ? 'HAZ-102 (Class B)' : null,
+                    touchesPower ? 'HAZ-103 (Class A)' : null,
+                  ].filter(Boolean),
+                  safetyWarning,
                   activeViolations: violations,
                 },
                 null,

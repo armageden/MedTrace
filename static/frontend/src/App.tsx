@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { invoke } from '@forge/bridge';
-import { ComplianceSummary } from './types';
+import { ComplianceSummary, BlastRadiusReport } from './types';
 import { AuditHeader } from './components/AuditHeader';
 import { LineageGraph } from './components/LineageGraph';
 import { TraceMatrixTable } from './components/TraceMatrixTable';
@@ -16,15 +16,14 @@ const fallbackSummary: ComplianceSummary = {
     'ISO 14971:2019 (Risk Management for Medical Devices)',
     'FDA 21 CFR Part 11 (Electronic Records & Signatures)',
   ],
-  totalHazards: 3,
+  totalHazards: 1,
   classCCount: 1,
-  classBCount: 1,
-  classACount: 1,
-  verifiedPercentage: 67,
+  classBCount: 0,
+  classACount: 0,
+  verifiedPercentage: 0,
   releaseBlocked: true,
   blockingReasons: [
     'IEC 62304 Critical Gap: Class C Hazard [HAZ-101] requires verified test coverage. Current test [TEST-88] status is UNTESTED.',
-    '21 CFR Part 11 Signature Drift: Confluence Spec [SRS-104: Dual-Core Microcontroller Hardware Bolus Clamp (Max 5.0 mL/hr)] was modified after clinical sign-off.',
   ],
   signatureDriftCount: 1,
   lastAuditTimestamp: new Date().toISOString(),
@@ -84,109 +83,11 @@ const fallbackSummary: ComplianceSummary = {
         isValid: false,
         invalidationReason: 'AUTOMATIC REVOCATION: Confluence spec modified at version 3 without clinical re-signature.',
       },
-    },
-    {
-      id: 'trace-HAZ-102',
-      complianceState: 'VERIFIED',
-      violations: [],
-      hazard: {
-        id: 'haz-102',
-        key: 'HAZ-102',
-        title: 'Under-Infusion Hazard: Unintended pump stall leading to severe hypoglycemia',
-        riskClass: 'CLASS_B',
-        severity: 'CRITICAL',
-        probability: 'REMOTE',
-        mitigationRequirementId: 'srs-105',
-        status: 'MITIGATED',
-      },
-      spec: {
-        id: 'srs-105',
-        title: 'SRS-105: Optical Droplet Sensor Real-Time Flow Rate Verification',
-        version: 2,
-        sha256Hash: 'b45c22998fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b333',
-        lastSignedHash: 'b45c22998fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b333',
-        isSignatureInvalidated: false,
-        contentSnippet: 'Clause 4.3.5: Dual IR photodiodes calculate basal drop count every 250 milliseconds.',
-        lastUpdated: '2 days ago',
-      },
-      work: {
-        id: 'med-43',
-        key: 'MED-43',
-        title: 'Integrate Optical Droplet Sensor Interrupt Routine',
-        status: 'Done',
-        assignee: 'David Chen (Embedded Systems)',
-        prNumber: '#139',
-        commitSha: '3a4b981',
-      },
-      test: {
-        id: 'test-89',
-        testKey: 'TEST-89',
-        title: 'Closed-Loop Droplet Pulse Waveform Verification',
-        testType: 'Integration Test',
-        status: 'PASSED',
-        executionDate: 'Yesterday 14:22 UTC (48/48 Assertions Passed)',
-        evidenceUrl: 'https://ci.medical-devices.internal/test-runs/droplet-89',
-      },
-      signature: {
-        id: 'sig-002',
-        signedBy: 'Rachel Adams (Director of Regulatory Affairs)',
-        signedAt: '2026-10-20T16:45:00Z',
-        role: 'Quality Assurance Director',
-        meaning: 'IEC 62304 Software Verification Plan Approval',
-        artifactSha256: 'b45c22998fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b333',
-        isValid: true,
-      },
-    },
-    {
-      id: 'trace-HAZ-103',
-      complianceState: 'VERIFIED',
-      violations: [],
-      hazard: {
-        id: 'haz-103',
-        key: 'HAZ-103',
-        title: 'Display Transient Glitch: OLED backlight flicker during emergency battery cutover',
-        riskClass: 'CLASS_A',
-        severity: 'MINOR',
-        probability: 'OCCASIONAL',
-        mitigationRequirementId: 'srs-106',
-        status: 'MITIGATED',
-      },
-      spec: {
-        id: 'srs-106',
-        title: 'SRS-106: Power Management Rail Glitch Filter & OLED Retention',
-        version: 1,
-        sha256Hash: 'c67d33998fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b444',
-        lastSignedHash: 'c67d33998fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b444',
-        isSignatureInvalidated: false,
-        contentSnippet: 'Clause 6.1.2: Buck converter must maintain 3.3V bus within +/- 2% during primary cell cutover.',
-        lastUpdated: '1 week ago',
-      },
-      work: {
-        id: 'med-44',
-        key: 'MED-44',
-        title: 'Calibrate OLED SPI Bus Low-Power Sleep Transitions',
-        status: 'Done',
-        assignee: 'Elena Rostova (Hardware QA)',
-        prNumber: '#135',
-        commitSha: '5c2e811',
-      },
-      test: {
-        id: 'test-90',
-        testKey: 'TEST-90',
-        title: 'Power Rail Cutover Voltage Sag Automated Benchmark',
-        testType: 'Unit Test',
-        status: 'PASSED',
-        executionDate: '3 days ago 09:10 UTC',
-        evidenceUrl: 'https://ci.medical-devices.internal/test-runs/power-90',
-      },
-      signature: {
-        id: 'sig-003',
-        signedBy: 'Rachel Adams (Director of Regulatory Affairs)',
-        signedAt: '2026-10-21T09:15:00Z',
-        role: 'Quality Assurance Director',
-        meaning: 'Class A Software Verification Protocol Approval',
-        artifactSha256: 'c67d33998fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b444',
-        isValid: true,
+      graphMetadata: {
+        entityAri: 'ari:cloud:jira:5cbf2ff9-658a-44d8-9004-dbe8a96e952b:issue/10042',
+        linkedSpecAri: 'ari:cloud:confluence:d601ebde-589a-45d8-ab19-a8edfb1d5a47:page/98304',
+        edgeType: 'iso14971:mitigates-hazard -> atlassian:work-item-links-page',
+        aggTraversalStatus: 'TRAVERSED (AGG GraphQL Gateway 200 OK)',
       },
     },
   ],
@@ -201,6 +102,52 @@ export const App: React.FC = () => {
   const [isRemediating, setIsRemediating] = useState(false);
   const [transitionResult, setTransitionResult] = useState<{ result: boolean; errorMessage?: string } | null>(null);
   const [isTransitionModalOpen, setIsTransitionModalOpen] = useState(false);
+  const [blastRadius, setBlastRadius] = useState<BlastRadiusReport | null>(null);
+  const [isAnalyzingBlastRadius, setIsAnalyzingBlastRadius] = useState(false);
+
+  // Deterministic Regulatory Blast Radius & Transitive Impact Analyzer
+  const handleAnalyzeBlastRadius = async () => {
+    setIsAnalyzingBlastRadius(true);
+    try {
+      const report = (await invoke('analyzeBlastRadius', { triggerKey: 'srs-104' })) as BlastRadiusReport;
+      if (report) {
+        setBlastRadius(report);
+        setSelectedLinkId('trace-HAZ-101');
+      }
+    } catch {
+      // Offline / local preview simulation
+      setBlastRadius({
+        triggerArtifact: {
+          type: 'SPEC',
+          id: 'srs-104',
+          key: 'SRS-104',
+          title: 'SRS-104: Dual-Core Microcontroller Hardware Bolus Clamp',
+          deltaReason: 'Content modified at v3 (changed threshold 5.0 -> 5.5 mL/hr)',
+        },
+        impactSeverity: 'CRITICAL_CATASTROPHIC',
+        affectedHazardKeys: ['HAZ-101'],
+        blockedWorkItemKeys: ['MED-42'],
+        invalidatedTestKeys: ['TEST-88'],
+        invalidatedSignatureIds: ['sig-001'],
+        traversalPath: [
+          { hop: 1, from: 'Spec [SRS-104]', edge: 'SIGNS', to: 'Signature [Marcus Vance, MD]', effect: 'Signature evidence invalidated: hash drift detected (expected a789ef23..., current e3b0c442...).' },
+          { hop: 2, from: 'Spec [SRS-104]', edge: 'MITIGATES', to: 'Hazard [HAZ-101]', effect: 'Safety mitigation compromised: Bolus Over-Infusion Hazard (Class C).' },
+          { hop: 3, from: 'Hazard [HAZ-101]', edge: 'IMPLEMENTS', to: 'Jira Item [MED-42]', effect: 'Human-initiated transition blocked: Firmware task assigned to Dr. Sarah Lin locked under policy gate.' },
+          { hop: 4, from: 'Hazard [HAZ-101]', edge: 'VERIFIES', to: 'Test [TEST-88]', effect: 'Verification test evidence invalidated: must be executed against new specification parameters.' },
+        ],
+        transitiveActionPlan: [
+          'Re-certify clinical sign-off with Marcus Vance, MD (Chief Medical Officer) for revised spec.',
+          'Review ISO 14971 risk mitigations for HAZ-101 against revised specifications.',
+          'Verify firmware implementation in MED-42 matches updated parameters.',
+          'Execute automated verification run for TEST-88 (Automated HIL) to regenerate passing evidence.',
+        ],
+        executionTimeMs: 1.7,
+      });
+      setSelectedLinkId('trace-HAZ-101');
+    } finally {
+      setIsAnalyzingBlastRadius(false);
+    }
+  };
 
   // Test Jira Transition Validator Lockout
   const handleTestTransition = async () => {
@@ -222,7 +169,7 @@ export const App: React.FC = () => {
     setIsTransitionModalOpen(true);
   };
 
-  // Load from Forge backend on mount
+  // Load from Forge backend on mount + live background polling for Rovo Chat & MCP updates
   useEffect(() => {
     async function loadData() {
       try {
@@ -230,11 +177,51 @@ export const App: React.FC = () => {
         if (result && result.traceLinks) {
           setSummary(result);
         }
+        // Execute real Teamwork Graph (AGG GraphQL) context query
+        invoke('queryGraphContext', { issueKey: 'MED-42' }).catch(() => {});
       } catch (err) {
         console.warn('Forge bridge invoke notice (using local demo suite):', err);
       }
     }
+
     loadData();
+
+    // Adaptive 8-second polling active only when tab is visible (saves Forge serverless quotas)
+    const pollInterval = setInterval(async () => {
+      if (typeof document !== 'undefined' && document.visibilityState !== 'visible') {
+        return;
+      }
+      try {
+        const latest = (await invoke('getComplianceSuite')) as ComplianceSummary;
+        if (latest && latest.traceLinks) {
+          setSummary((prev) => {
+            if (
+              prev.lastAuditTimestamp !== latest.lastAuditTimestamp ||
+              prev.releaseBlocked !== latest.releaseBlocked ||
+              prev.verifiedPercentage !== latest.verifiedPercentage
+            ) {
+              return latest;
+            }
+            return prev;
+          });
+        }
+      } catch {}
+    }, 8000);
+
+    const onVisibilityOrFocus = () => {
+      if (typeof document === 'undefined' || document.visibilityState === 'visible') {
+        loadData();
+      }
+    };
+
+    window.addEventListener('focus', onVisibilityOrFocus);
+    document.addEventListener('visibilitychange', onVisibilityOrFocus);
+
+    return () => {
+      clearInterval(pollInterval);
+      window.removeEventListener('focus', onVisibilityOrFocus);
+      document.removeEventListener('visibilitychange', onVisibilityOrFocus);
+    };
   }, []);
 
   // 1-Click Seeder Action
@@ -316,7 +303,9 @@ export const App: React.FC = () => {
         onSeed={handleSeed}
         onOpenExport={() => setIsExportOpen(true)}
         onTestTransition={handleTestTransition}
+        onAnalyzeBlastRadius={handleAnalyzeBlastRadius}
         isSeeding={isSeeding}
+        isAnalyzingBlastRadius={isAnalyzingBlastRadius}
       />
 
       {/* Main Workspace Body */}
@@ -331,6 +320,7 @@ export const App: React.FC = () => {
       {/* Slide-in Inspection Drawer */}
       <InspectionDrawer
         link={selectedLink}
+        blastRadius={blastRadius}
         onClose={() => setSelectedLinkId(null)}
         onRemediate={handleRemediate}
         isRemediating={isRemediating}

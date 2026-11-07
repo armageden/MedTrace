@@ -43,10 +43,15 @@ export class TeamworkGraphService {
       const response = await api.asApp().requestGraph(graphQLQuery.query, graphQLQuery.variables);
       if (response && response.status === 200) {
         const json = await response.json();
-        return json.data;
+        if (json.errors && json.errors.length > 0) {
+          throw new Error(`GraphQL Error: ${json.errors[0]?.message || 'AGG query failed'}`);
+        }
+        if (json.data) {
+          return json.data;
+        }
       }
-    } catch (err) {
-      console.warn(`[TeamworkGraph] AGG Query notice for ${issueKey}: using direct Jira REST edge traversal`);
+    } catch (err: any) {
+      console.warn(`[TeamworkGraph] AGG Query notice for ${issueKey}: ${err?.message || err}. Falling back to Jira REST API.`);
     }
 
     // Direct fallback using Atlassian Jira REST API

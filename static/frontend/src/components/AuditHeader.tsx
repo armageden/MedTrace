@@ -1,6 +1,6 @@
 import React from 'react';
 import { ComplianceSummary } from '../types';
-import { ShieldAlert, ShieldCheck, RefreshCw, FileDown, GitFork, Table, Sparkles } from 'lucide-react';
+import { ShieldAlert, ShieldCheck, RefreshCw, FileDown, GitFork, Table, Sparkles, Zap } from 'lucide-react';
 
 interface AuditHeaderProps {
   summary: ComplianceSummary;
@@ -9,7 +9,9 @@ interface AuditHeaderProps {
   onSeed: () => void;
   onOpenExport: () => void;
   onTestTransition: () => void;
+  onAnalyzeBlastRadius: () => void;
   isSeeding: boolean;
+  isAnalyzingBlastRadius: boolean;
 }
 
 export const AuditHeader: React.FC<AuditHeaderProps> = ({
@@ -19,7 +21,9 @@ export const AuditHeader: React.FC<AuditHeaderProps> = ({
   onSeed,
   onOpenExport,
   onTestTransition,
+  onAnalyzeBlastRadius,
   isSeeding,
+  isAnalyzingBlastRadius,
 }) => {
   return (
     <div style={{ background: '#ffffff', borderBottom: '1px solid #dfe1e6', padding: '16px 24px', fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif' }}>
@@ -108,7 +112,30 @@ export const AuditHeader: React.FC<AuditHeaderProps> = ({
             {isSeeding ? 'Seeding Demo Suite...' : '⚡ Seed Demo Suite'}
           </button>
 
-          {/* Test Jira Transition Validator Lockout */}
+          {/* Regulatory Blast Radius Engine Button (Clever Feature) */}
+          <button
+            onClick={onAnalyzeBlastRadius}
+            disabled={isAnalyzingBlastRadius}
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 6,
+              padding: '7px 14px',
+              borderRadius: 6,
+              border: '1.5px solid #ff991f',
+              background: '#fff0b3',
+              color: '#172b4d',
+              fontWeight: 700,
+              fontSize: 12,
+              cursor: 'pointer',
+              transition: 'all 0.15s ease',
+            }}
+          >
+            <Zap size={14} color="#ff8b00" />
+            {isAnalyzingBlastRadius ? 'Analyzing Impact...' : '⚡ Blast Radius'}
+          </button>
+
+          {/* Test Jira Transition Validator Lockout (Human Policy Gate) */}
           <button
             onClick={onTestTransition}
             style={{
@@ -127,10 +154,10 @@ export const AuditHeader: React.FC<AuditHeaderProps> = ({
             }}
           >
             <ShieldAlert size={14} />
-            🔒 Test Jira Release Gate
+            🔒 Test Human Gate
           </button>
 
-          {/* FDA Export Button */}
+          {/* Audit Evidence Export Button */}
           <button
             onClick={onOpenExport}
             style={{
@@ -148,7 +175,7 @@ export const AuditHeader: React.FC<AuditHeaderProps> = ({
               boxShadow: '0 2px 4px rgba(0, 82, 204, 0.25)',
             }}
           >
-            <FileDown size={14} /> FDA 510(k) Export
+            <FileDown size={14} /> Audit Evidence Export
           </button>
         </div>
       </div>
@@ -179,7 +206,7 @@ export const AuditHeader: React.FC<AuditHeaderProps> = ({
 
         {/* Metric 3: Safety Gate Lockout */}
         <div style={{ ...cardStyle, borderLeft: `4px solid ${summary.releaseBlocked ? '#de350b' : '#00875a'}` }}>
-          <div style={cardLabel}>JIRA RELEASE SAFETY GATE</div>
+          <div style={cardLabel}>JIRA HUMAN RELEASE GATE</div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 6 }}>
             {summary.releaseBlocked ? (
               <>
@@ -189,7 +216,7 @@ export const AuditHeader: React.FC<AuditHeaderProps> = ({
             ) : (
               <>
                 <ShieldCheck size={18} color="#00875a" />
-                <span style={{ fontSize: 13, fontWeight: 800, color: '#00875a' }}>✅ 510(k) RELEASE READY</span>
+                <span style={{ fontSize: 13, fontWeight: 800, color: '#00875a' }}>✅ AUDIT READY (ZERO GAPS)</span>
               </>
             )}
           </div>
@@ -197,7 +224,7 @@ export const AuditHeader: React.FC<AuditHeaderProps> = ({
 
         {/* Metric 4: 21 CFR Part 11 Drift */}
         <div style={cardStyle}>
-          <div style={cardLabel}>21 CFR PART 11 SIGNATURE STATUS</div>
+          <div style={cardLabel}>SIGNATURE EVIDENCE STATUS</div>
           <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginTop: 4 }}>
             <span style={{ fontSize: 24, fontWeight: 800, color: summary.signatureDriftCount > 0 ? '#ff8b00' : '#00875a' }}>
               {summary.signatureDriftCount > 0 ? `${summary.signatureDriftCount} Drifted` : 'All Valid'}

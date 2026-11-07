@@ -56,6 +56,35 @@ export class McpToolService {
    */
   public static async verifyIecCompliance(inputs?: { prDiff?: string; componentName?: string }): Promise<any> {
     const suite = await SeederService.getActiveComplianceSuite();
+    const queryText = `${inputs?.prDiff || ''} ${inputs?.componentName || ''}`.toLowerCase();
+
+    const touchesBolus =
+      queryText.includes('bolus') || queryText.includes('flow') || queryText.includes('dose') || queryText.includes('5.5') ||
+      queryText.includes('pwm') || queryText.includes('clamp') || queryText.includes('motor');
+    const touchesDroplet =
+      queryText.includes('droplet') || queryText.includes('sensor') || queryText.includes('stall') || queryText.includes('photodiode');
+    const touchesPower =
+      queryText.includes('oled') || queryText.includes('battery') || queryText.includes('voltage') || queryText.includes('spi');
+
+    const affectedHazards: string[] = [];
+    if (touchesBolus) affectedHazards.push('HAZ-101 (Class C - Over-Infusion)');
+    if (touchesDroplet) affectedHazards.push('HAZ-102 (Class B - Under-Infusion)');
+    if (touchesPower) affectedHazards.push('HAZ-103 (Class A - Display/Power)');
+
+    const isTargeted = touchesBolus || touchesDroplet || touchesPower;
+
+    let guidance: string[];
+    if (touchesBolus && suite.releaseBlocked) {
+      guidance = [
+        'CRITICAL: Diff modifies bolus delivery logic governed by ISO 14971 Class C Hazard HAZ-101.',
+        'Execute automated Hardware-in-the-Loop test for TEST-88 before merging.',
+        'Re-certify 21 CFR Part 11 electronic signature on Confluence SRS-104 (revision v3).',
+      ];
+    } else if (suite.releaseBlocked) {
+      guidance = suite.blockingReasons.map((r) => `Open compliance gap: ${r}`);
+    } else {
+      guidance = ['All regulatory gates satisfied. Authorized for 510(k) release packaging.'];
+    }
 
     return {
       standards: suite.standards,
@@ -66,13 +95,10 @@ export class McpToolService {
         status: suite.releaseBlocked ? 'BLOCKED_BY_SAFETY_GATE' : 'CERTIFIED_READY',
       },
       signatureDriftDetected: suite.signatureDriftCount > 0,
+      touchesSafetyCriticalCode: isTargeted,
+      affectedHazards: affectedHazards.length > 0 ? affectedHazards : ['None (General non-critical change)'],
       activeViolations: suite.blockingReasons,
-      remediationGuidance: suite.releaseBlocked
-        ? [
-            'Execute automated Hardware-in-the-Loop test for TEST-88.',
-            'Re-certify 21 CFR Part 11 electronic signature on Confluence SRS-104 (revision v3).',
-          ]
-        : ['All regulatory gates satisfied. Authorized for 510(k) release packaging.'],
+      remediationGuidance: guidance,
     };
   }
 }

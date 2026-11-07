@@ -39,7 +39,7 @@ export const FdaExportModal: React.FC<FdaExportModalProps> = ({ summary, onClose
         <div style={{ padding: '14px 20px', borderBottom: '1px solid #ebecf0', display: 'flex', alignItems: 'center', justifyContent: 'space-between', background: '#fafbfc' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <ShieldCheck size={18} color="#0052cc" />
-            <span style={{ fontWeight: 700, fontSize: 14, color: '#172b4d' }}>FDA 510(k) Section 16 Software Traceability Dossier</span>
+            <span style={{ fontWeight: 700, fontSize: 14, color: '#172b4d' }}>Traceability Audit Evidence Package (Section 16 Mapping)</span>
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
             <button
@@ -68,13 +68,13 @@ export const FdaExportModal: React.FC<FdaExportModalProps> = ({ summary, onClose
 
         {/* Dossier Content */}
         <div style={{ flex: 1, overflowY: 'auto', padding: '24px 32px' }}>
-          {/* FDA Header */}
+          {/* Header */}
           <div style={{ borderBottom: '2px solid #172b4d', paddingBottom: 16, marginBottom: 20 }}>
             <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: '1px', color: '#5e6c84', textTransform: 'uppercase' }}>
-              U.S. Food & Drug Administration | CDRH Regulatory Submission
+              Software System Lifecycle & Traceability Audit Evidence
             </div>
             <div style={{ fontSize: 20, fontWeight: 800, color: '#172b4d', marginTop: 4 }}>
-              Software System Traceability & Hazard Mitigation Matrix
+              Software Lifecycle Traceability & Hazard Mitigation Evidence Package
             </div>
             <div style={{ fontSize: 12, color: '#42526e', marginTop: 4 }}>
               Device: <b>{summary.projectName}</b> | Classification: <b>IEC 62304 Class C (Life-Critical)</b> | Generated: {new Date(summary.lastAuditTimestamp).toLocaleString()}
@@ -114,7 +114,7 @@ export const FdaExportModal: React.FC<FdaExportModalProps> = ({ summary, onClose
                     {link.test.testKey}: {link.test.status}
                   </td>
                   <td style={{ padding: '8px 10px', color: link.signature.isValid ? '#00875a' : '#de350b' }}>
-                    {link.signature.isValid ? 'VALID' : 'REVOKED (DRIFT)'}
+                    {link.signature.isValid ? 'VALID' : 'INVALIDATED (DRIFT)'}
                   </td>
                 </tr>
               ))}
