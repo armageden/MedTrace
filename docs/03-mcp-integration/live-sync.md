@@ -55,9 +55,8 @@ sequenceDiagram
 ```
 
 * **Configuration Parameters:**
-  * **Default Webtrigger URL:** `https://5e49c10e-696f-4984-9d00-4a47d0a5dd99.hello.atlassian-dev.net/x1/EFs4zD6_Xpqns99GKD7UGi8-yek`
-  * **Override URL:** Set via environment variable `MEDTRACE_WEBTRIGGER_URL`.
-  * **Shared Secret:** Set via environment variable `MEDTRACE_MCP_SECRET` (default: `'medtrace-sec-2026'`).
+  * **Webtrigger URL:** Set via environment variable `MEDTRACE_WEBTRIGGER_URL` (points to your deployed Forge `mcp-sync-webtrigger`).
+  * **Shared Secret:** Set via environment variable `MEDTRACE_MCP_SECRET`. Mandatory in production; the webtrigger and MCP server fail closed if unset.
 * **Offline Fallback Guarantee:** If the cloud webtrigger is unreachable (network drop or 4-second timeout), the MCP server automatically falls back to an internal mock suite, guaranteeing that developer workflows never crash during offline editing.
 
 ---
@@ -85,7 +84,7 @@ Automated verification tests are maintained in `tests/compliance-engine.test.cjs
       "command": "node",
       "args": ["/absolute/path/to/medtrace/mcp-server/index.mjs"],
       "env": {
-        "MEDTRACE_MCP_SECRET": "medtrace-sec-2026",
+        "MEDTRACE_MCP_SECRET": "<your-forge-mcp-secret>",
         "MEDTRACE_WEBTRIGGER_URL": "https://<forge-app-id>.hello.atlassian-dev.net/x1/..."
       }
     }

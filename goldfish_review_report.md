@@ -1,91 +1,113 @@
-# Goldfish Review Report: Round 1
+# Goldfish Annotated Review Report: Hackathon Winning Potential Audit
 
-**Target:** [`medtrace/README.md`](file:///home/farhan/Downloads/codegeist2026.devpost/medtrace/README.md) (`Lines 1–128`)  
-**Timestamp:** 2026-11-07  
-**Orchestrator:** Elephant-Goldfish Model (EGM) Review Loop  
-
----
-
-## Reviewer Status
-
-| Reviewer | Lens | Status | Blockers | Major | Nit | Total |
-| :--- | :--- | :---: | :---: | :---: | :---: | :---: |
-| `egm-codebase-details` | Technical Quality & Code Grounding | `completed` | 2 | 6 | 2 | 10 |
-| `egm-structural` | Layout & Template Rigor | `completed` | 2 | 2 | 4 | 8 |
-| `egm-comprehension` | Naive Reader & Clarity | `completed` | 2 | 3 | 1 | 6 |
-| **Consolidated** | | | **5** | **11** | **7** | **23** | *(Deduplicated)*
+**Status:** resolved (audit recorded; automated code fixes bypassed by user)
+**Target:** `medtrace/` (`src/index.ts`, `src/seeder.ts`, `src/mcp-server.ts`, `mcp-server/index.mjs`, `devpost_submission_draft.md`, `README.md`)  
+**Timestamp:** 2026-11-08  
+**Audit Context:** Pre-submission competitive viability review & Grand Prize / Category Bonus needle-movers  
+**Orchestrator:** Elephant-Goldfish Model (EGM) Review Loop & Ponytail (Minimalist High-ROI Code)
 
 ---
 
-## Prioritized Findings & Resolution Plan
+## Review Findings & Triage Summary
+
+| ID | Issue | Scope | Category | Impact |
+| :--- | :--- | :--- | :---: | :--- |
+| **BLK-01** | Hardcoded Secret Fallback (`medtrace-sec-2026`) | `src/index.ts`, `mcp-server/index.mjs` | `PROPOSE FIX` | Security & Marketplace Readiness |
+| **BLK-02** | Hardcoded Hashes & Static String Drift in Seeder | `src/seeder.ts` | `PROPOSE FIX` | Technical Depth & Grounding |
+| **BLK-03** | Rovo Agent Uses Keyword Substring Matching | `src/mcp-server.ts` | `PROPOSE FIX` | Best Agents / Rovo Track Seam |
+| **MAJ-01** | Workflow Gate Requires Site-Admin to Attach | `manifest.yml`, `README.md`, Issue Panel | `CONTEST & PROPOSE FIX` | Evaluator Experience |
+| **MAJ-02** | Hardcoded Dev URL in MCP Server | `mcp-server/index.mjs` | `PROPOSE FIX` | MCP Portability & Robustness |
+| **MAJ-03** | Over-Claiming Copy vs. Prototype Reality | `devpost_submission_draft.md`, `README.md` | `PROPOSE FIX` | Judge Credibility & Trust |
+
+---
+
+## Prioritized Findings & Detailed Resolution Plan
 
 ### 🔴 Blockers
 
-#### [BLK-01] Architecture Dataflow Contradicts Runtime Topology
-* **Reviewers:** `egm-codebase-details` (F1), `egm-comprehension` (F2)
-* **Affected Scope:** `medtrace/README.md` Lines 30–60 (Mermaid Diagram)
-* **Discrepancy:** The diagram depicts `MCPServer <--> Engine` directly and `Rovo <--> Resolvers`. In reality, the local stdio MCP server runs outside Atlassian Cloud and connects to Forge via an HTTPS Webtrigger (`mcp-sync-webtrigger` in `index.ts`), while Rovo modules invoke `rovoActionHandler` in `src/mcp-server.ts`.
-* **Resolution:** `PROPOSE FIX` — Update the Mermaid diagram to explicitly depict the HTTPS Webtrigger boundary (with HMAC-SHA256 signature verification) and the `rovoActionHandler` module boundary.
+#### [BLK-01] Hardcoded Secret Fallback Compromises Security Boundary
+* **Reviewer:** Judge Security & Architecture Review
+* **Affected Scope:** [`medtrace/src/index.ts#L49`](src/index.ts#L49), [`medtrace/mcp-server/index.mjs#L20`](mcp-server/index.mjs#L20)
+* **Discrepancy Description:** `const MCP_SECRET = process.env.MEDTRACE_MCP_SECRET || 'medtrace-sec-2026'` allows unauthenticated actors to authenticate if the environment variable is not explicitly injected in Forge runtime.
+* **Rationale:** A hardcoded shared secret default undermines the application's core cryptographic claims in a "Best Marketplace App" or security evaluation.
+* **AI Suggestion:** `PROPOSE FIX`
+* **Justification:** In production, security systems must fail closed. If `process.env.MEDTRACE_MCP_SECRET` is unset, the webtrigger should halt execution and return HTTP 500/401 with a descriptive configuration error, rather than opening access via a public default string.
+* **Proposed Edit:**
+  * Location: `medtrace/src/index.ts` Line 49 & `medtrace/mcp-server/index.mjs` Line 20
+  * Change: Make secret configuration mandatory. Fail closed if unset in production, and provide clear CLI messaging in `mcp-server/index.mjs`.
 
-#### [BLK-02] Unstated HMAC-SHA256 Wire Protocol & 5-Minute Anti-Replay Guardrails
-* **Reviewers:** `egm-codebase-details` (F2), `egm-comprehension` (F2)
-* **Affected Scope:** `medtrace/README.md` Lines 96–118 (Section 4)
-* **Discrepancy:** The Cursor MCP setup snippet omits mandatory authentication headers and environment variables (`x-medtrace-key`, `x-medtrace-timestamp`, `x-medtrace-signature`, `MEDTRACE_MCP_SECRET`, `MEDTRACE_WEBTRIGGER_URL`).
-* **Resolution:** `PROPOSE FIX` — Document the environment variables, the 300,000ms replay window, and HMAC-SHA256 signature authentication in Section 4.
+#### [BLK-02] Hardcoded Hashes & Static String Drift in Seeder
+* **Reviewer:** Technical Depth & Integration Review
+* **Affected Scope:** [`medtrace/src/seeder.ts#L68-L100`](src/seeder.ts#L68-L100)
+* **Discrepancy Description:** `sha256Hash` is hardcoded as `'e3b0c442...'` (the well-known SHA-256 of empty string `""`), and drift is checked by comparing two hardcoded string literals rather than hashing real spec content.
+* **Rationale:** Technical judges who inspect `seeder.ts` will recognize `'e3b0c442...'` immediately as empty string hash and realize hash drift is simulated string equality.
+* **AI Suggestion:** `PROPOSE FIX`
+* **Justification:** 
+  1. Compute the actual SHA-256 over the `contentSnippet` dynamically using Node `crypto.createHash('sha256')`.
+  2. Implement an active Confluence check: when Confluence Cloud space pages are present via `api.asApp().requestConfluence(...)`, fetch real page title and content to generate live hashes. Fallback gracefully to realistic device specifications when running on an empty evaluation tenant.
+* **Proposed Edit:**
+  * Location: `medtrace/src/seeder.ts`
+  * Change: Dynamically compute `sha256Hash` from text content; query live Confluence pages if available.
 
-#### [BLK-03] Missing Mandatory "Risks & Limits" Section
-* **Reviewers:** `egm-structural` (F2)
-* **Affected Scope:** Document Structure
-* **Discrepancy:** No explicit documentation of system limits (Forge KVS storage quota, AGG GraphQL rate limits, fail-closed validator execution timeouts, and 5-minute replay window).
-* **Resolution:** `PROPOSE FIX` — Add a dedicated "System Limits & Architectural Safeguards" section.
-
-#### [BLK-04] Missing "Alternatives Considered" Section
-* **Reviewers:** `egm-structural` (F1)
-* **Affected Scope:** Document Structure
-* **Discrepancy:** Standard requires evaluating design alternatives.
-* **Resolution:** `CONTEST & COMPACT` — The repository already contains dedicated Architecture Decision Records under `medtrace/docs/99-design-decisions/` (`001-twg-and-kvs-hybrid.md`, `002-webtrigger-hmac-authentication.md`, `003-twg-dual-engine-fallback.md`). We will add an "Architecture Decision Records & Alternatives Considered" section with concise summaries and direct links rather than inflating the README.
-
-#### [BLK-05] Unstated Authentication & Access Prerequisites for Live Demo
-* **Reviewers:** `egm-comprehension` (F1)
-* **Affected Scope:** `medtrace/README.md` Lines 66–71
-* **Discrepancy:** Directs judges to Atlassian Cloud without explaining authentication / access credentials.
-* **Resolution:** `PROPOSE FIX` — Add guidance that judge access credentials and guest instructions are provided in the Devpost submission package and provide fallback testing instructions.
+#### [BLK-03] Rovo Compliance Agent Relies on Keyword Substrings Rather Than Graph Traversal
+* **Reviewer:** Best Agents / Rovo Track Review
+* **Affected Scope:** [`medtrace/src/mcp-server.ts#L57-L100`](src/mcp-server.ts#L57-L100)
+* **Discrepancy Description:** `verifyIecCompliance` inspects inputs with `.includes('bolus') || .includes('flow') || .includes('oled')`. It does not parse code diffs, issue keys, or query the graph.
+* **Rationale:** An evaluator interacting with the Rovo agent using real Jira keys (`MED-42`) or realistic PR diffs will see generic keyword responses rather than intelligent compliance auditing.
+* **AI Suggestion:** `PROPOSE FIX`
+* **Justification:** The project already has an in-memory BFS engine in `ComplianceEngine.computeBlastRadius`. `verifyIecCompliance` and `getHazardLineage` should extract Jira/Hazard/Spec keys (`/[A-Z]+-\d+/gi`) from the input, execute `ComplianceEngine.computeBlastRadius`, and return the real traversed blast radius path, affected hazards, and remediation action items.
+* **Proposed Edit:**
+  * Location: `medtrace/src/mcp-server.ts`
+  * Change: Upgrade `McpToolService` to parse keys and invoke `ComplianceEngine.computeBlastRadius` for dynamic graph traversal.
 
 ---
 
 ### 🟡 Major Findings
 
-#### [MAJ-01] Missing "Goals & Non-Goals" Section
-* **Reviewers:** `egm-structural` (F3)
-* **Discrepancy:** Scope boundaries are undefined (e.g. MedTrace is a software traceability and governance engine, not an active Medical Device Data System [MDDS] or physical test execution runner).
-* **Resolution:** `PROPOSE FIX` — Add explicit Goals & Non-Goals list under Executive Summary.
+#### [MAJ-01] Workflow Validator Requires Site-Admin Configuration to Attach in Jira
+* **Reviewer:** Evaluation UX & Product Workflow Review
+* **Affected Scope:** [`medtrace/manifest.yml#L15-L19`](manifest.yml#L15-L19), `medtrace/README.md`
+* **Discrepancy Description:** `jira:workflowValidator` requires Jira Administrator permissions to attach to a workflow transition. Non-admin judges cannot attach or trigger the validator on their own tenant.
+* **Rationale:** If evaluators cannot experience the transition gate blocking a release, the core value proposition remains abstract.
+* **AI Suggestion:** `CONTEST & PROPOSE FIX`
+* **Justification:**
+  * **CONTEST:** In Atlassian Forge, apps cannot programmatically attach workflow validators to company-managed Jira projects without manual admin configuration in Jira Workflow Editor. This is an intentional Atlassian platform security boundary.
+  * **PROPOSE FIX:** Ensure the deployed demonstration tenant has the validator attached to the `Done` transition of project `MED`. Add a 1-click "Test Safety Gate Transition" inside the Custom UI Issue Panel (`medtrace-issue-panel`), so any evaluator (regardless of admin role) can test the exact transition interceptor and receive live feedback. Provide a 3-step setup guide for admins in `README.md`.
+* **Proposed Edit:**
+  * Location: `medtrace/README.md` & `medtrace/src/workflow-validator.ts`
+  * Change: Add evaluator verification instructions and document the admin workflow attachment process with screenshots/steps.
 
-#### [MAJ-02] Incomplete MCP Tool Registry Documentation
-* **Reviewers:** `egm-codebase-details` (F4)
-* **Discrepancy:** Only `medtrace_verify_iec_compliance` was mentioned. Omitted `medtrace_get_hazard_lineage` and `medtrace_remediate_safety_gap`.
-* **Resolution:** `PROPOSE FIX` — Document all 3 MCP tools with input arguments and descriptions.
+#### [MAJ-02] Hardcoded Forge URL in MCP Server
+* **Reviewer:** Developer Experience & Packaging Review
+* **Affected Scope:** [`medtrace/mcp-server/index.mjs#L23-L25`](mcp-server/index.mjs#L23-L25)
+* **Discrepancy Description:** `FORGE_WEBTRIGGER_URL` defaults to a single hardcoded dev tenant URL. If that URL rotates, the local MCP server fails.
+* **Rationale:** Hardcoding an ephemeral staging URL in an open-source MCP package prevents portable evaluation.
+* **AI Suggestion:** `PROPOSE FIX`
+* **Justification:** Add `.env` reading support via Node standard features, emit clear configuration warnings if unset, and allow the judge to point to any deployed Forge webtrigger URL.
+* **Proposed Edit:**
+  * Location: `medtrace/mcp-server/index.mjs`
+  * Change: Read environment variables safely; provide actionable setup instructions if `MEDTRACE_WEBTRIGGER_URL` is missing or unreachable.
 
-#### [MAJ-03] Undefined Regulatory Standards & Risk Classes (Class A / B / C)
-* **Reviewers:** `egm-comprehension` (F3, F4)
-* **Discrepancy:** IEC 62304, FDA 21 CFR Part 11, ISO 14971, and Class A/B/C severity differences are assumed knowledge without definitions.
-* **Resolution:** `PROPOSE FIX` — Add a concise "Regulatory Context & Compliance Standards" primer table.
-
-#### [MAJ-04] Undocumented Fail-Safe (Fail-Closed) Mode in Jira Workflow Validator
-* **Reviewers:** `egm-codebase-details` (F6)
-* **Discrepancy:** Validator halts transitions (`result: false`) upon unhandled storage/network exceptions to prevent non-compliant releases.
-* **Resolution:** `PROPOSE FIX` — Document the fail-closed safety invariant in Section 2 and in the safety safeguards.
-
-#### [MAJ-05] Missing Public API Specification for Forge Resolvers & KVS Storage
-* **Reviewers:** `egm-codebase-details` (F3, F7, F8)
-* **Discrepancy:** Resolver endpoints (`getComplianceSuite`, `seedDemoSuite`, `remediateGap`, `queryGraphContext`, `simulateTransition`), KVS key (`medtrace:compliance:active_suite`), and AGG GraphQL fallback to REST are undocumented.
-* **Resolution:** `PROPOSE FIX` — Document the resolver contracts and AGG-to-REST fallback mechanism.
+#### [MAJ-03] Over-Claiming Copy vs. Prototype Reality
+* **Reviewer:** Plain-English & Regulatory Authenticity Review
+* **Affected Scope:** [`medtrace/devpost_submission_draft.md`](devpost_submission_draft.md), [`medtrace/README.md`](README.md)
+* **Discrepancy Description:** Phrases like "510(k) eSTAR export", "SOUP verification records", and "sub-millisecond p95" frame prototype capabilities as certified commercial systems.
+* **Rationale:** Atlassian hackathon judges are engineers who respect transparent technical engineering and spot exaggerated claims immediately.
+* **AI Suggestion:** `PROPOSE FIX`
+* **Justification:** Align copy with actual implementation:
+  - Frame the FDA export as an "eSTAR-aligned Software Documentation Traceability view with print/export dossier formatting".
+  - Replace "sub-millisecond p95" with "empirically benchmarked BFS graph traversal (<20ms on 500-node synthetic benchmark, ~1.5ms on active suite)".
+  - Clearly disclose simulated demo records versus real Atlassian platform integrations in the "Honest Scope & Limitations" section.
+* **Proposed Edit:**
+  * Location: `medtrace/devpost_submission_draft.md` & `medtrace/README.md`
+  * Change: Adjust claims to be grounded, transparent, and defensible.
 
 ---
 
-### 🟢 Nits & Formatting Repairs
+## Ponytail Execution Strategy (Smallest Complete High-ROI Changes)
 
-* **[NIT-01] Numbered Headings:** Remove rigid numeric prefixes (`## 1.`, `## 2.`) in favor of clean semantic markdown titles.
-* **[NIT-02] Trailing Punctuation:** Remove trailing colon in heading `### Asking Cursor in your IDE:`.
-* **[NIT-03] LaTeX Delimiters:** Replace raw LaTeX `$\rightarrow$` with clean Unicode arrows `→`.
-* **[NIT-04] Clickable URLs:** Convert bare `https://one-atlas-feur.atlassian.net` to standard markdown links.
-* **[NIT-05] Test Suite Checklist:** Add `npm test` verification command (`tests/compliance-engine.test.cjs`) to the Hackathon submission checklist.
+To maximize competition score with minimal code footprint:
+1. **Secret & Fail-Closed (`src/index.ts`, `mcp-server/index.mjs`)**: 4 lines modified. Eliminates the critical security seam.
+2. **Dynamic Hash Computation (`src/seeder.ts`)**: 12 lines modified. Generates real SHA-256 hashes from actual spec text using Node `crypto`, with optional Confluence page inspection.
+3. **Graph Traversal in Rovo (`src/mcp-server.ts`)**: 20 lines modified. Replaces crude keyword matching with issue/spec key regex extraction and invokes existing `ComplianceEngine.computeBlastRadius`.
+4. **Copy Alignment (`devpost_submission_draft.md`)**: Replaces over-claims with grounded, high-credibility engineering descriptions.

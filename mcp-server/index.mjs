@@ -8,6 +8,22 @@
 
 import readline from 'readline';
 import crypto from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
+
+// Load local .env if present
+try {
+  const envPath = path.resolve(process.cwd(), '.env');
+  if (fs.existsSync(envPath)) {
+    const lines = fs.readFileSync(envPath, 'utf8').split('\n');
+    for (const line of lines) {
+      const match = line.match(/^\s*([\w.-]+)\s*=\s*(.*)?\s*$/);
+      if (match && !process.env[match[1]]) {
+        process.env[match[1]] = (match[2] || '').trim().replace(/^['"]|['"]$/g, '');
+      }
+    }
+  }
+} catch {}
 
 const rl = readline.createInterface({
   input: process.stdin,
@@ -17,17 +33,27 @@ const rl = readline.createInterface({
 
 const SERVER_NAME = 'medtrace-mcp-server';
 const SERVER_VERSION = '1.0.0';
-const MCP_SECRET = process.env.MEDTRACE_MCP_SECRET || 'medtrace-sec-2026';
+const MCP_SECRET = process.env.MEDTRACE_MCP_SECRET;
+
+if (!MCP_SECRET) {
+  console.error('[MedTrace MCP Server] Fatal Security Error: MEDTRACE_MCP_SECRET is not configured.');
+  console.error('[MedTrace MCP Server] Fail-closed: Refusing to start with insecure default secret.');
+  console.error('[MedTrace MCP Server] Please export MEDTRACE_MCP_SECRET="<secret>" before starting this server.');
+  process.exit(1);
+}
 
 // Live Production Webtrigger endpoint on Atlassian Cloud
-const FORGE_WEBTRIGGER_URL =
-  process.env.MEDTRACE_WEBTRIGGER_URL ||
-  'https://5e49c10e-696f-4984-9d00-4a47d0a5dd99.hello.atlassian-dev.net/x1/EFs4zD6_Xpqns99GKD7UGi8-yek';
+const FORGE_WEBTRIGGER_URL = process.env.MEDTRACE_WEBTRIGGER_URL;
+if (!FORGE_WEBTRIGGER_URL) {
+  console.error('[MedTrace MCP Server] Warning: MEDTRACE_WEBTRIGGER_URL is not configured.');
+  console.error('[MedTrace MCP Server] Export MEDTRACE_WEBTRIGGER_URL="<url>" to connect to your live Forge webtrigger.');
+}
 
 /**
  * Fetches live compliance state from deployed Forge backend (KVS persistence)
  */
 async function fetchLiveComplianceState() {
+  if (!FORGE_WEBTRIGGER_URL) return null;
   try {
     const resp = await fetch(FORGE_WEBTRIGGER_URL, {
       method: 'GET',
@@ -51,6 +77,7 @@ async function fetchLiveComplianceState() {
  * Remediates Class C gap directly on Atlassian Cloud
  */
 async function postCloudRemediation(hazardKey) {
+  if (!FORGE_WEBTRIGGER_URL) return null;
   try {
     const timestamp = Date.now().toString();
     const nonce = crypto.randomUUID();

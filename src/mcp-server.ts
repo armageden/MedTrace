@@ -53,32 +53,58 @@ export class McpToolService {
   /**
    * Tool: verify-iec-compliance-action
    * Audits active codebase/sprint against IEC 62304 and FDA 21 CFR Part 11 requirements
+   * Performs real BFS graph traversal to calculate blast radius on referenced artifacts.
    */
-  public static async verifyIecCompliance(inputs?: { prDiff?: string; componentName?: string }): Promise<any> {
+  public static async verifyIecCompliance(inputs?: { prDiff?: string; componentName?: string; issueKey?: string }): Promise<any> {
     const suite = await SeederService.getActiveComplianceSuite();
-    const queryText = `${inputs?.prDiff || ''} ${inputs?.componentName || ''}`.toLowerCase();
+    const fullText = `${inputs?.prDiff || ''} ${inputs?.componentName || ''} ${inputs?.issueKey || ''}`;
 
-    const touchesBolus =
-      queryText.includes('bolus') || queryText.includes('flow') || queryText.includes('dose') || queryText.includes('5.5') ||
-      queryText.includes('pwm') || queryText.includes('clamp') || queryText.includes('motor');
-    const touchesDroplet =
-      queryText.includes('droplet') || queryText.includes('sensor') || queryText.includes('stall') || queryText.includes('photodiode');
-    const touchesPower =
-      queryText.includes('oled') || queryText.includes('battery') || queryText.includes('voltage') || queryText.includes('spi');
+    // 1. Extract explicit issue, hazard, test, or spec keys (e.g. MED-42, HAZ-101, SRS-104, TEST-88)
+    const keyMatches = Array.from(new Set(fullText.match(/\b[A-Za-z]{2,5}-\d+\b/g) || [])).map((k) => k.toUpperCase());
 
-    const affectedHazards: string[] = [];
-    if (touchesBolus) affectedHazards.push('HAZ-101 (Class C - Over-Infusion)');
-    if (touchesDroplet) affectedHazards.push('HAZ-102 (Class B - Under-Infusion)');
-    if (touchesPower) affectedHazards.push('HAZ-103 (Class A - Display/Power)');
+    // 2. Resolve trigger key for BFS graph traversal
+    let triggerKey = keyMatches[0];
+    if (!triggerKey) {
+      const lower = fullText.toLowerCase();
+      if (lower.includes('bolus') || lower.includes('clamp') || lower.includes('motor') || lower.includes('flow') || lower.includes('pwm')) {
+        triggerKey = 'srs-104';
+      } else if (lower.includes('droplet') || lower.includes('sensor') || lower.includes('stall') || lower.includes('photodiode')) {
+        triggerKey = 'srs-105';
+      } else if (lower.includes('oled') || lower.includes('battery') || lower.includes('voltage') || lower.includes('spi')) {
+        triggerKey = 'srs-106';
+      }
+    }
 
-    const isTargeted = touchesBolus || touchesDroplet || touchesPower;
+    // 3. Execute deterministic BFS blast-radius traversal on active compliance graph
+    const blastRadius = triggerKey ? ComplianceEngine.computeBlastRadius(triggerKey, suite) : undefined;
+    const affectedHazards = blastRadius && blastRadius.affectedHazardKeys.length > 0
+      ? blastRadius.affectedHazardKeys.map((k) => {
+          const l = suite.traceLinks.find((link) => link.hazard.key.toUpperCase() === k.toUpperCase());
+          return l ? `${l.hazard.key} (${l.hazard.riskClass.replace('_', ' ')} - ${l.hazard.title.split(':')[0]})` : k;
+        })
+      : [];
+
+    // Match any trace links touched by detected keys or trigger
+    const matchedLinks = suite.traceLinks.filter((l) => {
+      const linkKeys = [l.hazard.key, l.work.key, l.spec.id, l.test.testKey].map((k) => k.toUpperCase());
+      return keyMatches.some((k) => linkKeys.includes(k)) || (triggerKey && linkKeys.includes(triggerKey.toUpperCase()));
+    });
+
+    const isTargeted = affectedHazards.length > 0 || matchedLinks.length > 0;
+
+    // Release gate: only block if touched safety links have unverified compliance states (failing tests, signature drift)
+    // Non-blocking Class A/B changes with passing verification tests and valid signatures are authorized to ship.
+    const hasUnverifiedGaps = isTargeted
+      ? matchedLinks.some((l) => l.complianceState !== 'VERIFIED')
+      : suite.releaseBlocked;
+
+    const canShip = !hasUnverifiedGaps;
 
     let guidance: string[];
-    if (touchesBolus && suite.releaseBlocked) {
+    if (hasUnverifiedGaps && blastRadius && blastRadius.transitiveActionPlan.length > 0) {
       guidance = [
-        'CRITICAL: Diff modifies bolus delivery logic governed by ISO 14971 Class C Hazard HAZ-101.',
-        'Execute automated Hardware-in-the-Loop test for TEST-88 before merging.',
-        'Re-certify 21 CFR Part 11 electronic signature on Confluence SRS-104 (revision v3).',
+        `CRITICAL: Diff/Action impacts safety-critical graph rooted at ${blastRadius.triggerArtifact.title}.`,
+        ...blastRadius.transitiveActionPlan,
       ];
     } else if (suite.releaseBlocked) {
       guidance = suite.blockingReasons.map((r) => `Open compliance gap: ${r}`);
@@ -88,17 +114,27 @@ export class McpToolService {
 
     return {
       standards: suite.standards,
-      canShipToClinicalProduction: !suite.releaseBlocked,
+      canShipToClinicalProduction: canShip,
       verifiedCoveragePercentage: `${suite.verifiedPercentage}%`,
       classCSummary: {
         totalClassC: suite.classCCount,
         status: suite.releaseBlocked ? 'BLOCKED_BY_SAFETY_GATE' : 'CERTIFIED_READY',
       },
       signatureDriftDetected: suite.signatureDriftCount > 0,
-      touchesSafetyCriticalCode: isTargeted,
+      touchesSafetyCriticalCode: !!isTargeted,
       affectedHazards: affectedHazards.length > 0 ? affectedHazards : ['None (General non-critical change)'],
       activeViolations: suite.blockingReasons,
       remediationGuidance: guidance,
+      graphBlastRadius: blastRadius
+        ? {
+            trigger: blastRadius.triggerArtifact.title,
+            severity: blastRadius.impactSeverity,
+            traversalPath: blastRadius.traversalPath,
+            blockedWorkItems: blastRadius.blockedWorkItemKeys,
+            invalidatedTests: blastRadius.invalidatedTestKeys,
+            executionTimeMs: blastRadius.executionTimeMs,
+          }
+        : undefined,
     };
   }
 }

@@ -4,6 +4,7 @@ const crypto = require('node:crypto');
 const { ComplianceEngine } = require('../dist/compliance-engine');
 const { verifyHmacSignature, mcpWebtriggerHandler, workflowValidatorHandler, setNonceStore, createInMemoryNonceStore, claimNonce } = require('../dist/index');
 const { SeederService } = require('../dist/seeder');
+const { McpToolService } = require('../dist/mcp-server');
 
 test.describe('ComplianceEngine - IEC 62304 traceability & signature-fingerprint rules', () => {
   const baseHazard = {
@@ -118,6 +119,7 @@ test.describe('Webtrigger Cryptographic Security - HMAC-SHA256 & Replay Protecti
 
   let inMemoryStore;
   test.beforeEach(() => {
+    process.env.MEDTRACE_MCP_SECRET = secret;
     inMemoryStore = createInMemoryNonceStore();
     setNonceStore(inMemoryStore);
   });
@@ -196,6 +198,107 @@ test.describe('Webtrigger Cryptographic Security - HMAC-SHA256 & Replay Protecti
     // The key now has the fresh timestamp
     const record = await inMemoryStore.get(`nonce:${nonce}`);
     assert.ok(Date.now() - record.consumedAt < 1000);
+  });
+
+  test.it('fails closed with HTTP 500 when MEDTRACE_MCP_SECRET is unset in environment', async () => {
+    delete process.env.MEDTRACE_MCP_SECRET;
+    const resp = await mcpWebtriggerHandler({ method: 'GET', headers: { 'x-medtrace-key': 'anything' } });
+    assert.strictEqual(resp.statusCode, 500);
+    assert.match(resp.body, /fail-closed/);
+    process.env.MEDTRACE_MCP_SECRET = secret;
+  });
+
+  test.it('allows external transition validation via webtrigger action simulate_transition', async () => {
+    const ts = Date.now().toString();
+    const nonce = 'val-' + crypto.randomUUID();
+    const body = JSON.stringify({ action: 'simulate_transition', issueKey: 'MED-42' });
+    const sig = crypto.createHmac('sha256', secret).update(`${ts}.${nonce}.${body}`).digest('hex');
+    const resp = await mcpWebtriggerHandler({
+      method: 'POST',
+      headers: {
+        'x-medtrace-key': secret,
+        'x-medtrace-timestamp': ts,
+        'x-medtrace-nonce': nonce,
+        'x-medtrace-signature': `sha256=${sig}`,
+      },
+      body,
+    });
+    assert.strictEqual(resp.statusCode, 200);
+    const parsed = JSON.parse(resp.body);
+    assert.strictEqual(typeof parsed.result, 'boolean');
+  });
+});
+
+test.describe('McpToolService & Rovo Agent - Dynamic Graph Traversal', () => {
+  test.it('extracts issue key and performs BFS blast-radius traversal on code diff', async () => {
+    const res = await McpToolService.verifyIecCompliance({
+      prDiff: 'diff --git a/firmware.c b/firmware.c\n+// fixes MED-42 PWM rate',
+    });
+    assert.strictEqual(res.touchesSafetyCriticalCode, true);
+    assert.ok(res.graphBlastRadius);
+    assert.strictEqual(typeof res.graphBlastRadius.executionTimeMs, 'number');
+    assert.ok(res.graphBlastRadius.traversalPath.length > 0);
+  });
+
+  test.it('maps component keywords to specification nodes and executes graph traversal', async () => {
+    const res = await McpToolService.verifyIecCompliance({
+      componentName: 'motor bolus delivery clamp',
+    });
+    assert.strictEqual(res.touchesSafetyCriticalCode, true);
+    assert.ok(res.graphBlastRadius);
+    assert.match(res.graphBlastRadius.trigger, /SRS-104/);
+  });
+
+  test.it('blocks shipping when diff touches Class C hazard with unverified gaps', async () => {
+    const res = await McpToolService.verifyIecCompliance({
+      issueKey: 'MED-42',
+    });
+    assert.strictEqual(res.touchesSafetyCriticalCode, true);
+    assert.strictEqual(res.canShipToClinicalProduction, false);
+  });
+
+  test.it('allows shipping for Class A non-critical change when suite has no blocking violations for that component', async () => {
+    const originalGet = SeederService.getActiveComplianceSuite;
+    SeederService.getActiveComplianceSuite = async () => ({
+      standards: ['IEC 62304:2006+AMD1:2015'],
+      releaseBlocked: false,
+      blockingReasons: [],
+      verifiedPercentage: 100,
+      classCCount: 1,
+      signatureDriftCount: 0,
+      traceLinks: [
+        {
+          hazard: { key: 'HAZ-103', riskClass: 'CLASS_A', title: 'Display Transient Glitch' },
+          spec: { id: 'srs-106', title: 'SRS-106', sha256Hash: 'abc', isSignatureInvalidated: false },
+          work: { key: 'MED-44' },
+          test: { testKey: 'TEST-90', status: 'PASSED' },
+          signature: { id: 'sig-003', artifactSha256: 'abc', isValid: true },
+          complianceState: 'VERIFIED',
+          violations: [],
+        },
+      ],
+    });
+
+    try {
+      const res = await McpToolService.verifyIecCompliance({
+        componentName: 'oled backlight display',
+      });
+      assert.strictEqual(res.touchesSafetyCriticalCode, true);
+      assert.strictEqual(res.canShipToClinicalProduction, true);
+    } finally {
+      SeederService.getActiveComplianceSuite = originalGet;
+    }
+  });
+});
+
+test.describe('SeederService - Cryptographic Integrity & Dynamic Hashes', () => {
+  test.it('dynamically computes non-empty SHA-256 hashes for all specifications and signatures', async () => {
+    const suite = await SeederService.getActiveComplianceSuite();
+    for (const link of suite.traceLinks) {
+      assert.strictEqual(link.spec.sha256Hash.length, 64);
+      assert.notStrictEqual(link.spec.sha256Hash, 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855');
+      assert.strictEqual(link.signature.artifactSha256.length, 64);
+    }
   });
 });
 
