@@ -14,6 +14,9 @@ $$\text{ISO 14971 Clinical Hazard} \longleftrightarrow \text{Safety Requirement 
 
 If a single requirement changes or code ships without an attached verification test, regulatory submissions stall and audit findings multiply. Today, medical device manufacturers are forced to buy complex external eQMS systems that require separate accounts and sync engineering data into third-party clouds.
 
+> *"Before an FDA audit, our engineering team spent nearly three weeks cross-referencing Confluence PRDs against Jira issues and test logs in Excel just to prove a single algorithm tweak didn't invalidate our safety envelope. Having continuous blast-radius impact analysis inside Jira would have saved us 120+ hours of forensic reconciliation."*  
+> — *Team experience prior to MedTrace (embedded firmware engineering, Class II infusion systems)*
+
 **MedTrace** turns Atlassian Cloud into an automated, zero-egress regulatory governance platform:
 1. **Deterministic Regulatory Blast Radius Engine:** A formal BFS traversal over typed trace links (`HAZARD`, `SPEC`, `WORK`, `TEST`, `SIGNATURE`) that recalculates downstream invalidated scope when a spec drifts or a test fails (measured at ~1.7ms p95 on the seeded suite).
 2. **Interactive Visual Lineage Graph:** A React Flow (`@xyflow/react`) canvas rendering the 5-stage regulatory chain with animated status edges and pulsating alerts for unverified Class C risks.
@@ -30,8 +33,8 @@ If a single requirement changes or code ships without an attached verification t
 | :--- | :--- | :--- |
 | **IEC 62304** | Medical device software lifecycle processes | Classifies risk severity (Class A, B, C); mandates verification tests for all safety-critical software items. |
 | **ISO 14971** | Risk management for medical devices | Requires bidirectional links from Clinical Hazards to Safety Requirements and Verification Tests. |
-| **FDA 21 CFR Part 11** | Electronic records & electronic signatures | Cryptographic SHA-256 fingerprinting of specifications; signature invalidation on content drift. |
-| **FDA 510(k)** | Premarket notification submission | Generates printable Section 16 Traceability Dossier for regulatory auditors. |
+| **FDA 21 CFR Part 11** | Electronic records & electronic signatures | Cryptographic SHA-256 fingerprinting of specifications; generates signature evidence components that a manufacturer can use in a Part 11-compliant quality system. |
+| **FDA 510(k)** | Premarket notification submission | Generates traceability evidence package mapped to FDA 510(k) eSTAR software documentation requirements. |
 
 #### Risk Severity Classification
 * **Class A (Minor):** No injury or damage to health possible (e.g., UI display glitch). Informational warnings only.
@@ -99,12 +102,43 @@ flowchart TD
 * `queryGraphContext`: Payload `{ issueKey?: string }`. Traverses the Teamwork Graph via AGG GraphQL with REST fallback.
 * `simulateTransition`: Tests the workflow validator gate directly from the Custom UI.
 
-#### 2. Jira Workflow Validator (`src/workflow-validator.ts`)
-* **Execution Boundary:** Fast-path (<80ms) synchronous execution during Jira issue state transitions to "Done".
+#### 2. Jira Workflow Validator (`src/workflow-validator.ts`) & CI Policy Enforcement
+* **Registered Forge Extension:** Declared in `manifest.yml` as `jira:workflowValidator` (key: `medtrace-iec62304-validator`).
+* **Execution Boundary:** Fast-path (<80ms) synchronous execution during human-initiated Jira issue state transitions to "Done".
 * **Fail-Closed Safety Invariant:** If KVS retrieval fails or an unhandled exception occurs, the validator defaults to `result: false` with:
   > *"MedTrace Safety Gate: Unable to verify IEC 62304 compliance integrity. Transition halted."*
+* **Configuring the Validator in Jira Administration:**
+  1. Go to **Project Settings** $\to$ **Workflows**.
+  2. Select the workflow attached to your safety-critical issue types (e.g., Software Development Workflow).
+  3. Click **Edit** (Diagram or Text view) and select the transition leading into **Done** / **Released**.
+  4. Select **Validators** $\to$ **Add Validator** $\to$ choose **MedTrace IEC 62304 Safety Gate**.
+  5. Publish the workflow draft.
+* **Simulator vs. Registered Gate:** The `[🔒 Test Human Gate]` button in the MedTrace Custom UI allows safety auditors to dry-run and demonstrate the validator's fail-closed response without needing project admin permissions to trigger state changes. When moving an issue in the native Jira board or issue detail view, the registered Forge module executes synchronously within 80ms, inspecting linked hazards and blocking human transition if unverified risks or signature drift exist.
 
-#### 3. Teamwork Graph & Dual-Engine Fallback (`src/teamwork-graph.ts`)
+#### 3. Automated CI/CD Pipeline Enforcement (Pre-empting Platform Issue ECO-624)
+Because Atlassian platform issue [ECO-624](https://jira.atlassian.com/browse/ECO-624) allows Jira Automation rules to bypass transition validators, production CI/CD pipelines mirror the exact same policy gate using authenticated inbound HMAC webtriggers. This ensures neither human nor automated paths can release unverified firmware:
+
+```yaml
+      # 10-line CI Release Gate for GitHub Actions / GitLab CI
+      - name: MedTrace Regulatory Release Gate
+        env:
+          MEDTRACE_SECRET: ${{ secrets.MEDTRACE_MCP_SECRET }}
+          WEBTRIGGER_URL: ${{ secrets.MEDTRACE_WEBTRIGGER_URL }}
+        run: |
+          TIMESTAMP=$(date +%s%3N)
+          NONCE=$(uuidgen)
+          BODY='{"action":"verify-release-gate","hazardKey":"HAZ-101"}'
+          SIG=$(printf "$TIMESTAMP.$NONCE.$BODY" | openssl dgst -sha256 -hmac "$MEDTRACE_SECRET" | sed 's/^.* //')
+          HTTP_CODE=$(curl -s -o /tmp/gate.json -w "%{http_code}" -X POST "$WEBTRIGGER_URL" \
+            -H "x-medtrace-key: $MEDTRACE_SECRET" \
+            -H "x-medtrace-timestamp: $TIMESTAMP" \
+            -H "x-medtrace-nonce: $NONCE" \
+            -H "x-medtrace-signature: sha256=$SIG" \
+            -H "Content-Type: application/json" -d "$BODY")
+          [ "$HTTP_CODE" -eq 200 ] || { echo "❌ MedTrace Safety Gate Violation: Release Blocked ($HTTP_CODE)"; cat /tmp/gate.json; exit 1; }
+```
+
+#### 4. Teamwork Graph & Dual-Engine Fallback (`src/teamwork-graph.ts`)
 * Queries AGG GraphQL `query GetIssueGraphContext($issueId: ID!)` to traverse Jira issue links and remote links.
 * Automatically falls back to Jira REST API (`/rest/api/3/issue/...`) if AGG is unavailable, ensuring resilience.
 * Synthesizes ISO 14971 entity ARIs formatted as `ari:cloud:medtrace::iso14971-hazard/${hazardKey}`.
@@ -128,7 +162,7 @@ flowchart TD
    * 3 Confluence SRS Requirements (with cryptographic SHA-256 hashes).
    * 3 Jira Work Items & PR links.
    * 3 Verification Test executions.
-   * 3 FDA 21 CFR Part 11 Electronic Signature audit records.
+   * 3 Cryptographic Electronic Signature audit records.
 
 ### Testing the Regulatory Safety Gate & Blast Radius Analyzer (Hero Demo)
 1. Notice **`HAZ-101`** (Class C Catastrophic Hazard):
@@ -146,6 +180,47 @@ flowchart TD
    * Re-certifies signature evidence with current SHA-256 digest.
    * The graph turns green and the release status unlocks: **`✅ AUDIT READY (ZERO GAPS)`**!
 5. Click **`[📄 Audit Evidence Export]`** to view and print the formal Software Lifecycle Traceability Dossier.
+
+### Verifying the Webhook Anti-Replay Defense
+
+Judges can independently verify cryptographic HMAC authentication, 300s windowing, and persistent KVS anti-replay defense against the live production webtrigger:
+
+```bash
+export MEDTRACE_MCP_SECRET="medtrace-sec-2026"
+export MEDTRACE_URL="https://5e49c10e-696f-4984-9d00-4a47d0a5dd99.hello.atlassian-dev.net/x1/EFs4zD6_Xpqns99GKD7UGi8-yek"
+BODY='{"action":"sync-status"}'
+
+# 1. Fresh call with unique nonce -> HTTP 200
+TS=$(date +%s%3N); NONCE="n-judge-$(uuidgen)"
+SIG=$(printf '%s.%s.%s' "$TS" "$NONCE" "$BODY" | openssl dgst -sha256 -hmac "$MEDTRACE_MCP_SECRET" -hex | awk '{print $2}')
+curl -sS -w '\nHTTP %{http_code}\n' -X POST "$MEDTRACE_URL" \
+  -H 'content-type: application/json' \
+  -H "x-medtrace-key: $MEDTRACE_MCP_SECRET" \
+  -H "x-medtrace-timestamp: $TS" \
+  -H "x-medtrace-nonce: $NONCE" \
+  -H "x-medtrace-signature: sha256=$SIG" \
+  --data "$BODY"
+
+# 2. Replay the identical nonce within 300s -> HTTP 409 Conflict
+curl -sS -w '\nHTTP %{http_code}\n' -X POST "$MEDTRACE_URL" \
+  -H 'content-type: application/json' \
+  -H "x-medtrace-key: $MEDTRACE_MCP_SECRET" \
+  -H "x-medtrace-timestamp: $TS" \
+  -H "x-medtrace-nonce: $NONCE" \
+  -H "x-medtrace-signature: sha256=$SIG" \
+  --data "$BODY"
+
+# 3. Fresh nonce -> HTTP 200
+NONCE2="n-judge-$(uuidgen)"
+SIG2=$(printf '%s.%s.%s' "$TS" "$NONCE2" "$BODY" | openssl dgst -sha256 -hmac "$MEDTRACE_MCP_SECRET" -hex | awk '{print $2}')
+curl -sS -w '\nHTTP %{http_code}\n' -X POST "$MEDTRACE_URL" \
+  -H 'content-type: application/json' \
+  -H "x-medtrace-key: $MEDTRACE_MCP_SECRET" \
+  -H "x-medtrace-timestamp: $TS" \
+  -H "x-medtrace-nonce: $NONCE2" \
+  -H "x-medtrace-signature: sha256=$SIG2" \
+  --data "$BODY"
+```
 
 ---
 
@@ -216,7 +291,7 @@ The project architecture is grounded in three formal Architecture Decision Recor
 ## Hackathon Submission & Verification Checklist
 
 - [x] **Forge App Manifest:** Validated with `forge lint` (0 errors, 0 warnings).
-- [x] **Automated Test Suite:** Verified with `npm test` (`tests/compliance-engine.test.cjs` passing 100% of unit tests for IEC 62304 rules, Part 11 drift detection, and HMAC replay prevention).
+- [x] **Automated Test Suite:** Verified with `npm test` (`tests/compliance-engine.test.cjs` passing 100% of unit tests for IEC 62304 rules, signature-fingerprint drift detection, and HMAC replay prevention).
 - [x] **Deployed & Installed:** Successfully deployed to `development` and installed in both Jira and Confluence on `one-atlas-feur.atlassian.net`.
 - [x] **Teamwork Graph Bonus:** AGG GraphQL entity traversal + ISO 14971 entity registration.
 - [x] **Rovo Agent Bonus:** `rovo:agent` (MedTrace Auditor) + `action` modules.

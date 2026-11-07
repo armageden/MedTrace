@@ -66,9 +66,11 @@ sequenceDiagram
 
 The webtrigger endpoint in `src/index.ts` verifies incoming requests using `verifyHmacSignature()`:
 1. **Shared Key Requirement (`x-medtrace-key`):** Enforced on all requests (`GET` and `POST`) to protect confidential clinical safety hazards and audit trails from unauthenticated scrapers.
-2. **HMAC-SHA256 Payload Signature:** For state mutations (`POST`), the client signs `${timestamp}.${rawBody}` using the shared secret and passes `x-medtrace-signature: sha256=<hex>`.
+2. **HMAC-SHA256 Payload Signature:** For state mutations (`POST`), the client signs `${timestamp}.${nonce}.${rawBody}` using the shared secret and passes `x-medtrace-signature: sha256=<hex>`.
 3. **Anti-Replay Window (300 Seconds):** The server verifies `x-medtrace-timestamp`. If `Math.abs(Date.now() - reqTime) > 300_000`, the request is rejected with HTTP 401.
 4. **Timing-Safe Digest Comparison:** Verifies signatures using `crypto.timingSafeEqual` over pre-computed digest buffers, preventing timing side-channel attacks.
+5. **In-Window Nonce Replay Defense (`x-medtrace-nonce`):** Rejects replayed requests within the 300-second window using persistent Forge app storage (`storage:app`), halting duplicate invocations with HTTP 409 Conflict across ephemeral serverless containers.
+6. **Header-Only Authentication:** Rejects credentials passed via URL query parameters (`query.token`) to prevent secrets from leaking into server logs, proxies, and browser histories.
 
 Automated verification tests are maintained in `tests/compliance-engine.test.cjs`.
 
@@ -99,6 +101,7 @@ Automated verification tests are maintained in `tests/compliance-engine.test.cjs
 |---|---|
 | `mcp-server/index.mjs` | Local stdio JSON-RPC MCP server with live cloud sync and offline fallback. |
 | `src/mcp-server.ts` | Handlers for manifest-declared `rovo:mcp` tools and Rovo chat actions. |
+| `src/nonce-store.ts` | NonceStore interface and `@forge/kvs` persistent store with lazy pruning. |
 | `src/index.ts` | Webtrigger handler verifying HMAC signatures and executing mutations. |
 | `tests/compliance-engine.test.cjs` | Unit tests for HMAC generation, timing safety, and replay window expiration. |
 

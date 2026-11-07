@@ -16,6 +16,7 @@ This runbook defines the mandatory post-task documentation synchronization proce
 | `src/workflow-validator.ts` | `docs/01-architecture/` |
 | `src/teamwork-graph.ts` | `docs/99-design-decisions/` |
 | `src/mcp-server.ts` | `docs/03-mcp-integration/` |
+| `src/nonce-store.ts` | `docs/03-mcp-integration/` |
 | `mcp-server/index.mjs` | `docs/03-mcp-integration/` |
 | `static/frontend/src/` | `docs/01-architecture/` |
 

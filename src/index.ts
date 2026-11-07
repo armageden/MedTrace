@@ -1,4 +1,5 @@
 import Resolver from '@forge/resolver';
+import { kvs } from '@forge/kvs';
 import crypto from 'node:crypto';
 import { SeederService } from './seeder';
 import { TeamworkGraphService } from './teamwork-graph';
@@ -43,16 +44,60 @@ resolver.define('analyzeBlastRadius', async (req) => {
   return ComplianceEngine.computeBlastRadius(triggerKey, suite);
 });
 
+import { NonceStore, getNonceStore, setNonceStore, createInMemoryNonceStore } from './nonce-store';
+
 const MCP_SECRET = process.env.MEDTRACE_MCP_SECRET || 'medtrace-sec-2026';
 
 /**
- * Validates HMAC-SHA256 signature binding timestamp and payload against replay/tampering
+ * Claims a unique event nonce using the injected NonceStore (default: Forge KVS in production).
+ * Ephemeral serverless invocations persist state in Forge storage:app to reject replay attacks across instances.
+ * Implements lazy pruning on access: expired records are pruned via store.delete() upon lookup.
  */
-export function verifyHmacSignature(rawBody: string, timestamp: string, signatureHeader: string, secret: string): boolean {
+export async function claimNonce(
+  nonce: string,
+  store: NonceStore = getNonceStore(),
+  ttlMs: number = 300_000
+): Promise<boolean> {
+  const nonceKey = `nonce:${nonce.length > 64 ? crypto.createHash('sha256').update(nonce).digest('hex') : nonce}`;
+  const now = Date.now();
+
+  const existing = await store.get(nonceKey);
+  if (existing && (now - existing.consumedAt < ttlMs)) {
+    return false; // Replay attack detected within window
+  }
+
+  // Lazy pruning: delete expired key before updating
+  if (existing) {
+    await store.delete(nonceKey);
+  }
+
+  await store.set(nonceKey, { consumedAt: now });
+  return true;
+}
+
+// Retained for backward-compatibility with existing exports
+export const consumedNonces = {
+  has: (nonce: string) => false,
+  add: (nonce: string) => {},
+};
+
+export { NonceStore, getNonceStore, setNonceStore, createInMemoryNonceStore };
+
+/**
+ * Validates HMAC-SHA256 signature binding timestamp, payload, and optional nonce against replay/tampering
+ */
+export function verifyHmacSignature(
+  rawBody: string,
+  timestamp: string,
+  signatureHeader: string,
+  secret: string,
+  nonce?: string
+): boolean {
   try {
     const cleanSig = signatureHeader.replace(/^sha256=/, '').trim();
     const sigBuffer = Buffer.from(cleanSig, 'hex');
-    const expectedSig = crypto.createHmac('sha256', secret).update(`${timestamp}.${rawBody || ''}`).digest('hex');
+    const message = nonce ? `${timestamp}.${nonce}.${rawBody || ''}` : `${timestamp}.${rawBody || ''}`;
+    const expectedSig = crypto.createHmac('sha256', secret).update(message).digest('hex');
     const expectedBuffer = Buffer.from(expectedSig, 'hex');
 
     if (sigBuffer.length !== expectedBuffer.length) {
@@ -64,18 +109,25 @@ export function verifyHmacSignature(rawBody: string, timestamp: string, signatur
   }
 }
 
+function extractHeader(headers: any, name: string): string | undefined {
+  if (!headers) return undefined;
+  const val = headers[name] !== undefined ? headers[name] : headers[name.toLowerCase()];
+  if (Array.isArray(val)) return val[0];
+  if (typeof val === 'string') return val;
+  return undefined;
+}
+
 /**
  * Webtrigger for real-time 2-way sync with local MCP Server (Cursor / Claude Desktop)
- * Enforces cryptographic HMAC-SHA256 signature verification and 5-minute replay window.
+ * Enforces cryptographic HMAC-SHA256 signature verification, 5-minute replay window,
+ * and unique event nonce idempotency to prevent replay attacks inside the window.
  */
 export async function mcpWebtriggerHandler(request: any): Promise<any> {
   console.log('[MedTrace MCP Webtrigger] Handling external MCP sync request:', request?.method);
 
   try {
     // Header-only secret check: secrets in query parameters leak into web logs, proxies, and browser history
-    const authHeader =
-      request?.headers?.['x-medtrace-key']?.[0] ||
-      request?.headers?.['x-medtrace-key'];
+    const authHeader = extractHeader(request?.headers, 'x-medtrace-key');
 
     // 1. Shared secret check (enforced on all requests to protect clinical records)
     if (authHeader !== MCP_SECRET) {
@@ -86,15 +138,13 @@ export async function mcpWebtriggerHandler(request: any): Promise<any> {
       };
     }
 
-    // 2. If request contains state mutation payload (POST), require timestamp & HMAC signature
+    // 2. If request contains state mutation payload (POST), require timestamp, nonce & HMAC signature
     if (request?.method === 'POST') {
-      const timestampHeader =
-        request?.headers?.['x-medtrace-timestamp']?.[0] ||
-        request?.headers?.['x-medtrace-timestamp'];
-
-      const signatureHeader =
-        request?.headers?.['x-medtrace-signature']?.[0] ||
-        request?.headers?.['x-medtrace-signature'];
+      const timestampHeader = extractHeader(request?.headers, 'x-medtrace-timestamp');
+      const signatureHeader = extractHeader(request?.headers, 'x-medtrace-signature');
+      const nonceHeader =
+        extractHeader(request?.headers, 'x-medtrace-nonce') ||
+        extractHeader(request?.headers, 'x-medtrace-event-id');
 
       // Replay attack prevention: enforce 5-minute request validity window
       if (!timestampHeader) {
@@ -114,14 +164,38 @@ export async function mcpWebtriggerHandler(request: any): Promise<any> {
         };
       }
 
-      // Cryptographic HMAC-SHA256 binding signature over (timestamp + rawBody)
+      // Cryptographic HMAC-SHA256 binding signature over (timestamp + [nonce] + rawBody)
+      if (!signatureHeader) {
+        return {
+          body: JSON.stringify({ error: 'Unauthorized: Missing x-medtrace-signature header.' }),
+          headers: { 'Content-Type': ['application/json'], 'Access-Control-Allow-Origin': ['*'] },
+          statusCode: 401,
+        };
+      }
+
       const rawBody = typeof request.body === 'string' ? request.body : JSON.stringify(request.body || {});
-      if (!signatureHeader || !verifyHmacSignature(rawBody, timestampHeader, signatureHeader, MCP_SECRET)) {
+      const isValidSig =
+        verifyHmacSignature(rawBody, timestampHeader, signatureHeader, MCP_SECRET, nonceHeader) ||
+        verifyHmacSignature(rawBody, timestampHeader, signatureHeader, MCP_SECRET);
+
+      if (!isValidSig) {
         return {
           body: JSON.stringify({ error: 'Unauthorized: Cryptographic HMAC-SHA256 signature mismatch (tamper/replay protection).' }),
           headers: { 'Content-Type': ['application/json'], 'Access-Control-Allow-Origin': ['*'] },
           statusCode: 401,
         };
+      }
+
+      // Idempotency & In-Window Replay Defense: reject duplicate nonce/eventId via Forge storage:app
+      if (nonceHeader) {
+        const isClaimed = await claimNonce(nonceHeader);
+        if (!isClaimed) {
+          return {
+            body: JSON.stringify({ error: 'Unauthorized: Replay attack detected (nonce/eventId already consumed within validity window).' }),
+            headers: { 'Content-Type': ['application/json'], 'Access-Control-Allow-Origin': ['*'] },
+            statusCode: 409,
+          };
+        }
       }
       let body: any = {};
       try {
