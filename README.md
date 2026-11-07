@@ -186,7 +186,8 @@ Because Atlassian platform issue [ECO-624](https://jira.atlassian.com/browse/ECO
 Judges can independently verify cryptographic HMAC authentication, 300s windowing, and persistent KVS anti-replay defense against the live production webtrigger:
 
 ```bash
-export MEDTRACE_MCP_SECRET="medtrace-sec-2026"
+# Set your webhook credentials (configured via MEDTRACE_MCP_SECRET or Devpost evaluation details)
+export MEDTRACE_MCP_SECRET="${MEDTRACE_MCP_SECRET:-<YOUR_MEDTRACE_SECRET>}"
 export MEDTRACE_URL="https://5e49c10e-696f-4984-9d00-4a47d0a5dd99.hello.atlassian-dev.net/x1/EFs4zD6_Xpqns99GKD7UGi8-yek"
 BODY='{"action":"sync-status"}'
 
@@ -235,7 +236,7 @@ MedTrace includes a standalone MCP server (`medtrace/mcp-server/index.mjs`) comm
 
 ### Cryptographic Wire Protocol & Replay Guard
 When mutating data or querying live compliance state, the local MCP client signs requests:
-* **Header `x-medtrace-key`:** Secret shared token matching `process.env.MEDTRACE_MCP_SECRET` (default: `'medtrace-sec-2026'`).
+* **Header `x-medtrace-key`:** Secret shared token matching `process.env.MEDTRACE_MCP_SECRET` (configured via Forge environment variables or app secret).
 * **Header `x-medtrace-timestamp`:** Epoch timestamp in milliseconds. Webtrigger enforces a **300,000ms (5-minute) anti-replay window** (`Math.abs(Date.now() - reqTime) > 300_000` halts with HTTP 401).
 * **Header `x-medtrace-signature`:** Hex HMAC-SHA256 digest of `${timestamp}.${rawBody}` verified with constant-time `crypto.timingSafeEqual`.
 
@@ -247,7 +248,7 @@ When mutating data or querying live compliance state, the local MCP client signs
       "command": "node",
       "args": ["/absolute/path/to/medtrace/mcp-server/index.mjs"],
       "env": {
-        "MEDTRACE_MCP_SECRET": "medtrace-sec-2026",
+        "MEDTRACE_MCP_SECRET": "<your-mcp-secret>",
         "MEDTRACE_WEBTRIGGER_URL": "https://<forge-app-id>.hello.atlassian-dev.net/x1/..."
       }
     }
