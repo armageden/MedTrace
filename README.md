@@ -183,11 +183,16 @@ Because Atlassian platform issue [ECO-624](https://jira.atlassian.com/browse/ECO
 
 ### Verifying the Webhook Anti-Replay Defense
 
-Judges can independently verify cryptographic HMAC authentication, 300s windowing, and persistent KVS anti-replay defense against the live production webtrigger:
+Judges can independently verify cryptographic HMAC authentication, 300s windowing, and persistent KVS anti-replay defense against the live production webtrigger.
+
+> [!NOTE]
+> **Dual-Layer Defense-in-Depth:** Requests enforce two complementary security headers:
+> 1. `x-medtrace-key`: Fast $O(1)$ perimeter token check (enforced on all requests, GET and POST) to drop unauthorized scanner probes immediately before allocating CPU for cryptographic digest computation.
+> 2. `x-medtrace-signature`: Cryptographic HMAC-SHA256 digest covering `${timestamp}.${nonce}.${rawBody}`. Enforces tamper-proofing, non-repudiation, and non-reusable nonce consumption on state mutations (POST).
 
 ```bash
 # Set your webhook credentials (configured via MEDTRACE_MCP_SECRET or Devpost evaluation details)
-export MEDTRACE_MCP_SECRET="${MEDTRACE_MCP_SECRET:-<YOUR_MEDTRACE_SECRET>}"
+export MEDTRACE_MCP_SECRET="${MEDTRACE_MCP_SECRET:?Set MEDTRACE_MCP_SECRET before running this verification}"
 export MEDTRACE_URL="https://5e49c10e-696f-4984-9d00-4a47d0a5dd99.hello.atlassian-dev.net/x1/EFs4zD6_Xpqns99GKD7UGi8-yek"
 BODY='{"action":"sync-status"}'
 
@@ -202,7 +207,7 @@ curl -sS -w '\nHTTP %{http_code}\n' -X POST "$MEDTRACE_URL" \
   -H "x-medtrace-signature: sha256=$SIG" \
   --data "$BODY"
 
-# 2. Replay the identical nonce within 300s -> HTTP 409 Conflict
+# 2. Replay the identical payload & headers within 300s -> HTTP 409 Conflict
 curl -sS -w '\nHTTP %{http_code}\n' -X POST "$MEDTRACE_URL" \
   -H 'content-type: application/json' \
   -H "x-medtrace-key: $MEDTRACE_MCP_SECRET" \
@@ -211,7 +216,18 @@ curl -sS -w '\nHTTP %{http_code}\n' -X POST "$MEDTRACE_URL" \
   -H "x-medtrace-signature: sha256=$SIG" \
   --data "$BODY"
 
-# 3. Fresh nonce -> HTTP 200
+# 3. Attacker refreshes timestamp and re-signs with the same consumed nonce -> HTTP 409 Conflict
+TS_REFRESH=$(date +%s%3N)
+SIG_REFRESH=$(printf '%s.%s.%s' "$TS_REFRESH" "$NONCE" "$BODY" | openssl dgst -sha256 -hmac "$MEDTRACE_MCP_SECRET" -hex | awk '{print $2}')
+curl -sS -w '\nHTTP %{http_code}\n' -X POST "$MEDTRACE_URL" \
+  -H 'content-type: application/json' \
+  -H "x-medtrace-key: $MEDTRACE_MCP_SECRET" \
+  -H "x-medtrace-timestamp: $TS_REFRESH" \
+  -H "x-medtrace-nonce: $NONCE" \
+  -H "x-medtrace-signature: sha256=$SIG_REFRESH" \
+  --data "$BODY"
+
+# 4. Fresh nonce -> HTTP 200
 NONCE2="n-judge-$(uuidgen)"
 SIG2=$(printf '%s.%s.%s' "$TS" "$NONCE2" "$BODY" | openssl dgst -sha256 -hmac "$MEDTRACE_MCP_SECRET" -hex | awk '{print $2}')
 curl -sS -w '\nHTTP %{http_code}\n' -X POST "$MEDTRACE_URL" \
