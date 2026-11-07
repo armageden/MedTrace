@@ -39,7 +39,7 @@ export const FdaExportModal: React.FC<FdaExportModalProps> = ({ summary, onClose
         <div style={{ padding: '14px 20px', borderBottom: '1px solid #ebecf0', display: 'flex', alignItems: 'center', justifyContent: 'space-between', background: '#fafbfc' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <ShieldCheck size={18} color="#0052cc" />
-            <span style={{ fontWeight: 700, fontSize: 14, color: '#172b4d' }}>Traceability Audit Evidence Package (Section 16 Mapping)</span>
+            <span style={{ fontWeight: 700, fontSize: 14, color: '#172b4d' }}>FDA 510(k) eSTAR Software Documentation Traceability Package</span>
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
             <button

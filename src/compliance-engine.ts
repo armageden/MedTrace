@@ -50,7 +50,7 @@ export class ComplianceEngine {
     // 3. FDA 21 CFR Part 11: Electronic Signature Hash Validation
     if (spec.sha256Hash !== signature.artifactSha256 || spec.isSignatureInvalidated) {
       violations.push(
-        `21 CFR Part 11 Signature Drift: Confluence Spec [${spec.title}] was modified after clinical sign-off. Expected hash ${signature.artifactSha256.slice(0, 8)}..., current hash ${spec.sha256Hash.slice(0, 8)}...`
+        `Cryptographic Signature Drift: Confluence Spec [${spec.title}] was modified after clinical sign-off. Expected hash ${signature.artifactSha256.slice(0, 8)}..., current hash ${spec.sha256Hash.slice(0, 8)}...`
       );
       if (state !== 'SAFETY_VIOLATION') {
         state = 'SIGNATURE_DRIFT';
@@ -133,15 +133,43 @@ export class ComplianceEngine {
     const startTime = typeof performance !== 'undefined' ? performance.now() : Date.now();
     const cleanKey = (triggerKey || '').trim().toLowerCase();
 
-    // Find root link matching trigger (by spec id/title, hazard key, work key, or test key)
-    const matchingLink = suite.traceLinks.find(
+    // Identify all trace links connected to this trigger (by spec id/title, hazard key, work key, or test key)
+    let matchingLinks = suite.traceLinks.filter(
       (l) =>
         l.spec.id.toLowerCase() === cleanKey ||
         l.spec.title.toLowerCase().includes(cleanKey) ||
         l.hazard.key.toLowerCase() === cleanKey ||
+        l.hazard.mitigationRequirementId.toLowerCase() === cleanKey ||
         l.work.key.toLowerCase() === cleanKey ||
         l.test.testKey.toLowerCase() === cleanKey
-    ) || suite.traceLinks[0]; // Default to first link (HAZ-101 / SRS-104) if unspecified
+    );
+
+    // If no trigger was specified, default to first link for demonstration
+    if (matchingLinks.length === 0 && (!cleanKey || cleanKey === '')) {
+      matchingLinks = suite.traceLinks.slice(0, 1);
+    }
+
+    // If a specific trigger was requested but is completely disconnected / not found:
+    if (matchingLinks.length === 0) {
+      const endTime = typeof performance !== 'undefined' ? performance.now() : Date.now();
+      return {
+        triggerArtifact: {
+          type: 'SPEC',
+          id: cleanKey,
+          key: cleanKey,
+          title: `Unknown / Disconnected Artifact [${cleanKey}]`,
+          deltaReason: 'No downstream safety-critical trace links found in active project graph',
+        },
+        impactSeverity: 'MINOR',
+        affectedHazardKeys: [],
+        blockedWorkItemKeys: [],
+        invalidatedTestKeys: [],
+        invalidatedSignatureIds: [],
+        traversalPath: [],
+        transitiveActionPlan: ['No safety-critical artifacts affected.'],
+        executionTimeMs: parseFloat(Math.max(0.01, endTime - startTime).toFixed(2)),
+      };
+    }
 
     const visited = new Set<string>();
     const traversalPath: BlastRadiusReport['traversalPath'] = [];
@@ -151,95 +179,120 @@ export class ComplianceEngine {
     const invalidatedSignatureIds: string[] = [];
     const transitiveActionPlan: string[] = [];
 
-    // Trigger is Confluence Spec modification / drift
-    const specNode = matchingLink.spec;
-    visited.add(`spec:${specNode.id}`);
+    const rootSpec = matchingLinks[0].spec;
 
-    // Hop 1: SIGNS edge (Spec -> Signature)
-    const sig = matchingLink.signature;
-    const sigKey = `sig:${sig.id}`;
-    if (!visited.has(sigKey)) {
-      visited.add(sigKey);
-      const isSignatureDrifted = specNode.sha256Hash !== sig.artifactSha256 || specNode.isSignatureInvalidated;
-      if (isSignatureDrifted) {
-        invalidatedSignatureIds.push(sig.id);
+    for (const link of matchingLinks) {
+      const specNode = link.spec;
+      const specKey = `spec:${specNode.id}`;
+
+      // Hop 1: SIGNS edge (Spec -> Signature)
+      const sigList = ((link as any).signatures && Array.isArray((link as any).signatures))
+        ? [link.signature, ...(link as any).signatures].filter(Boolean)
+        : [link.signature].filter(Boolean);
+
+      for (const sig of sigList) {
+        const sigKey = `sig:${sig.id}`;
+        if (!visited.has(sigKey)) {
+          visited.add(sigKey);
+          const isSignatureDrifted = specNode.sha256Hash !== sig.artifactSha256 || specNode.isSignatureInvalidated;
+          if (isSignatureDrifted) {
+            invalidatedSignatureIds.push(sig.id);
+            traversalPath.push({
+              hop: traversalPath.length + 1,
+              from: `Spec [${specNode.title.split(':')[0].trim()}]`,
+              edge: 'SIGNS' as GraphEdgeType,
+              to: `Signature [${sig.signedBy}]`,
+              effect: `Signature evidence invalidated: hash drift detected (expected ${sig.artifactSha256.slice(0, 8)}..., current ${specNode.sha256Hash.slice(0, 8)}...).`,
+            });
+            transitiveActionPlan.push(`Re-certify clinical sign-off with ${sig.signedBy} (${sig.role}) for revised spec.`);
+          }
+        }
+      }
+
+      // Hop 2: MITIGATES edge (Spec -> Hazard)
+      const haz = link.hazard;
+      const mitigatesKey = `mitigates:${specNode.id}->${haz.key}`;
+      if (!visited.has(mitigatesKey)) {
+        visited.add(mitigatesKey);
+        if (!affectedHazardKeys.includes(haz.key)) {
+          affectedHazardKeys.push(haz.key);
+        }
         traversalPath.push({
-          hop: 1,
-          from: `Spec [${specNode.title.split(':')[0]}]`,
-          edge: 'SIGNS' as GraphEdgeType,
-          to: `Signature [${sig.signedBy}]`,
-          effect: `Signature evidence invalidated: hash drift detected (expected ${sig.artifactSha256.slice(0, 8)}..., current ${specNode.sha256Hash.slice(0, 8)}...).`,
+          hop: traversalPath.length + 1,
+          from: `Spec [${specNode.title.split(':')[0].trim()}]`,
+          edge: 'MITIGATES' as GraphEdgeType,
+          to: `Hazard [${haz.key}]`,
+          effect: `Safety mitigation compromised: ${haz.title} (${haz.riskClass.replace('_', ' ')}).`,
         });
-        transitiveActionPlan.push(`Re-certify clinical sign-off with ${sig.signedBy} (${sig.role}) for revised spec.`);
+        if (!transitiveActionPlan.some((p) => p.includes(haz.key))) {
+          transitiveActionPlan.push(`Review ISO 14971 risk mitigations for ${haz.key} against revised specifications.`);
+        }
+      }
+
+      // Hop 3: IMPLEMENTS edge (Hazard -> Jira Work Item)
+      const work = link.work;
+      const workKey = `work:${work.key}`;
+      if (!visited.has(workKey)) {
+        visited.add(workKey);
+        blockedWorkItemKeys.push(work.key);
+        traversalPath.push({
+          hop: traversalPath.length + 1,
+          from: `Hazard [${haz.key}]`,
+          edge: 'IMPLEMENTS' as GraphEdgeType,
+          to: `Jira Item [${work.key}]`,
+          effect: `Transition blocked: Firmware task assigned to ${work.assignee} locked under human-transition policy gate.`,
+        });
+        transitiveActionPlan.push(`Verify firmware implementation in ${work.key} (${work.prNumber || 'open PR'}) matches updated parameters.`);
+      }
+
+      // Hop 4: VERIFIES edge (Hazard -> Test Execution)
+      const test = link.test;
+      const testKey = `test:${test.testKey}`;
+      if (!visited.has(testKey)) {
+        visited.add(testKey);
+        invalidatedTestKeys.push(test.testKey);
+        traversalPath.push({
+          hop: traversalPath.length + 1,
+          from: `Hazard [${haz.key}]`,
+          edge: 'VERIFIES' as GraphEdgeType,
+          to: `Test [${test.testKey}]`,
+          effect: `Verification test evidence invalidated: ${test.title} must be executed against new specification parameters.`,
+        });
+        transitiveActionPlan.push(`Execute automated verification run for ${test.testKey} (${test.testType}) to regenerate passing evidence.`);
       }
     }
 
-    // Hop 2: MITIGATES edge (Spec -> Hazard)
-    const haz = matchingLink.hazard;
-    const hazKey = `hazard:${haz.key}`;
-    if (!visited.has(hazKey)) {
-      visited.add(hazKey);
-      affectedHazardKeys.push(haz.key);
-      traversalPath.push({
-        hop: 2,
-        from: `Spec [${specNode.title.split(':')[0]}]`,
-        edge: 'MITIGATES' as GraphEdgeType,
-        to: `Hazard [${haz.key}]`,
-        effect: `Safety mitigation compromised: ${haz.title} (${haz.riskClass.replace('_', ' ')}).`,
-      });
-      transitiveActionPlan.push(`Review ISO 14971 risk mitigations for ${haz.key} against revised specifications.`);
-    }
-
-    // Hop 3: IMPLEMENTS edge (Hazard -> Jira Work Item)
-    const work = matchingLink.work;
-    const workKey = `work:${work.key}`;
-    if (!visited.has(workKey)) {
-      visited.add(workKey);
-      blockedWorkItemKeys.push(work.key);
-      traversalPath.push({
-        hop: 3,
-        from: `Hazard [${haz.key}]`,
-        edge: 'IMPLEMENTS' as GraphEdgeType,
-        to: `Jira Item [${work.key}]`,
-        effect: `Transition blocked: Firmware task assigned to ${work.assignee} locked under human-transition policy gate.`,
-      });
-      transitiveActionPlan.push(`Verify firmware implementation in ${work.key} (${work.prNumber || 'open PR'}) matches updated parameters.`);
-    }
-
-    // Hop 4: VERIFIES edge (Hazard -> Test Execution)
-    const test = matchingLink.test;
-    const testKey = `test:${test.testKey}`;
-    if (!visited.has(testKey)) {
-      visited.add(testKey);
-      invalidatedTestKeys.push(test.testKey);
-      traversalPath.push({
-        hop: 4,
-        from: `Hazard [${haz.key}]`,
-        edge: 'VERIFIES' as GraphEdgeType,
-        to: `Test [${test.testKey}]`,
-        effect: `Verification test evidence invalidated: ${test.title} must be executed against new specification parameters.`,
-      });
-      transitiveActionPlan.push(`Execute automated verification run for ${test.testKey} (${test.testType}) to regenerate passing evidence.`);
-    }
-
-    const impactSeverity: BlastRadiusReport['impactSeverity'] =
-      haz.riskClass === 'CLASS_C'
-        ? 'CRITICAL_CATASTROPHIC'
-        : haz.riskClass === 'CLASS_B'
-        ? 'MAJOR_SERIOUS'
-        : 'MINOR';
+    // Determine highest severity among all affected hazards
+    const hasClassC = matchingLinks.some((l) => l.hazard.riskClass === 'CLASS_C');
+    const hasClassB = matchingLinks.some((l) => l.hazard.riskClass === 'CLASS_B');
+    const impactSeverity: BlastRadiusReport['impactSeverity'] = hasClassC
+      ? 'CRITICAL_CATASTROPHIC'
+      : hasClassB
+      ? 'MAJOR_SERIOUS'
+      : 'MINOR';
 
     const endTime = typeof performance !== 'undefined' ? performance.now() : Date.now();
     const executionTimeMs = parseFloat(Math.max(0.01, endTime - startTime).toFixed(2));
 
+    const isHazardTrigger = matchingLinks.some((l) => l.hazard.key.toLowerCase() === cleanKey);
+    const triggerHazard = isHazardTrigger ? matchingLinks.find((l) => l.hazard.key.toLowerCase() === cleanKey)!.hazard : null;
+
     return {
-      triggerArtifact: {
-        type: 'SPEC',
-        id: specNode.id,
-        key: specNode.title.split(':')[0].trim(),
-        title: specNode.title,
-        deltaReason: specNode.lastUpdated || 'Specification content modified',
-      },
+      triggerArtifact: triggerHazard
+        ? {
+            type: 'HAZARD',
+            id: triggerHazard.id,
+            key: triggerHazard.key,
+            title: triggerHazard.title,
+            deltaReason: `Hazard risk mitigation audit: ${triggerHazard.severity} risk`,
+          }
+        : {
+            type: 'SPEC',
+            id: rootSpec.id,
+            key: rootSpec.title.split(':')[0].trim(),
+            title: rootSpec.title,
+            deltaReason: rootSpec.lastUpdated || 'Specification content modified',
+          },
       impactSeverity,
       affectedHazardKeys,
       blockedWorkItemKeys,

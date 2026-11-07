@@ -50,10 +50,13 @@ export const TransitionModal: React.FC<TransitionModalProps> = ({ isOpen, onClos
             )}
             <div>
               <div style={{ fontSize: 11, fontWeight: 700, color: '#6b778c', textTransform: 'uppercase' }}>
-                Jira Workflow Validator Live Intercept
+                JIRA WORKFLOW VALIDATOR GATE — SIMULATION HARNESS
               </div>
               <div style={{ fontSize: 17, fontWeight: 800, color: '#172b4d', marginTop: 2 }}>
                 {isBlocked ? 'Transition to "Done" Blocked' : 'Transition to "Done" Authorized'}
+              </div>
+              <div style={{ fontSize: 11, color: '#6b778c', marginTop: 2, fontStyle: 'italic' }}>
+                Validator handler invoked directly in this harness; attaching to a workflow requires site-admin.
               </div>
             </div>
           </div>

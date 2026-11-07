@@ -2,10 +2,10 @@ const test = require('node:test');
 const assert = require('node:assert');
 const crypto = require('node:crypto');
 const { ComplianceEngine } = require('../dist/compliance-engine');
-const { verifyHmacSignature, mcpWebtriggerHandler, workflowValidatorHandler } = require('../dist/index');
+const { verifyHmacSignature, mcpWebtriggerHandler, workflowValidatorHandler, setNonceStore, createInMemoryNonceStore, claimNonce } = require('../dist/index');
 const { SeederService } = require('../dist/seeder');
 
-test.describe('ComplianceEngine - IEC 62304 & FDA 21 CFR Part 11 Rules', () => {
+test.describe('ComplianceEngine - IEC 62304 traceability & signature-fingerprint rules', () => {
   const baseHazard = {
     id: 'haz-101',
     key: 'HAZ-101',
@@ -75,7 +75,7 @@ test.describe('ComplianceEngine - IEC 62304 & FDA 21 CFR Part 11 Rules', () => {
     assert.match(link.violations[0], /IEC 62304 Notice: Class B Hazard \[HAZ-102\] verification test is FAILED/);
   });
 
-  test.it('flags 21 CFR Part 11 signature drift when Confluence hash diverges', () => {
+  test.it('flags signature-fingerprint drift when Confluence hash diverges', () => {
     const driftedSpec = {
       ...baseSpec,
       sha256Hash: 'divergent-sha256-hash-after-modification',
@@ -83,7 +83,7 @@ test.describe('ComplianceEngine - IEC 62304 & FDA 21 CFR Part 11 Rules', () => {
     };
     const link = ComplianceEngine.evaluateTraceLink(baseHazard, driftedSpec, baseWork, baseTest, baseSig);
     assert.strictEqual(link.complianceState, 'SIGNATURE_DRIFT');
-    assert.match(link.violations[0], /21 CFR Part 11 Signature Drift/);
+    assert.match(link.violations[0], /Cryptographic Signature Drift/);
   });
 
   test.it('ensures SAFETY_VIOLATION takes precedence over SIGNATURE_DRIFT on Class C hazards', () => {
@@ -115,6 +115,12 @@ test.describe('Webtrigger Cryptographic Security - HMAC-SHA256 & Replay Protecti
   const secret = 'test-secret-key-12345';
   const timestamp = Date.now().toString();
   const rawBody = JSON.stringify({ action: 'remediate', hazardKey: 'HAZ-101' });
+
+  let inMemoryStore;
+  test.beforeEach(() => {
+    inMemoryStore = createInMemoryNonceStore();
+    setNonceStore(inMemoryStore);
+  });
 
   test.it('accepts valid HMAC-SHA256 signature bound to timestamp and body', () => {
     const validSig = crypto.createHmac('sha256', secret).update(`${timestamp}.${rawBody}`).digest('hex');
@@ -150,6 +156,46 @@ test.describe('Webtrigger Cryptographic Security - HMAC-SHA256 & Replay Protecti
   test.it('rejects secrets passed in URL query parameters (header-only defense against log leakage)', async () => {
     const resp = await mcpWebtriggerHandler({ method: 'GET', headers: {}, query: { token: 'medtrace-sec-2026' } });
     assert.strictEqual(resp.statusCode, 401);
+  });
+
+  test.it('rejects duplicate in-window nonce replay with HTTP 409 Conflict', async () => {
+    const mcpSecret = process.env.MEDTRACE_MCP_SECRET || 'medtrace-sec-2026';
+    const testNonce = 'nonce-' + crypto.randomUUID();
+    const ts = Date.now().toString();
+    const body = JSON.stringify({ action: 'sync-status' });
+    const sig = crypto.createHmac('sha256', mcpSecret).update(`${ts}.${testNonce}.${body}`).digest('hex');
+    const req = {
+      method: 'POST',
+      headers: {
+        'x-medtrace-key': mcpSecret,
+        'x-medtrace-timestamp': ts,
+        'x-medtrace-nonce': testNonce,
+        'x-medtrace-signature': `sha256=${sig}`,
+      },
+      body,
+    };
+    // First call consumes the nonce
+    const res1 = await mcpWebtriggerHandler(req);
+    assert.notStrictEqual(res1.statusCode, 409);
+
+    // Replayed second call with identical nonce within window
+    const res2 = await mcpWebtriggerHandler(req);
+    assert.strictEqual(res2.statusCode, 409);
+    assert.match(res2.body, /Replay attack detected/);
+  });
+
+  test.it('lazily prunes expired nonces on access and allows reuse outside TTL', async () => {
+    const nonce = 'stale-nonce-123';
+    // Store an expired nonce (350 seconds ago)
+    await inMemoryStore.set(`nonce:${nonce}`, { consumedAt: Date.now() - 350_000 });
+
+    // Claiming this nonce should prune the expired entry and succeed
+    const claimed = await claimNonce(nonce, inMemoryStore, 300_000);
+    assert.strictEqual(claimed, true);
+
+    // The key now has the fresh timestamp
+    const record = await inMemoryStore.get(`nonce:${nonce}`);
+    assert.ok(Date.now() - record.consumedAt < 1000);
   });
 });
 
@@ -203,7 +249,7 @@ test.describe('Jira Workflow Validator - Scoped Release Gate', () => {
 test.describe('Deterministic Regulatory Blast Radius & Transitive Impact Analyzer', () => {
   const sampleSuite = {
     projectName: 'Smart Infusion Pump Firmware v2.1',
-    standards: ['IEC 62304:2006+A1:2015', 'ISO 14971:2019', 'FDA 21 CFR Part 11'],
+    standards: ['IEC 62304:2006+A1:2015', 'ISO 14971:2019', 'Cryptographic Signature Fingerprinting'],
     totalHazards: 1,
     classCCount: 1,
     classBCount: 0,
@@ -302,5 +348,244 @@ test.describe('Deterministic Regulatory Blast Radius & Transitive Impact Analyze
     const report = ComplianceEngine.computeBlastRadius('srs-104', circularSuite);
     assert.ok(report);
     assert.strictEqual(report.affectedHazardKeys.length, 1, 'Visited set must deduplicate circular nodes');
+  });
+
+  test.it('invalidates multiple electronic signatures on one artifact when specification drifts', () => {
+    const multiSigSuite = {
+      ...sampleSuite,
+      traceLinks: [
+        {
+          ...sampleSuite.traceLinks[0],
+          id: 'trace-sig-1',
+          signature: {
+            id: 'sig-001',
+            signedBy: 'Marcus Vance, MD',
+            role: 'Chief Medical Officer',
+            artifactSha256: 'hash-v2-signed-baseline',
+            isValid: false,
+          },
+        },
+        {
+          ...sampleSuite.traceLinks[0],
+          id: 'trace-sig-2',
+          signature: {
+            id: 'sig-002',
+            signedBy: 'Claire Dupont, PhD',
+            role: 'VP Regulatory Affairs',
+            artifactSha256: 'hash-v2-signed-baseline',
+            isValid: false,
+          },
+        },
+      ],
+    };
+
+    const report = ComplianceEngine.computeBlastRadius('srs-104', multiSigSuite);
+    assert.ok(report.invalidatedSignatureIds.includes('sig-001'), 'Must invalidate primary clinical signature');
+    assert.ok(report.invalidatedSignatureIds.includes('sig-002'), 'Must invalidate regulatory affairs signature');
+    assert.strictEqual(report.invalidatedSignatureIds.length, 2);
+  });
+
+  test.it('traverses both specifications when two specs are connected to one hazard', () => {
+    const twoSpecSuite = {
+      ...sampleSuite,
+      traceLinks: [
+        {
+          ...sampleSuite.traceLinks[0],
+          id: 'trace-link-1',
+          spec: {
+            id: 'srs-104',
+            title: 'SRS-104: Hardware Bolus Clamp',
+            sha256Hash: 'hash-srs-104-drifted',
+            lastSignedHash: 'hash-srs-104-baseline',
+            isSignatureInvalidated: true,
+            lastUpdated: '10m ago',
+          },
+        },
+        {
+          ...sampleSuite.traceLinks[0],
+          id: 'trace-link-2',
+          spec: {
+            id: 'srs-105',
+            title: 'SRS-105: Secondary Watchdog Timer',
+            sha256Hash: 'hash-srs-105-drifted',
+            lastSignedHash: 'hash-srs-105-baseline',
+            isSignatureInvalidated: true,
+            lastUpdated: '5m ago',
+          },
+          work: {
+            id: 'med-43',
+            key: 'MED-43',
+            title: 'Implement Watchdog Timer',
+            status: 'In Progress',
+            assignee: 'Alex Chen',
+          },
+          test: {
+            id: 'test-89',
+            testKey: 'TEST-89',
+            title: 'Watchdog Timeout Test',
+            testType: 'Integration Test',
+            status: 'UNTESTED',
+          },
+        },
+      ],
+    };
+
+    const report = ComplianceEngine.computeBlastRadius('haz-101', twoSpecSuite);
+    assert.deepStrictEqual(report.affectedHazardKeys, ['HAZ-101']);
+    // Both specs must have traversed to HAZ-101
+    const mitigatesHops = report.traversalPath.filter((hop) => hop.edge === 'MITIGATES');
+    assert.strictEqual(mitigatesHops.length, 2);
+    assert.ok(mitigatesHops.some((h) => h.from.includes('SRS-104')));
+    assert.ok(mitigatesHops.some((h) => h.from.includes('SRS-105')));
+    assert.ok(report.blockedWorkItemKeys.includes('MED-42'));
+    assert.ok(report.blockedWorkItemKeys.includes('MED-43'));
+  });
+
+  test.it('excludes disconnected nodes (HAZ-999) from the blast radius', () => {
+    const disconnectedSuite = {
+      ...sampleSuite,
+      traceLinks: [
+        sampleSuite.traceLinks[0],
+        {
+          id: 'trace-disconnected',
+          complianceState: 'VERIFIED',
+          violations: [],
+          hazard: {
+            id: 'haz-999',
+            key: 'HAZ-999',
+            title: 'Isolated Battery Indicator Flicker',
+            riskClass: 'CLASS_A',
+            severity: 'MINOR',
+            probability: 'REMOTE',
+            mitigationRequirementId: 'srs-999',
+            status: 'MITIGATED',
+          },
+          spec: {
+            id: 'srs-999',
+            title: 'SRS-999: LED Status Indicator',
+            version: 1,
+            sha256Hash: 'unrelated-hash',
+            lastSignedHash: 'unrelated-hash',
+            isSignatureInvalidated: false,
+            contentSnippet: 'LED blinks green',
+            lastUpdated: '3 days ago',
+          },
+          work: {
+            id: 'med-99',
+            key: 'MED-99',
+            title: 'LED driver firmware',
+            status: 'Done',
+            assignee: 'Jordan Lee',
+          },
+          test: {
+            id: 'test-99',
+            testKey: 'TEST-99',
+            title: 'LED Blink Rate Test',
+            testType: 'Unit Test',
+            status: 'PASSED',
+          },
+          signature: {
+            id: 'sig-999',
+            signedBy: 'Jordan Lee',
+            signedAt: '2026-10-10T10:00:00Z',
+            role: 'Software Engineer',
+            meaning: 'Verification Review',
+            artifactSha256: 'unrelated-hash',
+            isValid: true,
+          },
+        },
+      ],
+    };
+
+    // Traversing srs-104 should only touch HAZ-101 and NOT disconnected HAZ-999
+    const report1 = ComplianceEngine.computeBlastRadius('srs-104', disconnectedSuite);
+    assert.strictEqual(report1.affectedHazardKeys.includes('HAZ-101'), true);
+    assert.strictEqual(report1.affectedHazardKeys.includes('HAZ-999'), false);
+    assert.strictEqual(report1.blockedWorkItemKeys.includes('MED-99'), false);
+
+    // Querying an unknown / non-existent key returns clean zero-impact report
+    const report2 = ComplianceEngine.computeBlastRadius('NON-EXISTENT-KEY', disconnectedSuite);
+    assert.strictEqual(report2.affectedHazardKeys.length, 0);
+    assert.strictEqual(report2.blockedWorkItemKeys.length, 0);
+    assert.strictEqual(report2.impactSeverity, 'MINOR');
+  });
+
+  test.it('completes BFS traversal on 500-node synthetic graph benchmark in under 20ms', () => {
+    // Construct 100 5-node trace links = 500 nodes
+    const syntheticLinks = [];
+    for (let i = 0; i < 100; i++) {
+      syntheticLinks.push({
+        id: `synth-link-${i}`,
+        complianceState: i === 0 ? 'SAFETY_VIOLATION' : 'VERIFIED',
+        violations: [],
+        hazard: {
+          id: `synth-haz-${i}`,
+          key: `HAZ-SYNTH-${i}`,
+          title: `Synthetic Hazard ${i}`,
+          riskClass: i === 0 ? 'CLASS_C' : 'CLASS_A',
+          severity: i === 0 ? 'CATASTROPHIC' : 'MINOR',
+          probability: 'REMOTE',
+          mitigationRequirementId: `srs-synth-${i}`,
+          status: 'UNVERIFIED_RISK',
+        },
+        spec: {
+          id: `srs-synth-${i}`,
+          title: `SRS-SYNTH-${i}: Specification ${i}`,
+          version: 1,
+          sha256Hash: `hash-${i}`,
+          lastSignedHash: `hash-${i}`,
+          isSignatureInvalidated: i === 0,
+          contentSnippet: `Specification content ${i}`,
+          lastUpdated: '1m ago',
+        },
+        work: {
+          id: `med-synth-${i}`,
+          key: `MED-SYNTH-${i}`,
+          title: `Task ${i}`,
+          status: 'In Progress',
+          assignee: `Engineer ${i}`,
+        },
+        test: {
+          id: `test-synth-${i}`,
+          testKey: `TEST-SYNTH-${i}`,
+          title: `Test ${i}`,
+          testType: 'Unit Test',
+          status: i === 0 ? 'UNTESTED' : 'PASSED',
+        },
+        signature: {
+          id: `sig-synth-${i}`,
+          signedBy: `Auditor ${i}`,
+          signedAt: new Date().toISOString(),
+          role: 'Auditor',
+          meaning: 'Approval',
+          artifactSha256: `hash-${i}`,
+          isValid: i !== 0,
+        },
+      });
+    }
+
+    const largeSuite = {
+      projectName: 'Large Benchmark Suite (500 Nodes)',
+      standards: ['IEC 62304', 'ISO 14971'],
+      totalHazards: 100,
+      classCCount: 1,
+      classBCount: 0,
+      classACount: 99,
+      verifiedPercentage: 99,
+      releaseBlocked: true,
+      blockingReasons: [],
+      signatureDriftCount: 1,
+      lastAuditTimestamp: new Date().toISOString(),
+      traceLinks: syntheticLinks,
+    };
+
+    const start = performance.now();
+    const report = ComplianceEngine.computeBlastRadius('srs-synth-0', largeSuite);
+    const totalTimeMs = performance.now() - start;
+
+    assert.ok(report);
+    assert.strictEqual(report.affectedHazardKeys.includes('HAZ-SYNTH-0'), true);
+    assert.ok(totalTimeMs < 20, `500-node graph traversal took ${totalTimeMs.toFixed(2)}ms, exceeding 20ms ceiling`);
+    assert.ok(report.executionTimeMs < 20, `Report internal timer ${report.executionTimeMs}ms exceeds 20ms`);
   });
 });

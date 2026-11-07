@@ -53,8 +53,9 @@ async function fetchLiveComplianceState() {
 async function postCloudRemediation(hazardKey) {
   try {
     const timestamp = Date.now().toString();
+    const nonce = crypto.randomUUID();
     const payload = JSON.stringify({ action: 'remediate', hazardKey });
-    const signature = crypto.createHmac('sha256', MCP_SECRET).update(`${timestamp}.${payload}`).digest('hex');
+    const signature = crypto.createHmac('sha256', MCP_SECRET).update(`${timestamp}.${nonce}.${payload}`).digest('hex');
 
     const resp = await fetch(FORGE_WEBTRIGGER_URL, {
       method: 'POST',
@@ -62,6 +63,7 @@ async function postCloudRemediation(hazardKey) {
         'Content-Type': 'application/json',
         'x-medtrace-key': MCP_SECRET,
         'x-medtrace-timestamp': timestamp,
+        'x-medtrace-nonce': nonce,
         'x-medtrace-signature': `sha256=${signature}`,
       },
       body: payload,
