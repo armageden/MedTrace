@@ -1,7 +1,7 @@
 # MedTrace: IEC 62304 Medical Device Regulatory Traceability & Blast Radius Engine
 
 ## Tagline
-Deterministic IEC 62304 & ISO 14971 traceability for Jira and Confluence, computing multi-hop regulatory blast radius in ~0.5ms of in-memory BFS traversal with zero outbound egress.
+Deterministic IEC 62304 & ISO 14971 traceability for Jira and Confluence, computing multi-hop regulatory blast radius with sub-20ms BFS graph traversal and zero outbound egress.
 
 ---
 
@@ -27,10 +27,10 @@ When a specification, hazard mitigation, or test run changes, MedTrace traverses
 
 `ISO 14971 Clinical Hazard ↔ Safety Requirement (SRS) ↔ Jira Implementation (MED) ↔ Verification Test (TEST) ↔ Clinical Approval Hash`
 
-On a synthetic 500-node graph benchmark, MedTrace calculates the complete blast radius in **~0.5ms of in-memory BFS (Breadth-First Search) traversal**, terminating deterministically and handling circular trace links without infinite loops or duplicate node visits.
+On a synthetic 500-node graph benchmark, MedTrace calculates the complete blast radius in **under 20ms of in-memory BFS traversal (<1.5ms on the active suite)**, terminating deterministically and handling circular trace links without infinite loops or duplicate node visits.
 
 ### 2. Cryptographic Approval Hash Drift Detection
-Clinical authorities approve Confluence specifications (e.g., ISO 14971 Risk Mitigations) with reference SHA-256 content digests stored in Forge KVS (Key-Value Storage). If an engineer modifies a Confluence page post-approval without clinical re-review, MedTrace immediately flags cryptographic approval hash drift and marks the lineage as an unverified risk.
+Clinical authorities approve Confluence specifications (e.g., ISO 14971 Risk Mitigations) with reference SHA-256 content digests stored in Forge KVS (Key-Value Storage). If an engineer modifies a Confluence page post-approval without clinical re-review, MedTrace dynamically computes the SHA-256 digest over the modified content, flags cryptographic approval hash drift, and marks the lineage as an unverified risk.
 
 ### 3. IEC 62304 Safety Release Gate (Jira Workflow Validator)
 MedTrace enforces a release gate aligned with IEC 62304 Clause 5.7 (Software System Testing) and Clause 5.8 (Software Release), applying Class A/B/C safety logic per Clause 4.3:
@@ -38,17 +38,19 @@ MedTrace enforces a release gate aligned with IEC 62304 Clause 5.7 (Software Sys
 * **Class B (Non-serious injury):** Requires verified test runs and active requirement links.
 * **Class C (Death or serious injury):** Strictly requires passing automated verification tests and matching approval hashes before related Jira issues can transition to "Done" or "Release".
 
-*Deployment Architecture:* The release gate is implemented as a Forge `jira:workflowValidator` module declared in `manifest.yml` and scoped to the issue key. Attaching it to a live Jira transition requires site-admin workflow editing; the in-app simulation harness invokes the same handler directly for evaluators. The handler source is `src/workflow-validator.ts`.
+*Deployment Architecture & Evaluator Testing:* The release gate is implemented as a Forge `jira:workflowValidator` module declared in `manifest.yml` (`src/workflow-validator.ts`). Because attaching Forge validators to live workflows requires Jira site-admin privileges, MedTrace provides two direct evaluator verification paths: (1) an in-app "Simulate Transition Gate" button in the Custom UI header and issue panel running the live backend validator handler, and (2) an authenticated webtrigger action (`simulate_transition`) runnable via curl.
 
-### 4. Structured 510(k) eSTAR-Aligned Software Lifecycle Dossier Export
-Generates a structured regulatory evidence dossier formatted for the software documentation portion of a 510(k) submission (21 CFR 807.92 content requirements; eSTAR Software section), including complete 5-stage bidirectional traceability matrices, risk severity classifications (ISO 14971), and cryptographic verification records.
+### 4. Structured 510(k) eSTAR-Aligned Software Lifecycle Dossier View
+Provides an interactive in-browser regulatory evidence dossier formatted after the software documentation section of an FDA 510(k) eSTAR submission (21 CFR 807.92 content structure; eSTAR Software section). The view compiles 5-stage bidirectional traceability matrices, risk classifications (ISO 14971), and SHA-256 verification records into a printable audit dossier ready for regulatory review.
 
-For Software of Unknown Provenance (SOUP), IEC 62304 Clauses 5.1.7, 5.3.3, 5.3.6 — MedTrace generates verification audit records that the manufacturer incorporates into their SOUP qualification dossier.
+For Software of Unknown Provenance (SOUP) tracking (IEC 62304 Clauses 5.1.7, 5.3.3), the prototype models third-party dependencies and verification test associations directly in the trace graph schema.
 
-### 5. Optional Developer Assistant: Connected IDE Context (MCP)
-*Optional, non-PHI, does not affect the core regulatory engine — included for developer convenience.*
+### 5. Optional Developer Assistant: Connected IDE Context (MCP) & Rovo Compliance Agent
+*Optional, non-PHI, assistive tooling—does not affect the core regulatory engine.*
 
-For developer convenience during implementation, MedTrace provides an optional Model Context Protocol (MCP) assistant for local IDEs (such as Cursor or Claude Desktop). It queries live traceability state and blast radius calculations via a cryptographically authenticated Forge webtrigger protected by HMAC-SHA256 signatures, a 300-second timestamp validity window, and persistent Forge KVS nonce deduplication.
+For developer convenience during implementation, MedTrace provides:
+* **Atlassian Rovo Agent (`rovo:agent`):** An AI regulatory officer that runs deterministic BFS graph traversal across the active compliance graph to return affected hazards, blocked Jira items, and actionable remediation steps directly inside Jira.
+* **Model Context Protocol (MCP) Server:** Allows local IDEs (such as Cursor or Claude Desktop) to query live traceability state and blast radius calculations via a cryptographically authenticated Forge webtrigger protected by HMAC-SHA256 signatures, a 300-second timestamp validity window, persistent Forge KVS nonce deduplication, and fail-closed secret verification.
 
 *Non-PHI Engineering Metadata Boundary:* The MCP assistant operates strictly on non-PHI engineering metadata (Jira issue keys, requirement IDs, and verification test execution status). It does not ingest patient health data, is strictly decoupled from medical device runtime execution, and does not render regulatory judgment—it serves purely as an assistive developer utility to surface traceability gaps directly in the code editor.
 

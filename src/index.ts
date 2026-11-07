@@ -46,7 +46,7 @@ resolver.define('analyzeBlastRadius', async (req) => {
 
 import { NonceStore, getNonceStore, setNonceStore, createInMemoryNonceStore } from './nonce-store';
 
-const MCP_SECRET = process.env.MEDTRACE_MCP_SECRET || 'medtrace-sec-2026';
+const getMcpSecret = (): string => process.env.MEDTRACE_MCP_SECRET || '';
 
 /**
  * Claims a unique event nonce using the injected NonceStore (default: Forge KVS in production).
@@ -126,11 +126,21 @@ export async function mcpWebtriggerHandler(request: any): Promise<any> {
   console.log('[MedTrace MCP Webtrigger] Handling external MCP sync request:', request?.method);
 
   try {
+    const secret = getMcpSecret();
+    if (!secret) {
+      console.error('[MedTrace MCP Webtrigger] Fail-closed: MEDTRACE_MCP_SECRET is not configured.');
+      return {
+        body: JSON.stringify({ error: 'Server misconfiguration: MEDTRACE_MCP_SECRET must be configured in Forge environment (fail-closed).' }),
+        headers: { 'Content-Type': ['application/json'], 'Access-Control-Allow-Origin': ['*'] },
+        statusCode: 500,
+      };
+    }
+
     // Header-only secret check: secrets in query parameters leak into web logs, proxies, and browser history
     const authHeader = extractHeader(request?.headers, 'x-medtrace-key');
 
     // 1. Shared secret check (enforced on all requests to protect clinical records)
-    if (authHeader !== MCP_SECRET) {
+    if (authHeader !== secret) {
       return {
         body: JSON.stringify({ error: 'Unauthorized: Missing or invalid x-medtrace-key header.' }),
         headers: { 'Content-Type': ['application/json'], 'Access-Control-Allow-Origin': ['*'] },
@@ -175,8 +185,8 @@ export async function mcpWebtriggerHandler(request: any): Promise<any> {
 
       const rawBody = typeof request.body === 'string' ? request.body : JSON.stringify(request.body || {});
       const isValidSig =
-        verifyHmacSignature(rawBody, timestampHeader, signatureHeader, MCP_SECRET, nonceHeader) ||
-        verifyHmacSignature(rawBody, timestampHeader, signatureHeader, MCP_SECRET);
+        verifyHmacSignature(rawBody, timestampHeader, signatureHeader, secret, nonceHeader) ||
+        verifyHmacSignature(rawBody, timestampHeader, signatureHeader, secret);
 
       if (!isValidSig) {
         return {
@@ -219,6 +229,19 @@ export async function mcpWebtriggerHandler(request: any): Promise<any> {
         const updated = await SeederService.remediateClassCGap(hazardKey);
         return {
           body: JSON.stringify({ success: true, summary: updated }),
+          headers: {
+            'Content-Type': ['application/json'],
+            'Access-Control-Allow-Origin': ['*'],
+          },
+          statusCode: 200,
+        };
+      }
+
+      if (body.action === 'validate' || body.action === 'simulate_transition') {
+        const issueKey = body.issueKey || 'MED-42';
+        const result = await workflowValidatorHandler({ issue: { key: issueKey }, transition: { name: 'Done' } });
+        return {
+          body: JSON.stringify(result),
           headers: {
             'Content-Type': ['application/json'],
             'Access-Control-Allow-Origin': ['*'],

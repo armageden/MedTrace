@@ -108,12 +108,12 @@ flowchart TD
 * **Fail-Closed Safety Invariant:** If KVS retrieval fails or an unhandled exception occurs, the validator defaults to `result: false` with:
   > *"MedTrace Safety Gate: Unable to verify IEC 62304 compliance integrity. Transition halted."*
 * **Configuring the Validator in Jira Administration:**
-  1. Go to **Project Settings** $\to$ **Workflows**.
+  1. Go to **Project Settings** → **Workflows**.
   2. Select the workflow attached to your safety-critical issue types (e.g., Software Development Workflow).
   3. Click **Edit** (Diagram or Text view) and select the transition leading into **Done** / **Released**.
-  4. Select **Validators** $\to$ **Add Validator** $\to$ choose **MedTrace IEC 62304 Safety Gate**.
+  4. Select **Validators** → **Add Validator** → choose **MedTrace IEC 62304 Safety Gate**.
   5. Publish the workflow draft.
-* **Simulator vs. Registered Gate:** The `[🔒 Test Human Gate]` button in the MedTrace Custom UI allows safety auditors to dry-run and demonstrate the validator's fail-closed response without needing project admin permissions to trigger state changes. When moving an issue in the native Jira board or issue detail view, the registered Forge module executes synchronously within 80ms, inspecting linked hazards and blocking human transition if unverified risks or signature drift exist.
+* **Simulator vs. Registered Gate:** The `[🔒 Test Human Gate]` button in the MedTrace Custom UI allows safety auditors and non-admin evaluators to dry-run and demonstrate the validator's fail-closed response in real-time without needing site-admin permissions to edit company-managed workflows. Non-admin evaluators can also execute transition validation directly via the authenticated webtrigger (`action: "simulate_transition"`). When moving an issue in the native Jira board or issue detail view where the validator is attached, the registered Forge module executes synchronously within 80ms, inspecting linked hazards and blocking human transition if unverified risks or signature drift exist.
 
 #### 3. Automated CI/CD Pipeline Enforcement (Pre-empting Platform Issue ECO-624)
 Because Atlassian platform issue [ECO-624](https://jira.atlassian.com/browse/ECO-624) allows Jira Automation rules to bypass transition validators, production CI/CD pipelines mirror the exact same policy gate using authenticated inbound HMAC webtriggers. This ensures neither human nor automated paths can release unverified firmware:

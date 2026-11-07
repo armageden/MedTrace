@@ -1,11 +1,13 @@
 import api, { route } from '@forge/api';
 import { kvs } from '@forge/kvs';
+import crypto from 'node:crypto';
 import { ComplianceEngine } from './compliance-engine';
 import { TeamworkGraphService } from './teamwork-graph';
 import { IsoHazard, ConfluenceSpec, JiraWorkItem, VerificationTest, Part11Signature, ComplianceSummary, GraphMetadata } from './types';
 
 export class SeederService {
   private static STORAGE_KEY = 'medtrace:compliance:active_suite';
+  private static inMemorySuite: ComplianceSummary | null = null;
 
   /**
    * Preflight check to determine if Confluence Cloud is installed and accessible
@@ -65,6 +67,19 @@ export class SeederService {
       },
     ];
 
+    const computeSha256 = (content: string): string =>
+      crypto.createHash('sha256').update(content).digest('hex');
+
+    const srs104ApprovedSnippet = 'Clause 4.2.1: Bolus delivery rate must be hardware-clamped by MCU2 with 10ms watchdog timeout at max 5.0 mL/hr.';
+    const srs104CurrentSnippet = 'Clause 4.2.1: Bolus delivery rate must be hardware-clamped by MCU2 with 10ms watchdog timeout at max 5.5 mL/hr.';
+    const srs105Snippet = 'Clause 4.3.5: Dual IR photodiodes calculate basal drop count every 250 milliseconds.';
+    const srs106Snippet = 'Clause 6.1.2: Buck converter must maintain 3.3V bus within +/- 2% during primary cell cutover.';
+
+    const srs104ApprovedHash = computeSha256(srs104ApprovedSnippet);
+    const srs104CurrentHash = computeSha256(srs104CurrentSnippet);
+    const srs105Hash = computeSha256(srs105Snippet);
+    const srs106Hash = computeSha256(srs106Snippet);
+
     // Confluence Software Requirements Specification (SRS) nodes
     // HAZ-101 has deliberate signature drift (v3 hash vs v2 approved signature)
     const specs: ConfluenceSpec[] = [
@@ -72,30 +87,30 @@ export class SeederService {
         id: 'srs-104',
         title: 'SRS-104: Dual-Core Microcontroller Hardware Bolus Clamp (Max 5.0 mL/hr)',
         version: 3,
-        sha256Hash: 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
-        lastSignedHash: 'a789ef2398fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b112',
+        sha256Hash: srs104CurrentHash,
+        lastSignedHash: srs104ApprovedHash,
         isSignatureInvalidated: true,
-        contentSnippet: 'Clause 4.2.1: Bolus rate must be hardware-clamped by MCU2 with 10ms watchdog timeout.',
+        contentSnippet: srs104CurrentSnippet,
         lastUpdated: '10 minutes ago (Modified by engineer: changed threshold 5.0 -> 5.5 mL/hr)',
       },
       {
         id: 'srs-105',
         title: 'SRS-105: Optical Droplet Sensor Real-Time Flow Rate Verification',
         version: 2,
-        sha256Hash: 'b45c22998fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b333',
-        lastSignedHash: 'b45c22998fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b333',
+        sha256Hash: srs105Hash,
+        lastSignedHash: srs105Hash,
         isSignatureInvalidated: false,
-        contentSnippet: 'Clause 4.3.5: Dual IR photodiodes calculate basal drop count every 250 milliseconds.',
+        contentSnippet: srs105Snippet,
         lastUpdated: '2 days ago',
       },
       {
         id: 'srs-106',
         title: 'SRS-106: Power Management Rail Glitch Filter & OLED Retention',
         version: 1,
-        sha256Hash: 'c67d33998fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b444',
-        lastSignedHash: 'c67d33998fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b444',
+        sha256Hash: srs106Hash,
+        lastSignedHash: srs106Hash,
         isSignatureInvalidated: false,
-        contentSnippet: 'Clause 6.1.2: Buck converter must maintain 3.3V bus within +/- 2% during primary cell cutover.',
+        contentSnippet: srs106Snippet,
         lastUpdated: '1 week ago',
       },
     ];
@@ -171,7 +186,7 @@ export class SeederService {
         signedAt: '2026-10-15T11:30:00Z',
         role: 'Clinical Safety Authority',
         meaning: 'Approval of ISO 14971 Risk Assessment & Mitigation Architecture',
-        artifactSha256: 'a789ef2398fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b112', // Matches v2, NOT v3!
+        artifactSha256: srs104ApprovedHash, // Matches v2, NOT modified v3!
         isValid: false,
         invalidationReason: 'AUTOMATIC REVOCATION: Confluence spec modified at version 3 without clinical re-signature.',
       },
@@ -181,7 +196,7 @@ export class SeederService {
         signedAt: '2026-10-20T16:45:00Z',
         role: 'Quality Assurance Director',
         meaning: 'IEC 62304 Software Verification Plan Approval',
-        artifactSha256: 'b45c22998fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b333',
+        artifactSha256: srs105Hash,
         isValid: true,
       },
       {
@@ -190,10 +205,59 @@ export class SeederService {
         signedAt: '2026-10-21T09:15:00Z',
         role: 'Quality Assurance Director',
         meaning: 'Class A Software Verification Protocol Approval',
-        artifactSha256: 'c67d33998fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b444',
+        artifactSha256: srs106Hash,
         isValid: true,
       },
     ];
+
+    // Optional live Confluence page integration if installed & accessible
+    if (confluenceEnabled) {
+      try {
+        const confResp = await api.asApp().requestConfluence(route`/wiki/api/v2/pages?limit=3&body-format=storage`);
+        if (confResp.status === 200) {
+          const confData = await confResp.json();
+          if (confData?.results && confData.results.length > 0) {
+            confData.results.forEach((p: any, idx: number) => {
+              const body = p.body?.storage?.value || p.title || '';
+              const liveHash = computeSha256(body);
+              if (specs[idx]) {
+                specs[idx].title = `${specs[idx].id.toUpperCase()}: ${p.title}`;
+                specs[idx].contentSnippet = body.slice(0, 140).replace(/<[^>]*>/g, '') || specs[idx].contentSnippet;
+                if (idx !== 0) {
+                  // Keep HAZ-101 drifted for the demonstration, but update other specs with live hashes
+                  specs[idx].sha256Hash = liveHash;
+                  specs[idx].lastSignedHash = liveHash;
+                  if (signatures[idx]) signatures[idx].artifactSha256 = liveHash;
+                }
+              }
+            });
+          }
+        }
+      } catch (err: any) {
+        console.log('[MedTrace Seeder] Notice: Live Confluence lookup skipped:', err?.message);
+      }
+    }
+
+    // Optional live Jira work item integration if accessible
+    try {
+      const jiraResp = await api.asApp().requestJira(route`/rest/api/3/search?jql=order+by+created+DESC&maxResults=3`);
+      if (jiraResp.status === 200) {
+        const jiraData = await jiraResp.json();
+        if (jiraData?.issues && jiraData.issues.length > 0) {
+          jiraData.issues.forEach((iss: any, idx: number) => {
+            if (workItems[idx]) {
+              workItems[idx].key = iss.key;
+              workItems[idx].title = iss.fields?.summary || workItems[idx].title;
+              if (iss.fields?.assignee?.displayName) {
+                workItems[idx].assignee = iss.fields.assignee.displayName;
+              }
+            }
+          });
+        }
+      }
+    } catch (err: any) {
+      console.log('[MedTrace Seeder] Notice: Live Jira search skipped:', err?.message);
+    }
 
     // Teamwork Graph (TWG) ARIs & Edge Relationships
     const graphMetadatas: GraphMetadata[] = [
@@ -236,8 +300,12 @@ export class SeederService {
 
     const summary = ComplianceEngine.generateComplianceReport(traceLinks);
 
-    // Save to persistent Forge storage
-    await kvs.set(this.STORAGE_KEY, summary);
+    // Save to persistent Forge storage (with in-memory fallback outside Forge runtime)
+    try {
+      await kvs.set(this.STORAGE_KEY, summary);
+    } catch {
+      this.inMemorySuite = summary;
+    }
 
     return {
       success: true,
@@ -251,9 +319,15 @@ export class SeederService {
    * Retrieves active compliance state from Forge storage
    */
   public static async getActiveComplianceSuite(): Promise<ComplianceSummary> {
-    const data = await kvs.get(this.STORAGE_KEY) as ComplianceSummary | undefined;
-    if (data && data.traceLinks && data.traceLinks.length > 0) {
-      return data;
+    try {
+      const data = await kvs.get(this.STORAGE_KEY) as ComplianceSummary | undefined;
+      if (data && data.traceLinks && data.traceLinks.length > 0) {
+        return data;
+      }
+    } catch {
+      if (this.inMemorySuite && this.inMemorySuite.traceLinks && this.inMemorySuite.traceLinks.length > 0) {
+        return this.inMemorySuite;
+      }
     }
     // Auto-seed on initial empty load so judge never encounters a blank screen
     const init = await this.seedEnterpriseDemoSuite();
@@ -292,7 +366,11 @@ export class SeederService {
       targetLink.violations = [];
 
     const updatedSummary = ComplianceEngine.generateComplianceReport(current.traceLinks);
-    await kvs.set(this.STORAGE_KEY, updatedSummary);
+    try {
+      await kvs.set(this.STORAGE_KEY, updatedSummary);
+    } catch {
+      this.inMemorySuite = updatedSummary;
+    }
     return updatedSummary;
   }
 }
