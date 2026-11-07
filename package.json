@@ -2,6 +2,7 @@
   "name": "medtrace-backend",
   "version": "1.0.0",
   "description": "MedTrace IEC 62304 & FDA 21 CFR Part 11 Regulatory Compliance Engine",
+  "license": "Apache-2.0",
   "main": "src/index.ts",
   "scripts": {
     "build": "tsc",
