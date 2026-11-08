@@ -8,3 +8,7 @@ static/frontend/dist/
 .env
 .env.local
 !.env.example
+.commandcode/
+.mimosa/
+.v2c/
+.video_agent/
