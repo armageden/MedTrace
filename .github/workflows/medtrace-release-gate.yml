@@ -1,0 +1,57 @@
+# MedTrace Regulatory Release Gate — reference CI workflow (ECO-624 defense-in-depth).
+#
+# Workflow validators attached in Jira can be bypassed by Jira Automation rules and direct
+# REST API calls (platform issue ECO-624). This job enforces the identical IEC 62304 safety
+# gate at the CI boundary via the authenticated MedTrace webtrigger.
+#
+# Required repository secrets:
+#   MEDTRACE_MCP_SECRET      — the shared HMAC/perimeter secret configured in Forge
+#   MEDTRACE_WEBTRIGGER_URL  — the deployed Forge webtrigger URL
+#
+# Gate semantics: HTTP 200 = compliant (gate open); HTTP 403 = blocked by the safety gate;
+# any other status = authentication/infrastructure failure. All three non-200 outcomes fail the job.
+
+name: MedTrace Release Gate
+
+on:
+  workflow_dispatch:
+    inputs:
+      issueKey:
+        description: 'Optional Jira issue key to gate (e.g. MED-42). Omit to enforce the global release gate.'
+        required: false
+        default: ''
+
+jobs:
+  regulatory-release-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: MedTrace IEC 62304 Safety Gate
+        env:
+          MEDTRACE_SECRET: ${{ secrets.MEDTRACE_MCP_SECRET }}
+          WEBTRIGGER_URL: ${{ secrets.MEDTRACE_WEBTRIGGER_URL }}
+          ISSUE_KEY: ${{ inputs.issueKey }}
+        run: |
+          TIMESTAMP=$(date +%s%3N)
+          NONCE=$(uuidgen)
+          if [ -n "$ISSUE_KEY" ] && ! echo "$ISSUE_KEY" | grep -Eq '^[A-Za-z][A-Za-z0-9]*-[0-9]+$'; then
+            echo "❌ Invalid issueKey format: '$ISSUE_KEY' (expected e.g. MED-42)"
+            exit 1
+          fi
+          if [ -n "$ISSUE_KEY" ]; then
+            BODY=$(printf '{"action":"verify-release-gate","issueKey":"%s"}' "$ISSUE_KEY")
+          else
+            BODY='{"action":"verify-release-gate"}'
+          fi
+          SIG=$(printf '%s.%s.%s' "$TIMESTAMP" "$NONCE" "$BODY" | openssl dgst -sha256 -hmac "$MEDTRACE_SECRET" -hex | awk '{print $2}')
+          HTTP_CODE=$(curl -s -o /tmp/gate.json -w "%{http_code}" -X POST "$WEBTRIGGER_URL" \
+            -H "x-medtrace-timestamp: $TIMESTAMP" \
+            -H "x-medtrace-nonce: $NONCE" \
+            -H "x-medtrace-signature: sha256=$SIG" \
+            -H "Content-Type: application/json" -d "$BODY")
+          echo "Gate HTTP status: $HTTP_CODE"
+          cat /tmp/gate.json
+          if [ "$HTTP_CODE" -ne 200 ]; then
+            echo "❌ MedTrace Safety Gate: release blocked or verification failed (HTTP $HTTP_CODE)."
+            exit 1
+          fi
+          echo "✅ MedTrace Safety Gate open: IEC 62304 verification satisfied."

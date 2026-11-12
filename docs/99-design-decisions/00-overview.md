@@ -14,3 +14,4 @@ MedTrace maintains Architecture Decision Records (ADRs) for all foundational inf
 | [001-twg-and-kvs-hybrid.md](./001-twg-and-kvs-hybrid.md) | Teamwork Graph AGG GraphQL and @forge/kvs hybrid persistence architecture. |
 | [002-webtrigger-hmac-authentication.md](./002-webtrigger-hmac-authentication.md) | Webtrigger HMAC-SHA256 authentication and replay window protection. |
 | [003-twg-dual-engine-fallback.md](./003-twg-dual-engine-fallback.md) | Teamwork Graph dual-engine architecture (AGG GraphQL and REST API v3). |
+| [004-artifact-node-bfs-blast-radius.md](./004-artifact-node-bfs-blast-radius.md) | Artifact-node BFS making blast-radius traversal genuinely transitive across shared hazard/spec nodes. |

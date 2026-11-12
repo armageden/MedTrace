@@ -35,19 +35,21 @@ public static generateComplianceReport(traceLinks: TraceLink[]): ComplianceSumma
   ```
   Any non-verified state (`SAFETY_VIOLATION`, `SIGNATURE_DRIFT`, or `INCOMPLETE`) across any risk class contributes to `blockingReasons` and locks release readiness.
 * **Verified Metric:** Computes `verifiedPercentage = traceLinks.length > 0 ? Math.round((verifiedCount / traceLinks.length) * 100) : 0`.
+* **Dataset Mode:** The summary always carries `datasetMode: 'DEMO' | 'LIVE'`. Seeded suites are `'DEMO'` (`'LIVE'` is reserved for a future tenant-evidence mode); the Custom UI renders a persistent badge so modeled records are never mistaken for tenant evidence.
 
 ### 3. `ComplianceEngine.computeBlastRadius`
-Executes a deterministic BFS traversal over the typed 5-stage traceability graph (`HAZARD`, `SPEC`, `WORK`, `TEST`, `SIGNATURE`) to calculate transitive downstream impact when specifications drift or tests fail:
+Executes a deterministic breadth-first traversal over the artifact-node graph derived from the typed 5-stage traceability graph (`HAZARD`, `SPEC`, `WORK`, `TEST`, `SIGNATURE`) to calculate transitive downstream impact when specifications drift or tests fail:
 ```typescript
 public static computeBlastRadius(triggerKey: string, suite: ComplianceSummary): BlastRadiusReport
 ```
-* **Deterministic Cycle Protection:** Maintains an in-memory `visited` set over typed graph nodes and edges (`mitigates:${specId}->${hazKey}`), preventing infinite loops on circular trace links.
+* **Artifact-Node Adjacency:** Builds a `nodeKey -> containing links` index (`spec:`, `haz:`, `work:`, `test:`, `sig:` keys) so the FIFO frontier crosses from one trace link into sibling links that share a hazard, spec, work item, test, or signature node. Traversal is therefore genuinely transitive, not limited to a single link's fixed chain.
+* **Deterministic Cycle Protection:** Maintains visited sets over typed graph nodes and relation keys (`mitigates:${specId}->${hazKey}`), preventing infinite loops on circular trace links.
 * **4-Hop Traversal Cascade:**
   1. `SIGNS` (Spec $\rightarrow$ Signature): Identifies invalidated electronic signatures.
   2. `MITIGATES` (Spec $\rightarrow$ Hazard): Flags compromised ISO 14971 hazards.
   3. `IMPLEMENTS` (Hazard $\rightarrow$ Jira Work Item): Locks downstream firmware development tasks under human-transition policy gate.
   4. `VERIFIES` (Hazard $\rightarrow$ Verification Test): Flags invalidated verification test evidence.
-* **Sub-2ms Performance Guarantee:** Measured at ~0.5ms on a 500-node synthetic benchmark, with an internal wall-clock execution timer recorded in `executionTimeMs`.
+* **Test-Enforced Performance Ceiling:** The automated suite asserts the 500-node synthetic benchmark (100 five-stage links) completes in under 20ms, with an internal wall-clock execution timer recorded in `executionTimeMs`. Single-digit milliseconds are typical on the seeded suite.
 
 ---
 
@@ -61,7 +63,7 @@ The engine evaluates each trace link against three international regulatory fram
 | **IEC 62304:2006+A1**<br/>Clause 5.7/5.8 (Class C) | `hazard.riskClass === 'CLASS_C'` and `test.status !== 'PASSED'` | `SAFETY_VIOLATION` | `IEC 62304 Critical Gap:` Class C Hazard requires verified test coverage. Blocks release. |
 | **IEC 62304:2006+A1**<br/>Clause 5.7/5.8 (Class B) | `hazard.riskClass === 'CLASS_B'` and `test.status !== 'PASSED'` | `INCOMPLETE` | `IEC 62304 Notice:` Class B Hazard verification test is not passed. |
 | **IEC 62304:2006+A1**<br/>Clause 5.7/5.8 (Class A) | `hazard.riskClass === 'CLASS_A'` | `VERIFIED` | Pass-through validation (no safety violations). |
-| **FDA 21 CFR Part 11**<br/>Electronic Signatures | `spec.sha256Hash !== signature.artifactSha256` or `spec.isSignatureInvalidated === true` | `SIGNATURE_DRIFT` | `21 CFR Part 11 Signature Drift:` Confluence Spec was modified after clinical sign-off. |
+| **FDA 21 CFR Part 11**<br/>Electronic Signatures | `spec.sha256Hash !== signature.artifactSha256` or `spec.isSignatureInvalidated === true` | `SIGNATURE_DRIFT` | `Cryptographic Signature Drift:` Confluence Spec was modified after clinical sign-off. |
 
 ---
 

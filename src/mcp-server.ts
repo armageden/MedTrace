@@ -60,7 +60,13 @@ export class McpToolService {
     const fullText = `${inputs?.prDiff || ''} ${inputs?.componentName || ''} ${inputs?.issueKey || ''}`;
 
     // 1. Extract explicit issue, hazard, test, or spec keys (e.g. MED-42, HAZ-101, SRS-104, TEST-88)
-    const keyMatches = Array.from(new Set(fullText.match(/\b[A-Za-z]{2,5}-\d+\b/g) || [])).map((k) => k.toUpperCase());
+    //    Keep only keys that actually exist in the active compliance suite, so stray tokens
+    //    like "UTF-8" or "RFC-7231" cannot override the safety-critical keyword fallback.
+    const rawKeyMatches = Array.from(new Set(fullText.match(/\b[A-Za-z]{2,5}-\d+\b/g) || [])).map((k) => k.toUpperCase());
+    const suiteKeys = new Set(
+      suite.traceLinks.flatMap((l) => [l.hazard.key, l.work.key, l.spec.id, l.test.testKey].map((k) => String(k).toUpperCase()))
+    );
+    const keyMatches = rawKeyMatches.filter((k) => suiteKeys.has(k));
 
     // 2. Resolve trigger key for BFS graph traversal
     let triggerKey = keyMatches[0];
@@ -141,12 +147,21 @@ export class McpToolService {
 
 /**
  * Handler for manifest module: action (used by rovo:agent and rovo:mcp)
+ *
+ * Forge rovo:action contract: the function receives (payload, context) where declared inputs
+ * are spread at the top of `payload` and the invoked action is identified by `context.moduleKey`
+ * (also mirrored under `payload.context.moduleKey` on some invocation paths).
  */
-export async function rovoActionHandler(event: any): Promise<any> {
-  console.log('[MedTrace RovoAction] Received event:', JSON.stringify(event));
+export async function rovoActionHandler(payload: any, context?: any): Promise<any> {
+  console.log('[MedTrace RovoAction] Received action invocation:', JSON.stringify(payload));
 
-  const actionKey = event?.actionKey || event?.key || '';
-  const inputs = event?.inputs || {};
+  const actionKey = context?.moduleKey || payload?.context?.moduleKey || payload?.actionKey || payload?.key || '';
+  const inputs = payload?.inputs && typeof payload.inputs === 'object'
+    ? { ...payload.inputs }
+    : (() => {
+        const { context: _ctx, actionKey: _ak, key: _k, ...rest } = payload || {};
+        return rest;
+      })();
 
   if (actionKey.includes('get-hazard-lineage') || actionKey.includes('lineage')) {
     return await McpToolService.getHazardLineage(inputs);

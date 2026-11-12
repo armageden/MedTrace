@@ -12,10 +12,10 @@ Expose a new compliance tool so external coding agents (Cursor, Claude Desktop) 
    ```yaml
    action:
      - key: custom-audit-action
-        name: Custom Audit Action
-        description: Performs targeted verification checks.
-        actionVerb: GET
-        function: rovo-action-fn
+       name: Custom Audit Action
+       description: Performs targeted verification checks.
+       actionVerb: GET
+       function: rovo-action-fn
    ```
 
 2. **Add to `rovo:mcp` Tools Array:**

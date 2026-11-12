@@ -12,7 +12,7 @@ Single source of truth for any AI agent working in this repository. Read this fi
   - build: `npm run build && cd static/frontend && npm run build && cd ../..`
   - test: `npm test`
   - lint: `forge lint`
-  - typecheck: `npx tsc --noEmit`
+  - typecheck: `npx tsc --noEmit && cd static/frontend && npx tsc --noEmit && cd ../..`
   - docs: `npm run docs:check`
 
 ## Knowledge Base

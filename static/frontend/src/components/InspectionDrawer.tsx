@@ -1,16 +1,17 @@
 import React from 'react';
 import { TraceLink, BlastRadiusReport } from '../types';
-import { X, ShieldAlert, FileText, GitPullRequest, Activity, Lock, AlertOctagon, CheckCircle2, Zap, Share2, Compass, Layers, Clock } from 'lucide-react';
+import { X, ShieldAlert, FileText, GitPullRequest, Activity, Lock, AlertOctagon, CheckCircle2, Zap, Share2, Clock } from 'lucide-react';
 
 interface InspectionDrawerProps {
   link: TraceLink | null;
   blastRadius: BlastRadiusReport | null;
+  graphContext?: any;
   onClose: () => void;
   onRemediate: () => void;
   isRemediating: boolean;
 }
 
-export const InspectionDrawer: React.FC<InspectionDrawerProps> = ({ link, blastRadius, onClose, onRemediate, isRemediating }) => {
+export const InspectionDrawer: React.FC<InspectionDrawerProps> = ({ link, blastRadius, graphContext, onClose, onRemediate, isRemediating }) => {
   if (!link) return null;
 
   const isClassC = link.hazard.riskClass === 'CLASS_C';
@@ -49,7 +50,7 @@ export const InspectionDrawer: React.FC<InspectionDrawerProps> = ({ link, blastR
       {/* Body */}
       <div style={{ flex: 1, overflowY: 'auto', padding: 20 }}>
         {/* Blast Radius Dossier Card */}
-        {blastRadius && (
+        {blastRadius && blastRadius.affectedHazardKeys.includes(link.hazard.key) && (
           <div style={{ marginBottom: 16, padding: '14px 16px', borderRadius: 8, background: '#fffae6', border: '1.5px solid #ffe380', boxShadow: '0 2px 6px rgba(255, 171, 0, 0.15)' }}>
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 6, color: '#ff8b00', fontWeight: 800, fontSize: 13 }}>
@@ -190,33 +191,65 @@ export const InspectionDrawer: React.FC<InspectionDrawerProps> = ({ link, blastR
           )}
         </div>
 
-        {/* Teamwork Graph (TWG) Living ARIs & Traversal Evidence */}
+        {/* Teamwork Graph (TWG) Lineage Metadata — shown only when a real mapping exists */}
         <div style={{ ...sectionStyle, background: '#f4f5f7', border: '1px solid #dfe1e6' }}>
           <div style={sectionHeader}>
             <Share2 size={15} color="#0052cc" />
             <span style={{ color: '#0052cc' }}>Atlassian Teamwork Graph (TWG) Node</span>
           </div>
-          <div style={{ fontSize: 10, color: '#42526e', marginBottom: 6 }}>
-            Traversed via Atlassian GraphQL Gateway (AGG):
-          </div>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 4, fontFamily: 'monospace', fontSize: 10 }}>
-            <div style={{ background: '#ffffff', padding: '5px 8px', borderRadius: 4, border: '1px solid #ebecf0' }}>
-              <span style={{ color: '#6b778c' }}>Jira ARI: </span>
-              <span style={{ color: '#172b4d', fontWeight: 600 }}>{link.graphMetadata?.entityAri || `ari:cloud:jira:5cbf2ff9-658a-44d8-9004-dbe8a96e952b:issue/${link.work.id}`}</span>
+          {link.graphMetadata ? (
+            <>
+              <div style={{ fontSize: 10, color: '#42526e', marginBottom: 6 }}>
+                Lineage mapping record:
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 4, fontFamily: 'monospace', fontSize: 10 }}>
+                <div style={{ background: '#ffffff', padding: '5px 8px', borderRadius: 4, border: '1px solid #ebecf0' }}>
+                  <span style={{ color: '#6b778c' }}>Jira ARI: </span>
+                  <span style={{ color: '#172b4d', fontWeight: 600 }}>{link.graphMetadata.entityAri}</span>
+                </div>
+                <div style={{ background: '#ffffff', padding: '5px 8px', borderRadius: 4, border: '1px solid #ebecf0' }}>
+                  <span style={{ color: '#6b778c' }}>Hazard ARI: </span>
+                  <span style={{ color: '#172b4d', fontWeight: 600 }}>{link.graphMetadata.hazardAri}</span>
+                </div>
+                <div style={{ background: '#ffffff', padding: '5px 8px', borderRadius: 4, border: '1px solid #ebecf0' }}>
+                  <span style={{ color: '#6b778c' }}>Spec ARI: </span>
+                  <span style={{ color: '#172b4d', fontWeight: 600 }}>{link.graphMetadata.linkedSpecAri}</span>
+                </div>
+                <div style={{ background: '#ffffff', padding: '5px 8px', borderRadius: 4, border: '1px solid #ebecf0' }}>
+                  <span style={{ color: '#6b778c' }}>Edge Type: </span>
+                  <span style={{ color: '#0052cc', fontWeight: 600 }}>{link.graphMetadata.edgeType}</span>
+                </div>
+              </div>
+              <div style={{ marginTop: 6, display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: 10 }}>
+                <span style={{ color: '#6b778c', fontWeight: 700 }}>{link.graphMetadata.aggTraversalStatus}</span>
+                <span style={{ color: '#6b778c' }}>api.atlassian.com/graphql</span>
+              </div>
+            </>
+          ) : (
+            <div style={{ fontSize: 11, color: '#6b778c', lineHeight: '16px' }}>
+              Modeled lineage (demo dataset) — no live Teamwork Graph ARI mapping was established for this
+              record. Live AGG GraphQL queries run via the <code>queryGraphContext</code> resolver with a Jira
+              REST fallback.
             </div>
-            <div style={{ background: '#ffffff', padding: '5px 8px', borderRadius: 4, border: '1px solid #ebecf0' }}>
-              <span style={{ color: '#6b778c' }}>Spec ARI: </span>
-              <span style={{ color: '#172b4d', fontWeight: 600 }}>{link.graphMetadata?.linkedSpecAri || `ari:cloud:confluence:d601ebde-589a-45d8-ab19-a8edfb1d5a47:page/${link.spec.id}`}</span>
+          )}
+          {graphContext && (
+            <div style={{ marginTop: 10, padding: '8px 10px', borderRadius: 6, background: '#deebff', border: '1px solid #b3d4ff' }}>
+              <div style={{ fontSize: 10, fontWeight: 700, color: '#0052cc', textTransform: 'uppercase', marginBottom: 4 }}>
+                Live Teamwork Graph (AGG / REST)
+              </div>
+              <div style={{ fontFamily: 'monospace', fontSize: 10, color: '#172b4d', lineHeight: '15px' }}>
+                {graphContext?.jira?.issue?.key && (
+                  <div>issue: {graphContext.jira.issue.key} — {graphContext.jira.issue.status?.name}</div>
+                )}
+                {graphContext?.key && (
+                  <div>issue: {graphContext.key} — {graphContext.fields?.status?.name}</div>
+                )}
+                {!graphContext?.jira?.issue?.key && !graphContext?.key && (
+                  <div>{JSON.stringify(graphContext).slice(0, 240)}</div>
+                )}
+              </div>
             </div>
-            <div style={{ background: '#ffffff', padding: '5px 8px', borderRadius: 4, border: '1px solid #ebecf0' }}>
-              <span style={{ color: '#6b778c' }}>Edge Type: </span>
-              <span style={{ color: '#0052cc', fontWeight: 600 }}>{link.graphMetadata?.edgeType || 'iso14971:mitigates-hazard -> atlassian:work-item-links-page'}</span>
-            </div>
-          </div>
-          <div style={{ marginTop: 6, display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: 10 }}>
-            <span style={{ color: '#00875a', fontWeight: 700 }}>● {link.graphMetadata?.aggTraversalStatus || 'TRAVERSED (AGG GraphQL Gateway 200 OK)'}</span>
-            <span style={{ color: '#6b778c' }}>api.atlassian.com/graphql</span>
-          </div>
+          )}
         </div>
       </div>
 
@@ -244,7 +277,7 @@ export const InspectionDrawer: React.FC<InspectionDrawerProps> = ({ link, blastR
             }}
           >
             <Zap size={16} />
-            {isRemediating ? 'Executing Automated HIL Test & Re-signing...' : '⚡ Remediate Class C Gap & Re-certify Gate'}
+            {isRemediating ? 'Executing Automated HIL Test & Re-signing...' : `⚡ Remediate ${link.hazard.riskClass.replace('_', ' ')} Gap & Re-certify Gate`}
           </button>
         ) : (
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, color: '#00875a', fontWeight: 700, fontSize: 13 }}>

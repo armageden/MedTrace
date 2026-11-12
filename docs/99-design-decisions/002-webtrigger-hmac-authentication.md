@@ -7,8 +7,8 @@ Atlassian Forge webtriggers are publicly accessible HTTP endpoints generated wit
 
 ## Decision
 Implement a cryptographic signature protocol binding the payload and timestamp in `src/index.ts` and `mcp-server/index.mjs`:
-1. The client derives an HMAC-SHA256 signature over `${timestamp}.${rawBody}` using a pre-shared secret (`MEDTRACE_MCP_SECRET`).
-2. Transmit `x-medtrace-timestamp` and `x-medtrace-signature: sha256=<hex>`.
+1. The client derives an HMAC-SHA256 signature over `${timestamp}.${nonce}.${rawBody}` using a pre-shared secret (`MEDTRACE_MCP_SECRET`); `x-medtrace-nonce` is required on every request.
+2. Transmit `x-medtrace-timestamp`, `x-medtrace-nonce`, and `x-medtrace-signature: sha256=<hex>`.
 3. The server checks a 300-second maximum replay window against `Date.now()`.
 4. Perform timing-safe signature comparison using `crypto.timingSafeEqual` in `verifyHmacSignature()`.
 
@@ -18,7 +18,9 @@ Implement a cryptographic signature protocol binding the payload and timestamp i
 
 ## Consequences
 - Protects the production webtrigger against unauthorized modification, parameter tampering, and replay attacks.
-- Eliminates timing side-channels during signature validation.
+- Eliminates timing side-channels during signature validation (`crypto.timingSafeEqual`).
+- **Nonce claim is atomic:** `claimNonce()` uses a conditional write (`keyPolicy: 'FAIL_IF_EXISTS'`) against `@forge/kvs`, so concurrent replays cannot both claim the same nonce; expired records are pruned lazily on access.
+- The CI-facing `verify-release-gate` action maps the validator verdict to HTTP 200/403 so pipeline gating needs no body parsing.
 - Validated via automated test suite in `tests/compliance-engine.test.cjs`.
 
 ## Key Files

@@ -1,0 +1,483 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    width: 1200px;
+    height: 800px;
+    overflow: hidden;
+    background: #EBECF0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+    color: #172B4D;
+    display: flex;
+    flex-direction: column;
+    padding: 32px 40px;
+    justify-content: space-between;
+    position: relative;
+  }
+
+  /* Studio Ambient Shadow & Highlight */
+  .studio-backdrop {
+    position: absolute;
+    inset: 0;
+    background: radial-gradient(circle at 50% 30%, #F8F9FA 0%, #DFE1E6 100%);
+    pointer-events: none;
+  }
+
+  /* Brand Header Banner */
+  .brand-bar {
+    position: relative;
+    z-index: 10;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 16px;
+  }
+  .brand-title-area {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  .brand-icon {
+    width: 42px;
+    height: 42px;
+    background: #0052CC;
+    border-radius: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    box-shadow: 0 4px 10px rgba(0, 82, 204, 0.25);
+  }
+  .brand-name {
+    font-size: 26px;
+    font-weight: 800;
+    color: #172B4D;
+    letter-spacing: -0.4px;
+  }
+  .brand-desc {
+    font-size: 13px;
+    font-weight: 600;
+    color: #5E6C84;
+    margin-left: 6px;
+  }
+  .awards-strip {
+    display: flex;
+    gap: 10px;
+  }
+  .badge {
+    padding: 6px 14px;
+    border-radius: 6px;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.3px;
+  }
+  .badge.primary { background: #DEEBFF; color: #0052CC; border: 1px solid #B3D4FF; }
+  .badge.award { background: #FFF0B3; color: #172B4D; border: 1px solid #FFE380; font-weight: 800; }
+
+  /* Realistic Jira Window Card */
+  .jira-window {
+    position: relative;
+    z-index: 10;
+    background: #FFFFFF;
+    border-radius: 12px;
+    box-shadow: 0 16px 40px rgba(9, 30, 66, 0.15), 0 0 1px rgba(9, 30, 66, 0.3);
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    margin-bottom: 16px;
+  }
+
+  /* Jira Global Header */
+  .jira-nav {
+    background: #0052CC;
+    padding: 10px 18px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    color: #FFFFFF;
+  }
+  .jira-nav-left {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    font-size: 13px;
+    font-weight: 600;
+  }
+  .jira-nav-crumbs {
+    color: #B3D4FF;
+    font-size: 12px;
+  }
+  .jira-nav-crumbs b { color: #FFFFFF; }
+
+  /* App Workspace */
+  .workspace {
+    display: flex;
+    flex: 1;
+    overflow: hidden;
+    background: #FAFBFC;
+  }
+
+  /* Main Graph Pane */
+  .graph-pane {
+    flex: 1;
+    padding: 16px 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    border-right: 1px solid #DFE1E6;
+  }
+
+  /* Header Controls in App */
+  .app-subbar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    background: #FFFFFF;
+    border: 1px solid #DFE1E6;
+    border-radius: 8px;
+    padding: 10px 16px;
+  }
+  .status-cluster {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  .release-chip {
+    background: #FFEBE6;
+    border: 1px solid #FFBDAD;
+    color: #DE350B;
+    font-size: 11px;
+    font-weight: 800;
+    padding: 4px 10px;
+    border-radius: 4px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .btn-cluster {
+    display: flex;
+    gap: 8px;
+  }
+  .jira-btn {
+    padding: 6px 12px;
+    border-radius: 5px;
+    font-size: 11px;
+    font-weight: 700;
+    cursor: pointer;
+    border: 1px solid transparent;
+  }
+  .jira-btn.blast { background: #FFAB00; color: #172B4D; font-weight: 800; }
+  .jira-btn.gate { background: #DE350B; color: #FFFFFF; }
+  .jira-btn.fix { background: #0052CC; color: #FFFFFF; }
+  .jira-btn.export { background: #F4F5F7; border-color: #DFE1E6; color: #42526E; }
+
+  /* Graph Rows */
+  .graph-grid {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    flex: 1;
+    justify-content: center;
+  }
+  .trace-chain {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  .node-box {
+    background: #FFFFFF;
+    border: 1.5px solid #DFE1E6;
+    border-radius: 8px;
+    padding: 10px 12px;
+    flex: 1;
+    min-width: 0;
+    box-shadow: 0 1px 3px rgba(9, 30, 66, 0.08);
+  }
+  .node-box.alert {
+    border-color: #DE350B;
+    box-shadow: 0 0 10px rgba(222, 53, 11, 0.2);
+  }
+  .node-box.warning {
+    border-color: #FF8B00;
+  }
+  .node-box.success {
+    border-color: #00875A;
+  }
+  .box-label {
+    font-size: 9px;
+    font-weight: 800;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+    margin-bottom: 2px;
+  }
+  .box-title {
+    font-size: 12px;
+    font-weight: 700;
+    color: #172B4D;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .box-sub {
+    font-size: 10px;
+    color: #6B778C;
+    margin-top: 2px;
+  }
+  .arrow {
+    color: #8993A4;
+    font-weight: 700;
+    font-size: 14px;
+  }
+
+  /* Slide-in Inspection Drawer (Right 340px) */
+  .inspection-drawer {
+    width: 350px;
+    background: #FFFFFF;
+    padding: 16px 18px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    box-shadow: -4px 0 16px rgba(9, 30, 66, 0.08);
+  }
+  .drawer-header {
+    border-bottom: 1px solid #EBECF0;
+    padding-bottom: 8px;
+  }
+  .drawer-kicker {
+    font-size: 10px;
+    font-weight: 800;
+    color: #6B778C;
+    text-transform: uppercase;
+  }
+  .drawer-title {
+    font-size: 15px;
+    font-weight: 800;
+    color: #172B4D;
+  }
+  .blast-card {
+    background: #FFFAE6;
+    border: 1.5px solid #FFE380;
+    border-radius: 8px;
+    padding: 12px;
+  }
+  .blast-title {
+    font-size: 12px;
+    font-weight: 800;
+    color: #FF8B00;
+    display: flex;
+    justify-content: space-between;
+    margin-bottom: 6px;
+  }
+  .blast-hops {
+    font-size: 11px;
+    color: #172B4D;
+    line-height: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin-top: 6px;
+  }
+  .hop {
+    background: #FFFFFF;
+    border: 1px solid #F4F5F7;
+    padding: 4px 8px;
+    border-radius: 4px;
+    font-size: 10px;
+  }
+  .hop b { color: #0052CC; }
+
+  /* Bottom Ribbon */
+  .bottom-strip {
+    position: relative;
+    z-index: 10;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 12px;
+    color: #5E6C84;
+    font-weight: 600;
+  }
+  .proofs {
+    display: flex;
+    gap: 20px;
+  }
+  .proofs span b { color: #172B4D; }
+  .seal {
+    font-weight: 800;
+    color: #00875A;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+</style>
+</head>
+<body>
+  <div class="studio-backdrop"></div>
+
+  <!-- Brand Bar -->
+  <div class="brand-bar">
+    <div class="brand-title-area">
+      <div class="brand-icon">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#FFFFFF" stroke-width="2.5">
+          <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path>
+          <path d="m9 12 2 2 4-4"></path>
+        </svg>
+      </div>
+      <div class="brand-name">MedTrace</div>
+      <span class="brand-desc">| Living IEC 62304 & ISO 14971 Traceability for Jira</span>
+    </div>
+    <div class="awards-strip">
+      <div class="badge award">🏆 Codegeist 2026: Specialized Industries</div>
+      <div class="badge primary">Atlassian Forge Native</div>
+    </div>
+  </div>
+
+  <!-- Jira Window Card -->
+  <div class="jira-window">
+    <div class="jira-nav">
+      <div class="jira-nav-left">
+        <span>⚡ Jira Cloud</span>
+        <span class="jira-nav-crumbs">/ Projects / <b>Smart Infusion Pump Firmware v2.1</b> / MedTrace</span>
+      </div>
+      <div style="font-size: 11px; background: rgba(255,255,255,0.2); padding: 3px 8px; border-radius: 4px;">
+        Zero Outbound Egress
+      </div>
+    </div>
+
+    <div class="workspace">
+      <!-- Main Canvas -->
+      <div class="graph-pane">
+        <div class="app-subbar">
+          <div class="status-cluster">
+            <div class="release-chip">
+              <span>🚨</span> RELEASE BLOCKED (1 Class C Gap)
+            </div>
+            <span style="font-size: 11px; color: #6B778C;">Coverage: <b>67% Verified</b></span>
+          </div>
+          <div class="btn-cluster">
+            <button class="jira-btn blast">⚡ Blast Radius</button>
+            <button class="jira-btn gate">🔒 Test Human Gate</button>
+            <button class="jira-btn fix">⚡ Remediate Gap</button>
+            <button class="jira-btn export">📄 510(k) Export</button>
+          </div>
+        </div>
+
+        <div class="graph-grid">
+          <!-- Chain 1: HAZ-101 (Blocked Class C) -->
+          <div class="trace-chain">
+            <div class="node-box alert">
+              <div class="box-label" style="color: #DE350B;">1. ISO 14971 • Class C</div>
+              <div class="box-title">HAZ-101: Over-Infusion</div>
+              <div class="box-sub">Catastrophic • Unverified</div>
+            </div>
+            <div class="arrow">→</div>
+            <div class="node-box warning">
+              <div class="box-label" style="color: #FF8B00;">2. Confluence SRS</div>
+              <div class="box-title">SRS-104: Clamp Motor</div>
+              <div class="box-sub">v3 Hash Drift Detected ⚠️</div>
+            </div>
+            <div class="arrow">→</div>
+            <div class="node-box alert">
+              <div class="box-label" style="color: #0052CC;">3. Jira Work Item</div>
+              <div class="box-title">MED-42: PWM Clamp</div>
+              <div class="box-sub">Transition Locked 🔒</div>
+            </div>
+            <div class="arrow">→</div>
+            <div class="node-box alert">
+              <div class="box-label" style="color: #DE350B;">4. Verification Test</div>
+              <div class="box-title">TEST-88: HIL Stress</div>
+              <div class="box-sub">Status: UNTESTED ❌</div>
+            </div>
+            <div class="arrow">→</div>
+            <div class="node-box warning">
+              <div class="box-label" style="color: #FF8B00;">5. Part 11 Signature</div>
+              <div class="box-title">Chief Medical Officer</div>
+              <div class="box-sub">REVOKED (Drift)</div>
+            </div>
+          </div>
+
+          <!-- Chain 2: HAZ-102 (Mitigated Class B) -->
+          <div class="trace-chain">
+            <div class="node-box success">
+              <div class="box-label" style="color: #00875A;">1. ISO 14971 • Class B</div>
+              <div class="box-title">HAZ-102: Under-Infusion</div>
+              <div class="box-sub">Critical • Mitigated</div>
+            </div>
+            <div class="arrow">→</div>
+            <div class="node-box success">
+              <div class="box-label" style="color: #00875A;">2. Confluence SRS</div>
+              <div class="box-title">SRS-105: Droplet Sensor</div>
+              <div class="box-sub">v2 Hash Verified ✓</div>
+            </div>
+            <div class="arrow">→</div>
+            <div class="node-box success">
+              <div class="box-label" style="color: #00875A;">3. Jira Work Item</div>
+              <div class="box-title">MED-43: Droplet Routine</div>
+              <div class="box-sub">Done • PR #139 Merged</div>
+            </div>
+            <div class="arrow">→</div>
+            <div class="node-box success">
+              <div class="box-label" style="color: #00875A;">4. Verification Test</div>
+              <div class="box-title">TEST-89: Waveform Test</div>
+              <div class="box-sub">Status: PASSED (48/48) ✓</div>
+            </div>
+            <div class="arrow">→</div>
+            <div class="node-box success">
+              <div class="box-label" style="color: #00875A;">5. Part 11 Signature</div>
+              <div class="box-title">QA Director</div>
+              <div class="box-sub">VALID ELECTRONIC SIG ✓</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Right Inspection Drawer -->
+      <div class="inspection-drawer">
+        <div class="drawer-header">
+          <div class="drawer-kicker">Regulatory Trace Inspection</div>
+          <div class="drawer-title">HAZ-101 Lineage & Impact</div>
+        </div>
+
+        <div class="blast-card">
+          <div class="blast-title">
+            <span>⚡ Transitive Blast Radius</span>
+            <span style="font-family: monospace; font-size: 10px; background: #fff; padding: 1px 5px; border-radius: 3px;">1.12 ms</span>
+          </div>
+          <div style="font-size: 11px; color: #172B4D; margin-bottom: 6px;">
+            Trigger: <b>SRS-104</b> (Specification Drift v3)
+          </div>
+          <div class="blast-hops">
+            <div class="hop"><b>Hop 1:</b> SIGNS → Signature Revoked (hash mismatch)</div>
+            <div class="hop"><b>Hop 2:</b> MITIGATES → HAZ-101 Compromised</div>
+            <div class="hop"><b>Hop 3:</b> IMPLEMENTS → MED-42 Gate Locked</div>
+            <div class="hop"><b>Hop 4:</b> VERIFIES → TEST-88 Invalidated</div>
+          </div>
+        </div>
+
+        <div style="background: #FFEBE6; border: 1px solid #FFBDAD; border-radius: 6px; padding: 10px; font-size: 11px; color: #BF2600;">
+          <b>Jira Safety Gate Intercept:</b><br/>
+          Human transition to Done halted for MED-42 until TEST-88 verification passes.
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Bottom Strip -->
+  <div class="bottom-strip">
+    <div class="proofs">
+      <span><b>Engine:</b> Sub-20ms BFS Graph Traversal</span>
+      <span><b>Gate:</b> Jira Workflow Validator & CI Endpoint</span>
+      <span><b>Agents:</b> Rovo Compliance Officer & Cursor MCP</span>
+    </div>
+    <div class="seal">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#00875A" stroke-width="2.5">
+        <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path>
+      </svg>
+      ZERO OUTBOUND EGRESS • TENANT CONFINED
+    </div>
+  </div>
+</body>
+</html>

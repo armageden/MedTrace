@@ -66,37 +66,4 @@ export class TeamworkGraphService {
 
     return null;
   }
-
-  /**
-   * Traverse Confluence Space & Document version graph
-   */
-  public static async queryConfluencePageGraph(pageId: string): Promise<any> {
-    try {
-      const resp = await api.asApp().requestConfluence(route`/wiki/api/v2/pages/${pageId}?include-version=true`);
-      if (resp.status === 200) {
-        return await resp.json();
-      }
-    } catch (err) {
-      console.warn(`[TeamworkGraph] Confluence page graph unavailable for ${pageId}`);
-    }
-    return null;
-  }
-
-  /**
-   * Registers or updates an ISO 14971 Clinical Hazard entity node into the Teamwork Graph context
-   */
-  public static async registerHazardNodeInGraph(hazardKey: string, payload: {
-    title: string;
-    riskClass: string;
-    severity: string;
-    mitigationKey: string;
-  }): Promise<{ success: boolean; graphNodeId: string }> {
-    const graphNodeId = `ari:cloud:medtrace::iso14971-hazard/${hazardKey}`;
-    console.log(`[TeamworkGraph] Ingesting entity ${graphNodeId} into Teamwork Graph Context:`, payload);
-
-    return {
-      success: true,
-      graphNodeId,
-    };
-  }
 }

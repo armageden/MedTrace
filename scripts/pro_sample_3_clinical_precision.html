@@ -1,0 +1,409 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>MedTrace - Professional Clinical Precision</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    width: 1200px;
+    height: 800px;
+    overflow: hidden;
+    background: #FFFFFF;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+    color: #0F172A;
+    display: flex;
+    flex-direction: column;
+    padding: 36px 44px;
+    justify-content: space-between;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* Header Section */
+  .header-section {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    border-bottom: 2px solid #0F172A;
+    padding-bottom: 20px;
+  }
+  .h-eyebrow {
+    font-size: 11px;
+    font-weight: 800;
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+    color: #0052CC;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 4px;
+  }
+  .h-title {
+    font-size: 32px;
+    font-weight: 800;
+    letter-spacing: -0.6px;
+    color: #0F172A;
+    line-height: 1.15;
+  }
+  .h-desc {
+    font-size: 14.5px;
+    color: #475569;
+    margin-top: 6px;
+    max-width: 680px;
+    line-height: 20px;
+  }
+
+  .h-standards {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 6px;
+  }
+  .std-badge {
+    background: #F1F5F9;
+    border: 1px solid #CBD5E1;
+    font-size: 11px;
+    font-weight: 700;
+    padding: 4px 10px;
+    border-radius: 4px;
+    color: #1E293B;
+  }
+  .std-badge.primary {
+    background: #0052CC;
+    border-color: #0052CC;
+    color: #FFFFFF;
+  }
+
+  /* 3-Pillar Architectural Showcase */
+  .pillars-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: 20px;
+    flex: 1;
+    padding: 24px 0;
+  }
+  .pillar-card {
+    background: #F8FAFC;
+    border: 1px solid #E2E8F0;
+    border-radius: 10px;
+    padding: 20px;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+  }
+  .pillar-card.highlight {
+    background: #FFFDFD;
+    border-color: #FECACA;
+    box-shadow: 0 4px 16px rgba(220, 38, 38, 0.06);
+  }
+
+  .pc-head {
+    border-bottom: 1px solid #E2E8F0;
+    padding-bottom: 12px;
+    margin-bottom: 14px;
+  }
+  .pc-num {
+    font-size: 10px;
+    font-weight: 800;
+    letter-spacing: 1px;
+    color: #0052CC;
+    text-transform: uppercase;
+  }
+  .pc-title {
+    font-size: 16px;
+    font-weight: 800;
+    color: #0F172A;
+    margin-top: 2px;
+  }
+  .pc-desc {
+    font-size: 11.5px;
+    color: #64748B;
+    margin-top: 4px;
+    line-height: 15px;
+  }
+
+  /* Pillar 1 Visual: Chain Flow */
+  .flow-stack {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .fs-step {
+    background: #FFFFFF;
+    border: 1px solid #E2E8F0;
+    border-radius: 6px;
+    padding: 8px 10px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-size: 11px;
+  }
+  .fs-step.fail {
+    border-color: #F87171;
+    background: #FEF2F2;
+  }
+  .fs-step.pass {
+    border-color: #86EFAC;
+    background: #F0FDF4;
+  }
+  .fs-tag {
+    font-size: 9px;
+    font-weight: 800;
+    padding: 2px 5px;
+    border-radius: 3px;
+  }
+  .fst-red { background: #DC2626; color: #FFFFFF; }
+  .fst-green { background: #16A34A; color: #FFFFFF; }
+  .fs-arrow {
+    text-align: center;
+    font-size: 11px;
+    color: #DC2626;
+    font-weight: 800;
+    line-height: 8px;
+  }
+
+  /* Pillar 2 Visual: Blast Radius Terminal */
+  .blast-box {
+    background: #0F172A;
+    border-radius: 6px;
+    padding: 12px;
+    font-family: ui-monospace, Menlo, Consolas, monospace;
+    font-size: 10px;
+    color: #E2E8F0;
+    line-height: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .bb-hi { color: #38BDF8; font-weight: 700; }
+  .bb-red { color: #F87171; font-weight: 700; }
+  .bb-green { color: #4ADE80; }
+
+  /* Pillar 3 Visual: Fail-Closed Verdict */
+  .verdict-box {
+    background: #FEF2F2;
+    border: 1.5px solid #DC2626;
+    border-radius: 6px;
+    padding: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .vb-top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .vb-status {
+    font-size: 13px;
+    font-weight: 800;
+    color: #DC2626;
+  }
+  .vb-rule {
+    font-size: 10px;
+    font-weight: 700;
+    color: #991B1B;
+    background: #FEE2E2;
+    padding: 2px 6px;
+    border-radius: 3px;
+  }
+  .vb-item {
+    font-size: 11px;
+    color: #7F1D1D;
+    line-height: 15px;
+    padding-left: 10px;
+    border-left: 2px solid #DC2626;
+  }
+
+  /* Footer Stats */
+  .footer-row {
+    border-top: 1px solid #E2E8F0;
+    padding-top: 16px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .stat-units {
+    display: flex;
+    gap: 32px;
+  }
+  .su-item {
+    display: flex;
+    flex-direction: column;
+  }
+  .su-val {
+    font-size: 18px;
+    font-weight: 800;
+    color: #0F172A;
+  }
+  .su-lbl {
+    font-size: 10px;
+    font-weight: 700;
+    color: #64748B;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+  }
+  .su-badge {
+    background: #F1F5F9;
+    padding: 4px 10px;
+    border-radius: 4px;
+    font-size: 11px;
+    font-weight: 700;
+    color: #334155;
+  }
+</style>
+</head>
+<body>
+
+  <!-- Header -->
+  <div class="header-section">
+    <div>
+      <div class="h-eyebrow">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#0052CC" stroke-width="2.5">
+          <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path>
+          <path d="m9 12 2 2 4-4"></path>
+        </svg>
+        <span>Medical Device Traceability Automation</span>
+      </div>
+      <div class="h-title">
+        MedTrace: Living Regulatory Engine for Jira
+      </div>
+      <div class="h-desc">
+        Closing the loop between ISO 14971 risk management, Confluence product specs, Jira engineering, and automated IEC 62304 verification.
+      </div>
+    </div>
+    <div class="h-standards">
+      <div class="std-badge primary">Atlassian Forge Native</div>
+      <div class="std-badge">IEC 62304:2006+A1:2015</div>
+      <div class="std-badge">ISO 14971:2019 (Class C)</div>
+      <div class="std-badge">FDA 21 CFR Part 11</div>
+    </div>
+  </div>
+
+  <!-- 3 Pillars Grid -->
+  <div class="pillars-grid">
+    <!-- Pillar 1 -->
+    <div class="pillar-card">
+      <div>
+        <div class="pc-head">
+          <div class="pc-num">Pillar 01</div>
+          <div class="pc-title">Continuous Traceability</div>
+          <div class="pc-desc">Deterministic 5-stage bidirectional link across all medical software lifecycle artifacts.</div>
+        </div>
+        <div class="flow-stack">
+          <div class="fs-step fail">
+            <span>1. HAZ-101 (Over-Infusion)</span>
+            <span class="fs-tag fst-red">CLASS C</span>
+          </div>
+          <div class="fs-arrow">↓</div>
+          <div class="fs-step fail">
+            <span>2. Confluence SRS-104</span>
+            <span class="fs-tag fst-red">v3 DRIFT</span>
+          </div>
+          <div class="fs-arrow">↓</div>
+          <div class="fs-step">
+            <span>3. Jira Work Item MED-42</span>
+            <span style="font-size: 9px; font-weight: 700; color: #0052CC;">PR #142</span>
+          </div>
+          <div class="fs-arrow">↓</div>
+          <div class="fs-step fail">
+            <span>4. Verification Test TEST-88</span>
+            <span class="fs-tag fst-red">UNTESTED</span>
+          </div>
+          <div class="fs-arrow">↓</div>
+          <div class="fs-step fail">
+            <span>5. 21 CFR Part 11 Sign-off</span>
+            <span class="fs-tag fst-red">REVOKED</span>
+          </div>
+        </div>
+      </div>
+      <div style="font-size: 11px; color: #64748B; font-weight: 600; margin-top: 10px;">
+        Evidence Status: <b>67% Coverage (1 Gap)</b>
+      </div>
+    </div>
+
+    <!-- Pillar 2 -->
+    <div class="pillar-card">
+      <div>
+        <div class="pc-head">
+          <div class="pc-num">Pillar 02</div>
+          <div class="pc-title">Transitive Blast Radius</div>
+          <div class="pc-desc">Instant graph cascade traversal identifies downstream regulatory fallout from pull requests.</div>
+        </div>
+        <div class="blast-box">
+          <div><span class="bb-hi">$ medtrace-cli</span> scan-diff --pr #142</div>
+          <div>&gt; Modified: pump_bolus_clamp.c</div>
+          <div>&gt; Linked Spec: Confluence SRS-104</div>
+          <div class="bb-red">&gt; DRIFT: SHA-256 Digest Mismatch</div>
+          <div>&gt; Transitive BFS Cascade: 4 hops</div>
+          <div>&gt; Upstream: HAZ-101 (Catastrophic)</div>
+          <div class="bb-red">&gt; Downstream: TEST-88 is UNTESTED</div>
+          <div>&gt; Part 11: Marcus Vance signature revoked</div>
+          <div class="bb-green">&gt; Execution Latency: 1.12 ms</div>
+        </div>
+      </div>
+      <div style="font-size: 11px; color: #64748B; font-weight: 600; margin-top: 10px;">
+        Algorithm: <b>Deterministic BFS Graph Traversal</b>
+      </div>
+    </div>
+
+    <!-- Pillar 3 -->
+    <div class="pillar-card highlight">
+      <div>
+        <div class="pc-head">
+          <div class="pc-num" style="color: #DC2626;">Pillar 03</div>
+          <div class="pc-title">Fail-Closed Release Gate</div>
+          <div class="pc-desc">Jira workflow validator intercepts human transitions. Halts deployment if hazards are unverified.</div>
+        </div>
+        <div class="verdict-box">
+          <div class="vb-top">
+            <span class="vb-status">🚨 TRANSITION BLOCKED</span>
+            <span class="vb-rule">RFC 2119</span>
+          </div>
+          <div class="vb-item">
+            <b>MED-42</b> transition to <b>'Done'</b> rejected.
+          </div>
+          <div class="vb-item">
+            <b>Blocker 1:</b> Class C hazard HAZ-101 has zero passing verification tests.
+          </div>
+          <div class="vb-item">
+            <b>Blocker 2:</b> TEST-88 HIL bench test pending execution.
+          </div>
+          <div class="vb-item">
+            <b>Blocker 3:</b> Spec hash modified without CMO re-approval.
+          </div>
+        </div>
+      </div>
+      <div style="font-size: 11px; color: #DC2626; font-weight: 700; margin-top: 10px;">
+        Verdict: <b>Release Gate Enforced in Jira</b>
+      </div>
+    </div>
+  </div>
+
+  <!-- Footer Row -->
+  <div class="footer-row">
+    <div class="stat-units">
+      <div class="su-item">
+        <div class="su-val">&lt; 20 ms</div>
+        <div class="su-lbl">BFS Traversal Latency</div>
+      </div>
+      <div class="su-item">
+        <div class="su-val">Zero Egress</div>
+        <div class="su-lbl">100% In-Tenant Forge</div>
+      </div>
+      <div class="su-item">
+        <div class="su-val">SHA-256</div>
+        <div class="su-lbl">Dynamic Digest Audit</div>
+      </div>
+      <div class="su-item">
+        <div class="su-val">Atlassian Rovo</div>
+        <div class="su-lbl">Teamwork Graph & MCP</div>
+      </div>
+    </div>
+    <div class="su-badge">
+      Smart Infusion Pump Firmware v2.1 • Codegeist 2026
+    </div>
+  </div>
+
+</body>
+</html>

@@ -73,7 +73,11 @@ export class ComplianceEngine {
   /**
    * Evaluates the entire project suite and builds an audit-ready compliance summary
    */
-  public static generateComplianceReport(traceLinks: TraceLink[]): ComplianceSummary {
+  public static generateComplianceReport(
+    traceLinks: TraceLink[],
+    datasetMode: 'DEMO' | 'LIVE' = 'DEMO',
+    projectName: string = 'Smart Infusion Pump Firmware v2.1'
+  ): ComplianceSummary {
     let classCCount = 0;
     let classBCount = 0;
     let classACount = 0;
@@ -104,7 +108,8 @@ export class ComplianceEngine {
     const releaseBlocked = blockingReasons.length > 0;
 
     return {
-      projectName: 'Smart Infusion Pump Firmware v2.1',
+      projectName,
+      datasetMode,
       standards: [
         'IEC 62304:2006+A1:2015 (Medical Device Software Lifecycle)',
         'ISO 14971:2019 (Risk Management for Medical Devices)',
@@ -125,28 +130,32 @@ export class ComplianceEngine {
 
   /**
    * Deterministic Regulatory Blast Radius & Transitive Impact Analyzer
-   * Executes a formal BFS traversal over the typed 5-stage traceability graph
-   * (HAZARD, SPEC, WORK, TEST, SIGNATURE) to compute the ripple effect of specification
-   * drift or test failures. Guaranteed cycle-safe and deterministic.
+   * Executes a breadth-first traversal over the typed 5-stage traceability graph
+   * (HAZARD, SPEC, WORK, TEST, SIGNATURE). Links are connected into a real artifact graph
+   * (node key -> containing links) so traversal crosses into sibling links that share a
+   * hazard, spec, work item, test, or signature node. FIFO queue guarantees deterministic
+   * hop order; visited node/relation sets guarantee termination on circular trace links.
    */
   public static computeBlastRadius(triggerKey: string, suite: ComplianceSummary): BlastRadiusReport {
     const startTime = typeof performance !== 'undefined' ? performance.now() : Date.now();
     const cleanKey = (triggerKey || '').trim().toLowerCase();
 
-    // Identify all trace links connected to this trigger (by spec id/title, hazard key, work key, or test key)
-    let matchingLinks = suite.traceLinks.filter(
-      (l) =>
-        l.spec.id.toLowerCase() === cleanKey ||
-        l.spec.title.toLowerCase().includes(cleanKey) ||
-        l.hazard.key.toLowerCase() === cleanKey ||
-        l.hazard.mitigationRequirementId.toLowerCase() === cleanKey ||
-        l.work.key.toLowerCase() === cleanKey ||
-        l.test.testKey.toLowerCase() === cleanKey
-    );
-
-    // If no trigger was specified, default to first link for demonstration
-    if (matchingLinks.length === 0 && (!cleanKey || cleanKey === '')) {
+    // Seed links: trace links directly matching the trigger (by spec id/title, hazard key, work key, or test key)
+    // Guard before filtering: an empty/whitespace trigger must default to the first link, never
+    // sweep the whole suite (String.includes('') matches everything).
+    let matchingLinks: TraceLink[];
+    if (!cleanKey) {
       matchingLinks = suite.traceLinks.slice(0, 1);
+    } else {
+      matchingLinks = suite.traceLinks.filter(
+        (l) =>
+          l.spec.id.toLowerCase() === cleanKey ||
+          l.spec.title.toLowerCase().includes(cleanKey) ||
+          l.hazard.key.toLowerCase() === cleanKey ||
+          l.hazard.mitigationRequirementId.toLowerCase() === cleanKey ||
+          l.work.key.toLowerCase() === cleanKey ||
+          l.test.testKey.toLowerCase() === cleanKey
+      );
     }
 
     // If a specific trigger was requested but is completely disconnected / not found:
@@ -171,49 +180,81 @@ export class ComplianceEngine {
       };
     }
 
-    const visited = new Set<string>();
+    // Artifact-node adjacency: each node key maps to every trace link containing it
+    const nodeKeysOf = (link: TraceLink): string[] => [
+      `spec:${link.spec.id.toLowerCase()}`,
+      `haz:${link.hazard.key.toLowerCase()}`,
+      `work:${link.work.key.toLowerCase()}`,
+      `test:${link.test.testKey.toLowerCase()}`,
+      `sig:${link.signature.id.toLowerCase()}`,
+    ];
+
+    const linksByNode = new Map<string, TraceLink[]>();
+    for (const link of suite.traceLinks) {
+      for (const nodeKey of nodeKeysOf(link)) {
+        const links = linksByNode.get(nodeKey);
+        if (links) {
+          if (!links.includes(link)) links.push(link);
+        } else {
+          linksByNode.set(nodeKey, [link]);
+        }
+      }
+    }
+
+    const visitedNodes = new Set<string>();
+    const visitedRels = new Set<string>();
+    const enqueued = new Set<TraceLink>();
+    const plannedHazardKeys = new Set<string>();
     const traversalPath: BlastRadiusReport['traversalPath'] = [];
     const affectedHazardKeys: string[] = [];
     const blockedWorkItemKeys: string[] = [];
     const invalidatedTestKeys: string[] = [];
     const invalidatedSignatureIds: string[] = [];
     const transitiveActionPlan: string[] = [];
+    const affectedLinks: TraceLink[] = [];
+
+    const queue: TraceLink[] = [];
+    const enqueue = (link: TraceLink) => {
+      if (!enqueued.has(link)) {
+        enqueued.add(link);
+        queue.push(link);
+      }
+    };
+    for (const link of matchingLinks) enqueue(link);
 
     const rootSpec = matchingLinks[0].spec;
 
-    for (const link of matchingLinks) {
+    // Breadth-first expansion over links; per-link hops emitted in fixed SIGNS -> MITIGATES -> IMPLEMENTS -> VERIFIES order
+    let cursor = 0;
+    while (cursor < queue.length) {
+      const link = queue[cursor++];
+      affectedLinks.push(link);
       const specNode = link.spec;
-      const specKey = `spec:${specNode.id}`;
+      const haz = link.hazard;
 
-      // Hop 1: SIGNS edge (Spec -> Signature)
-      const sigList = ((link as any).signatures && Array.isArray((link as any).signatures))
-        ? [link.signature, ...(link as any).signatures].filter(Boolean)
-        : [link.signature].filter(Boolean);
-
-      for (const sig of sigList) {
-        const sigKey = `sig:${sig.id}`;
-        if (!visited.has(sigKey)) {
-          visited.add(sigKey);
-          const isSignatureDrifted = specNode.sha256Hash !== sig.artifactSha256 || specNode.isSignatureInvalidated;
-          if (isSignatureDrifted) {
-            invalidatedSignatureIds.push(sig.id);
-            traversalPath.push({
-              hop: traversalPath.length + 1,
-              from: `Spec [${specNode.title.split(':')[0].trim()}]`,
-              edge: 'SIGNS' as GraphEdgeType,
-              to: `Signature [${sig.signedBy}]`,
-              effect: `Signature evidence invalidated: hash drift detected (expected ${sig.artifactSha256.slice(0, 8)}..., current ${specNode.sha256Hash.slice(0, 8)}...).`,
-            });
-            transitiveActionPlan.push(`Re-certify clinical sign-off with ${sig.signedBy} (${sig.role}) for revised spec.`);
-          }
+      // SIGNS edge (Spec -> Signature)
+      const sig = link.signature;
+      const sigKey = `sig:${sig.id.toLowerCase()}`;
+      if (!visitedNodes.has(sigKey)) {
+        visitedNodes.add(sigKey);
+        const isSignatureDrifted = specNode.sha256Hash !== sig.artifactSha256 || specNode.isSignatureInvalidated;
+        if (isSignatureDrifted) {
+          invalidatedSignatureIds.push(sig.id);
+          traversalPath.push({
+            hop: traversalPath.length + 1,
+            from: `Spec [${specNode.title.split(':')[0].trim()}]`,
+            edge: 'SIGNS' as GraphEdgeType,
+            to: `Signature [${sig.signedBy}]`,
+            effect: `Signature evidence invalidated: hash drift detected (expected ${sig.artifactSha256.slice(0, 8)}..., current ${specNode.sha256Hash.slice(0, 8)}...).`,
+          });
+          transitiveActionPlan.push(`Re-certify clinical sign-off with ${sig.signedBy} (${sig.role}) for revised spec.`);
         }
       }
 
-      // Hop 2: MITIGATES edge (Spec -> Hazard)
-      const haz = link.hazard;
-      const mitigatesKey = `mitigates:${specNode.id}->${haz.key}`;
-      if (!visited.has(mitigatesKey)) {
-        visited.add(mitigatesKey);
+      // MITIGATES edge (Spec -> Hazard)
+      const mitigatesKey = `mitigates:${specNode.id.toLowerCase()}->${haz.key.toLowerCase()}`;
+      if (!visitedRels.has(mitigatesKey)) {
+        visitedRels.add(mitigatesKey);
         if (!affectedHazardKeys.includes(haz.key)) {
           affectedHazardKeys.push(haz.key);
         }
@@ -224,16 +265,17 @@ export class ComplianceEngine {
           to: `Hazard [${haz.key}]`,
           effect: `Safety mitigation compromised: ${haz.title} (${haz.riskClass.replace('_', ' ')}).`,
         });
-        if (!transitiveActionPlan.some((p) => p.includes(haz.key))) {
+        if (!plannedHazardKeys.has(haz.key)) {
+          plannedHazardKeys.add(haz.key);
           transitiveActionPlan.push(`Review ISO 14971 risk mitigations for ${haz.key} against revised specifications.`);
         }
       }
 
-      // Hop 3: IMPLEMENTS edge (Hazard -> Jira Work Item)
+      // IMPLEMENTS edge (Hazard -> Jira Work Item)
       const work = link.work;
-      const workKey = `work:${work.key}`;
-      if (!visited.has(workKey)) {
-        visited.add(workKey);
+      const workKey = `work:${work.key.toLowerCase()}`;
+      if (!visitedNodes.has(workKey)) {
+        visitedNodes.add(workKey);
         blockedWorkItemKeys.push(work.key);
         traversalPath.push({
           hop: traversalPath.length + 1,
@@ -245,11 +287,11 @@ export class ComplianceEngine {
         transitiveActionPlan.push(`Verify firmware implementation in ${work.key} (${work.prNumber || 'open PR'}) matches updated parameters.`);
       }
 
-      // Hop 4: VERIFIES edge (Hazard -> Test Execution)
+      // VERIFIES edge (Hazard -> Test Execution)
       const test = link.test;
-      const testKey = `test:${test.testKey}`;
-      if (!visited.has(testKey)) {
-        visited.add(testKey);
+      const testKey = `test:${test.testKey.toLowerCase()}`;
+      if (!visitedNodes.has(testKey)) {
+        visitedNodes.add(testKey);
         invalidatedTestKeys.push(test.testKey);
         traversalPath.push({
           hop: traversalPath.length + 1,
@@ -260,11 +302,18 @@ export class ComplianceEngine {
         });
         transitiveActionPlan.push(`Execute automated verification run for ${test.testKey} (${test.testType}) to regenerate passing evidence.`);
       }
+
+      // Cross-link expansion: sibling links sharing any artifact node of this link enter the BFS frontier
+      for (const nodeKey of nodeKeysOf(link)) {
+        for (const sibling of linksByNode.get(nodeKey) || []) {
+          enqueue(sibling);
+        }
+      }
     }
 
     // Determine highest severity among all affected hazards
-    const hasClassC = matchingLinks.some((l) => l.hazard.riskClass === 'CLASS_C');
-    const hasClassB = matchingLinks.some((l) => l.hazard.riskClass === 'CLASS_B');
+    const hasClassC = affectedLinks.some((l) => l.hazard.riskClass === 'CLASS_C');
+    const hasClassB = affectedLinks.some((l) => l.hazard.riskClass === 'CLASS_B');
     const impactSeverity: BlastRadiusReport['impactSeverity'] = hasClassC
       ? 'CRITICAL_CATASTROPHIC'
       : hasClassB

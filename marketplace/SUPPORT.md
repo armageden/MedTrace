@@ -2,7 +2,7 @@
 
 **Product:** MedTrace IEC 62304 & FDA 21 CFR Part 11 Regulatory Traceability Sentinel  
 **Maintained by:** Farhan Dev (`farhantanvir277@gmail.com`)  
-**Support Portal:** `https://one-atlas-feur.atlassian.net`  
+**Issue Tracker:** `https://github.com/armageden/MedTrace/issues`  
 
 ---
 
@@ -12,7 +12,7 @@ For technical issues, bug reports, or regulatory workflow inquiries:
 
 - **Email Support:** `farhantanvir277@gmail.com` (Response within 24 business hours)
 - **Atlassian Developer Community:** Mention `@MedTrace` in Marketplace discussions.
-- **Service Desk / Issue Tracker:** `https://one-atlas-feur.atlassian.net/servicedesk/customer/portal`
+- **Issue Tracker:** `https://github.com/armageden/MedTrace/issues`
 
 ---
 
@@ -31,7 +31,7 @@ For technical issues, bug reports, or regulatory workflow inquiries:
 When opening a ticket, please provide:
 1. Atlassian Cloud Site URL (e.g., `your-site.atlassian.net`)
 2. Jira Issue Key or Confluence Page ID exhibiting the issue
-3. Browser version and Forge app installation version (e.g., `v2.0.0`)
+3. Browser version and Forge app installation version (visible in the app header or `forge install list`; e.g., major version 2 or 3)
 4. Console error logs or screenshot of the MedTrace inspection drawer
 
 ---

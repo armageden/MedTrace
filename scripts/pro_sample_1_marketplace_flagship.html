@@ -1,0 +1,638 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>MedTrace - Professional Marketplace Flagship</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    width: 1200px;
+    height: 800px;
+    overflow: hidden;
+    background: #F4F6F8;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+    color: #091E42;
+    display: flex;
+    flex-direction: column;
+    padding: 32px 40px;
+    justify-content: space-between;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* Top Header / Brand Bar */
+  .header-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding-bottom: 20px;
+  }
+  .brand-left {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+  }
+  .brand-icon {
+    width: 52px;
+    height: 52px;
+    background: linear-gradient(135deg, #0052CC 0%, #0747A6 100%);
+    border-radius: 12px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    box-shadow: 0 4px 12px rgba(0, 82, 204, 0.25);
+  }
+  .brand-text h1 {
+    font-size: 28px;
+    font-weight: 800;
+    color: #091E42;
+    letter-spacing: -0.5px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .brand-tag {
+    font-size: 11px;
+    font-weight: 700;
+    background: #DEEBFF;
+    color: #0052CC;
+    padding: 3px 8px;
+    border-radius: 4px;
+    letter-spacing: 0.3px;
+    text-transform: uppercase;
+  }
+  .brand-text p {
+    font-size: 14px;
+    font-weight: 500;
+    color: #5E6C84;
+    margin-top: 2px;
+  }
+
+  .brand-badges {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+  }
+  .pill-badge {
+    font-size: 11.5px;
+    font-weight: 700;
+    padding: 6px 12px;
+    border-radius: 6px;
+    background: #FFFFFF;
+    border: 1px solid #DFE1E6;
+    color: #42526E;
+    box-shadow: 0 1px 2px rgba(9, 30, 66, 0.04);
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .pill-badge b { color: #0052CC; }
+
+  /* Main Showcase Card */
+  .showcase-card {
+    flex: 1;
+    background: #FFFFFF;
+    border: 1px solid #DFE1E6;
+    border-radius: 12px;
+    box-shadow: 0 8px 24px rgba(9, 30, 66, 0.06), 0 1px 3px rgba(9, 30, 66, 0.08);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  /* Metric KPI Ribbon */
+  .kpi-ribbon {
+    display: grid;
+    grid-template-columns: 1.1fr 1fr 1.3fr 1fr;
+    border-bottom: 1px solid #EBECF0;
+    background: #FAFBFC;
+  }
+  .kpi-item {
+    padding: 14px 20px;
+    border-right: 1px solid #EBECF0;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+  }
+  .kpi-item:last-child { border-right: none; }
+  .kpi-title {
+    font-size: 10.5px;
+    font-weight: 800;
+    color: #6B778C;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+  }
+  .kpi-val-row {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    margin-top: 3px;
+  }
+  .kpi-val {
+    font-size: 22px;
+    font-weight: 800;
+    color: #091E42;
+    line-height: 1;
+  }
+  .kpi-val.danger { color: #DE350B; }
+  .kpi-val.blocked {
+    font-size: 15px;
+    color: #DE350B;
+    background: #FFEBE6;
+    padding: 3px 8px;
+    border-radius: 4px;
+    border: 1px solid #FFBDAD;
+  }
+  .kpi-desc {
+    font-size: 11px;
+    color: #5E6C84;
+    font-weight: 500;
+  }
+
+  /* Graph Canvas Area */
+  .canvas-area {
+    flex: 1;
+    background-color: #FAFBFC;
+    background-image: radial-gradient(#D0D5DD 1.2px, transparent 1.2px);
+    background-size: 16px 16px;
+    padding: 20px 24px;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    position: relative;
+  }
+
+  /* Stage Column Labels */
+  .stage-row {
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+    gap: 16px;
+    z-index: 2;
+  }
+  .stage-col {
+    background: #FFFFFF;
+    border: 1px solid #DFE1E6;
+    border-radius: 6px;
+    padding: 7px 10px;
+    font-size: 10px;
+    font-weight: 800;
+    letter-spacing: 0.6px;
+    color: #42526E;
+    text-align: center;
+    box-shadow: 0 1px 2px rgba(9, 30, 66, 0.04);
+  }
+
+  /* Chain Rows */
+  .chains-wrap {
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+    z-index: 2;
+    margin: auto 0;
+  }
+  .chain-grid {
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+    gap: 16px;
+    align-items: center;
+    position: relative;
+  }
+
+  /* Node Card Component */
+  .n-card {
+    background: #FFFFFF;
+    border-radius: 8px;
+    padding: 12px 14px;
+    border: 1.5px solid #DFE1E6;
+    box-shadow: 0 2px 4px rgba(9, 30, 66, 0.06);
+    height: 108px;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    position: relative;
+  }
+  .n-card.blocked-chain {
+    border-color: #FFBDAD;
+  }
+  .n-card.danger-hazard {
+    border-color: #DE350B;
+    box-shadow: 0 0 12px rgba(222, 53, 11, 0.15);
+  }
+  .n-card.active-gap {
+    background: #FFF8F7;
+    border: 2px solid #DE350B;
+    box-shadow: 0 0 14px rgba(222, 53, 11, 0.22);
+  }
+  .n-card.verified {
+    border-color: #79F2C0;
+  }
+
+  .n-top {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .n-id {
+    font-size: 13px;
+    font-weight: 800;
+    color: #091E42;
+  }
+  .n-pill {
+    font-size: 9px;
+    font-weight: 800;
+    padding: 2px 6px;
+    border-radius: 3px;
+    letter-spacing: 0.4px;
+  }
+  .np-red { background: #FFEBE6; color: #DE350B; }
+  .np-red-solid { background: #DE350B; color: #FFFFFF; }
+  .np-orange { background: #FFF0B3; color: #7F5F00; }
+  .np-blue { background: #DEEBFF; color: #0052CC; }
+  .np-green { background: #E3FCEF; color: #00875A; }
+  .np-purple { background: #EAE6FF; color: #403294; }
+
+  .n-title {
+    font-size: 11.5px;
+    font-weight: 600;
+    color: #253858;
+    line-height: 15px;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+  .n-sub {
+    font-size: 9.5px;
+    color: #6B778C;
+    border-top: 1px solid #F4F5F7;
+    padding-top: 4px;
+    display: flex;
+    justify-content: space-between;
+  }
+
+  /* Handles */
+  .h-r, .h-l {
+    position: absolute;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    border: 1.5px solid #FFFFFF;
+    z-index: 5;
+  }
+  .h-r { right: -5px; }
+  .h-l { left: -5px; }
+  .h-red { background: #DE350B; }
+  .h-green { background: #00875A; }
+
+  /* SVG Canvas */
+  #svg-layer {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    z-index: 1;
+  }
+
+  /* Bottom Trust Guarantee Footer */
+  .bottom-bar {
+    padding: 12px 24px;
+    background: #FAFBFC;
+    border-top: 1px solid #DFE1E6;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-size: 12px;
+    color: #5E6C84;
+  }
+  .bottom-features {
+    display: flex;
+    gap: 20px;
+  }
+  .feat-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .feat-item b { color: #091E42; font-weight: 700; }
+  .dot-sep { color: #C1C7D0; }
+</style>
+</head>
+<body>
+
+  <!-- Top Header / Brand Bar -->
+  <div class="header-bar">
+    <div class="brand-left">
+      <div class="brand-icon">
+        <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#FFFFFF" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path>
+          <path d="m9 12 2 2 4-4"></path>
+        </svg>
+      </div>
+      <div class="brand-text">
+        <h1>MedTrace <span class="brand-tag">Atlassian Forge Native</span></h1>
+        <p>Living IEC 62304 & ISO 14971 Regulatory Traceability Engine for Jira Cloud</p>
+      </div>
+    </div>
+    <div class="brand-badges">
+      <div class="pill-badge">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#0052CC" stroke-width="2.5">
+          <rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect>
+          <path d="M7 11V7a5 5 0 0 1 10 0v4"></path>
+        </svg>
+        <span>Zero Outbound Egress</span>
+      </div>
+      <div class="pill-badge">
+        <span><b>&lt;20ms</b> Transitive BFS</span>
+      </div>
+      <div class="pill-badge">
+        <span>FDA <b>21 CFR Part 11</b></span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Main Showcase Card -->
+  <div class="showcase-card">
+    <!-- Top KPI Ribbon -->
+    <div class="kpi-ribbon">
+      <div class="kpi-item">
+        <div class="kpi-title">IEC 62304 Verification Coverage</div>
+        <div class="kpi-val-row">
+          <div class="kpi-val danger">67%</div>
+          <div class="kpi-desc">2 of 3 Hazards Verified (1 Critical Gap)</div>
+        </div>
+      </div>
+      <div class="kpi-item">
+        <div class="kpi-title">ISO 14971 Class C Hazards</div>
+        <div class="kpi-val-row">
+          <div class="kpi-val danger">1 Active</div>
+          <div class="kpi-desc">Catastrophic Severity Threshold</div>
+        </div>
+      </div>
+      <div class="kpi-item">
+        <div class="kpi-title">Jira Workflow Release Gate</div>
+        <div class="kpi-val-row">
+          <div class="kpi-val blocked">🚨 RELEASE BLOCKED</div>
+          <div class="kpi-desc">Transition to Done halted for MED-42</div>
+        </div>
+      </div>
+      <div class="kpi-item">
+        <div class="kpi-title">Electronic Signatures</div>
+        <div class="kpi-val-row">
+          <div class="kpi-val" style="color: #FF8B00;">1 Revoked</div>
+          <div class="kpi-desc">SHA-256 Spec Drift Detected</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Graph Canvas Area -->
+    <div class="canvas-area" id="canvas-area">
+      <svg id="svg-layer">
+        <defs>
+          <marker id="m-red" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+            <path d="M 0 1 L 9 5 L 0 9 z" fill="#DE350B" />
+          </marker>
+          <marker id="m-green" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+            <path d="M 0 1 L 9 5 L 0 9 z" fill="#00875A" />
+          </marker>
+        </defs>
+      </svg>
+
+      <!-- Stage Column Headers -->
+      <div class="stage-row">
+        <div class="stage-col">1. ISO 14971 HAZARD ANALYSIS</div>
+        <div class="stage-col">2. CONFLUENCE SRS SPEC</div>
+        <div class="stage-col">3. JIRA WORK ITEM & PR</div>
+        <div class="stage-col">4. IEC 62304 VERIFICATION</div>
+        <div class="stage-col">5. 21 CFR PART 11 SIGN-OFF</div>
+      </div>
+
+      <!-- Graph Chains -->
+      <div class="chains-wrap">
+        <!-- Row 1: The Failing Unverified Chain -->
+        <div class="chain-grid" id="cg-1">
+          <!-- Col 1 -->
+          <div class="n-card danger-hazard" id="n1-1">
+            <div class="n-top">
+              <span class="n-id" style="color: #DE350B;">HAZ-101</span>
+              <span class="n-pill np-red">CLASS C</span>
+            </div>
+            <div class="n-title">Over-Infusion Hazard: Bolus delivery exceeds 5.0 mL/hr</div>
+            <div class="n-sub">
+              <span>Severity: <b>CATASTROPHIC</b></span>
+              <span>Occasional</span>
+            </div>
+            <div class="h-r h-red" id="h1-1-r"></div>
+          </div>
+
+          <!-- Col 2 -->
+          <div class="n-card blocked-chain" id="n1-2">
+            <div class="h-l h-red" id="h1-2-l"></div>
+            <div class="n-top">
+              <span class="n-id">Confluence SRS</span>
+              <span class="n-pill np-orange">v3 (DRIFT)</span>
+            </div>
+            <div class="n-title">SRS-104: Dual-Core Hardware Bolus Clamp (Max 5.0 mL/hr)</div>
+            <div class="n-sub">
+              <span style="color: #DE350B; font-weight: 700;">Hash Mismatch</span>
+              <span>Threshold modified</span>
+            </div>
+            <div class="h-r h-red" id="h1-2-r"></div>
+          </div>
+
+          <!-- Col 3 -->
+          <div class="n-card blocked-chain" id="n1-3">
+            <div class="h-l h-red" id="h1-3-l"></div>
+            <div class="n-top">
+              <span class="n-id" style="color: #0052CC;">MED-42</span>
+              <span class="n-pill np-purple">In Progress</span>
+            </div>
+            <div class="n-title">Implement Dual-Core Hardware PWM Clamp on Infusion Motor</div>
+            <div class="n-sub">
+              <span>Dr. Sarah Lin</span>
+              <span>PR #142</span>
+            </div>
+            <div class="h-r h-red" id="h1-3-r"></div>
+          </div>
+
+          <!-- Col 4 -->
+          <div class="n-card active-gap" id="n1-4">
+            <div class="h-l h-red" id="h1-4-l"></div>
+            <div class="n-top">
+              <span class="n-id" style="color: #DE350B;">TEST-88</span>
+              <span class="n-pill np-red-solid">UNTESTED</span>
+            </div>
+            <div class="n-title">Hardware-in-the-Loop Occlusion & Over-Infusion Stress Test</div>
+            <div class="n-sub">
+              <span style="color: #DE350B; font-weight: 700;">HIL Bench Execution Pending</span>
+            </div>
+            <div class="h-r h-red" id="h1-4-r"></div>
+          </div>
+
+          <!-- Col 5 -->
+          <div class="n-card blocked-chain" id="n1-5">
+            <div class="h-l h-red" id="h1-5-l"></div>
+            <div class="n-top">
+              <span class="n-id">21 CFR Part 11</span>
+              <span class="n-pill np-red">REVOKED</span>
+            </div>
+            <div class="n-title">Marcus Vance, MD (Chief Medical Officer)</div>
+            <div class="n-sub">
+              <span style="color: #DE350B; font-weight: 700;">Signature Invalidated</span>
+              <span>Re-sign Req.</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Row 2: Passing Verified Chain -->
+        <div class="chain-grid" id="cg-2">
+          <!-- Col 1 -->
+          <div class="n-card verified" id="n2-1">
+            <div class="n-top">
+              <span class="n-id" style="color: #FF8B00;">HAZ-102</span>
+              <span class="n-pill np-orange">CLASS B</span>
+            </div>
+            <div class="n-title">Under-Infusion Hazard: Unintended pump stall hypoglycemia</div>
+            <div class="n-sub">
+              <span>Severity: <b>CRITICAL</b></span>
+              <span>Remote</span>
+            </div>
+            <div class="h-r h-green" id="h2-1-r"></div>
+          </div>
+
+          <!-- Col 2 -->
+          <div class="n-card verified" id="n2-2">
+            <div class="h-l h-green" id="h2-2-l"></div>
+            <div class="n-top">
+              <span class="n-id">Confluence SRS</span>
+              <span class="n-pill np-blue">v2</span>
+            </div>
+            <div class="n-title">SRS-105: Optical Droplet Sensor Flow Rate Verification</div>
+            <div class="n-sub">
+              <span style="color: #00875A; font-weight: 700;">Hash Verified ✓</span>
+              <span>SHA-256 Match</span>
+            </div>
+            <div class="h-r h-green" id="h2-2-r"></div>
+          </div>
+
+          <!-- Col 3 -->
+          <div class="n-card verified" id="n2-3">
+            <div class="h-l h-green" id="h2-3-l"></div>
+            <div class="n-top">
+              <span class="n-id" style="color: #0052CC;">MED-43</span>
+              <span class="n-pill np-green">Done</span>
+            </div>
+            <div class="n-title">Integrate Optical Droplet Sensor Interrupt Routine</div>
+            <div class="n-sub">
+              <span>David Chen</span>
+              <span>PR #139</span>
+            </div>
+            <div class="h-r h-green" id="h2-3-r"></div>
+          </div>
+
+          <!-- Col 4 -->
+          <div class="n-card verified" id="n2-4">
+            <div class="h-l h-green" id="h2-4-l"></div>
+            <div class="n-top">
+              <span class="n-id" style="color: #00875A;">TEST-89</span>
+              <span class="n-pill np-green">PASSED</span>
+            </div>
+            <div class="n-title">Closed-Loop Droplet Pulse Waveform Verification</div>
+            <div class="n-sub">
+              <span style="color: #00875A; font-weight: 700;">48/48 Assertions Passed ✓</span>
+            </div>
+            <div class="h-r h-green" id="h2-4-r"></div>
+          </div>
+
+          <!-- Col 5 -->
+          <div class="n-card verified" id="n2-5">
+            <div class="h-l h-green" id="h2-5-l"></div>
+            <div class="n-top">
+              <span class="n-id">21 CFR Part 11</span>
+              <span class="n-pill np-green">CERTIFIED</span>
+            </div>
+            <div class="n-title">Rachel Adams (Director of Regulatory Affairs)</div>
+            <div class="n-sub">
+              <span style="color: #00875A; font-weight: 700;">Cryptographically Valid ✓</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Bottom Features & Security Bar -->
+    <div class="bottom-bar">
+      <div class="bottom-features">
+        <div class="feat-item">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#0052CC" stroke-width="2.5">
+            <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon>
+          </svg>
+          <span><b>Deterministic Traversal:</b> Multi-hop BFS cascade across Jira & Confluence in 1.12 ms</span>
+        </div>
+        <span class="dot-sep">•</span>
+        <div class="feat-item">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#DE350B" stroke-width="2.5">
+            <rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect>
+            <path d="M7 11V7a5 5 0 0 1 10 0v4"></path>
+          </svg>
+          <span><b>Fail-Closed Gate:</b> RFC 2119 enforcement halts issue transitions until hazards verified</span>
+        </div>
+      </div>
+      <div style="font-weight: 600; color: #42526E;">
+        Smart Infusion Pump Firmware v2.1
+      </div>
+    </div>
+  </div>
+
+  <script>
+    function renderEdges() {
+      const area = document.getElementById('canvas-area');
+      const cRect = area.getBoundingClientRect();
+      const svg = document.getElementById('svg-layer');
+
+      const links = [
+        // Row 1: Failing Red Cascade
+        { from: 'h1-1-r', to: 'h1-2-l', color: '#DE350B', dashed: true },
+        { from: 'h1-2-r', to: 'h1-3-l', color: '#DE350B', dashed: true },
+        { from: 'h1-3-r', to: 'h1-4-l', color: '#DE350B', dashed: true },
+        { from: 'h1-4-r', to: 'h1-5-l', color: '#DE350B', dashed: true },
+
+        // Row 2: Passing Green Cascade
+        { from: 'h2-1-r', to: 'h2-2-l', color: '#00875A', dashed: false },
+        { from: 'h2-2-r', to: 'h2-3-l', color: '#00875A', dashed: false },
+        { from: 'h2-3-r', to: 'h2-4-l', color: '#00875A', dashed: false },
+        { from: 'h2-4-r', to: 'h2-5-l', color: '#00875A', dashed: false },
+      ];
+
+      links.forEach(link => {
+        const fEl = document.getElementById(link.from);
+        const tEl = document.getElementById(link.to);
+        if (!fEl || !tEl) return;
+
+        const fR = fEl.getBoundingClientRect();
+        const tR = tEl.getBoundingClientRect();
+
+        const x1 = fR.left + fR.width / 2 - cRect.left;
+        const y1 = fR.top + fR.height / 2 - cRect.top;
+        const x2 = tR.left + tR.width / 2 - cRect.left;
+        const y2 = tR.top + tR.height / 2 - cRect.top;
+
+        const dx = Math.max(30, (x2 - x1) * 0.45);
+        const d = `M ${x1} ${y1} C ${x1 + dx} ${y1}, ${x2 - dx} ${y2}, ${x2} ${y2}`;
+
+        const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+        path.setAttribute('d', d);
+        path.setAttribute('fill', 'none');
+        path.setAttribute('stroke', link.color);
+        path.setAttribute('stroke-width', link.dashed ? '2.5' : '2');
+        if (link.dashed) {
+          path.setAttribute('stroke-dasharray', '5, 4');
+        }
+        path.setAttribute('marker-end', link.color === '#DE350B' ? 'url(#m-red)' : 'url(#m-green)');
+        svg.appendChild(path);
+      });
+    }
+
+    window.addEventListener('DOMContentLoaded', renderEdges);
+  </script>
+</body>
+</html>

@@ -15,12 +15,13 @@ export async function workflowValidatorHandler(payload: any): Promise<{ result: 
 
     // 1. If transition is for a specific Jira issue, validate its linked hazard lineage
     if (issueKey) {
-      const matchedLink = suite.traceLinks.find(
+      const matchedLinks = suite.traceLinks.filter(
         (l) => l.work.key.toUpperCase() === issueKey || l.hazard.key.toUpperCase() === issueKey
       );
 
-      if (matchedLink && matchedLink.complianceState !== 'VERIFIED') {
-        const violation = matchedLink.violations[0] || 'Unresolved safety-critical compliance gap.';
+      const blocking = matchedLinks.find((l) => l.complianceState !== 'VERIFIED');
+      if (blocking) {
+        const violation = blocking.violations[0] || 'Unresolved safety-critical compliance gap.';
         const errorMessage = `❌ [MedTrace Safety Gate] Human-initiated transition blocked for ${issueKey}!\n• ${violation}\n\nResolve verification test runs or re-certify electronic signatures before releasing.`;
         console.warn(`[MedTrace WorkflowValidator] Transition BLOCKED for ${issueKey}:`, errorMessage);
         return { result: false, errorMessage };
