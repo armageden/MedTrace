@@ -1,37 +1,22 @@
-**Back:** [00-overview](./00-overview.md)
+[<- Design Decisions Overview](./00-overview.md)
 
-# ADR 002: Webtrigger HMAC-SHA256 Authentication and Replay Window Protection
+# ADR-002: Webtrigger HMAC-SHA256 Authentication & SHA-256 KVS Nonces
+
+## Status
+Accepted (Hardened with SHA-256 Nonce Keys & Fail-Closed Storage Handling)
 
 ## Context
-Atlassian Forge webtriggers are publicly accessible HTTP endpoints generated with unique hashed URLs. While unlisted, relying solely on URL secrecy or simple token headers leaves endpoints vulnerable to parameter tampering and replay attacks. An attacker intercepting a remediation payload could replay it indefinitely to alter compliance states.
+Local MCP clients ([mcp-server/index.mjs](../../mcp-server/index.mjs)) and CI release gates ([.github/workflows/medtrace-release-gate.yml](../../.github/workflows/medtrace-release-gate.yml)) must invoke `mcp-sync-webtrigger` over HTTPS. Because Forge webtriggers are public endpoints unguarded by Jira/Confluence session cookies, weak bearer headers or permissive error handling would expose compliance actions to spoofing or replay attacks.
 
 ## Decision
-Implement a cryptographic signature protocol binding the payload and timestamp in `src/index.ts` and `mcp-server/index.mjs`:
-1. The client derives an HMAC-SHA256 signature over `${timestamp}.${nonce}.${rawBody}` using a pre-shared secret (`MEDTRACE_MCP_SECRET`); `x-medtrace-nonce` is required on every request.
-2. Transmit `x-medtrace-timestamp`, `x-medtrace-nonce`, and `x-medtrace-signature: sha256=<hex>`.
-3. The server checks a 300-second maximum replay window against `Date.now()`.
-4. Perform timing-safe signature comparison using `crypto.timingSafeEqual` in `verifyHmacSignature()`.
-
-## Alternatives Considered
-* **Static API Key Header (`x-api-key`):** Rejected because a static key does not bind to the HTTP request body. An attacker capturing the token could tamper with `hazardKey` or replay requests indefinitely.
-* **OAuth 2.0 / Bearer Token Flow:** Rejected for local terminal MCP daemons due to user authentication friction during hackathon evaluations and lack of native Forge webtrigger OAuth interception hooks.
+1. **Fail-Closed Shared Secret:** Both `mcpWebtriggerHandler` ([src/index.ts](../../src/index.ts)) and [mcp-server/index.mjs](../../mcp-server/index.mjs) fail closed if `MEDTRACE_MCP_SECRET` is missing or empty (returning HTTP `500` on the webtrigger).
+2. **Canonical HMAC-SHA256 Verification:** Callers must send `x-medtrace-timestamp` (digits within `±300` seconds), `x-medtrace-nonce`, and `x-medtrace-signature` computed as hex HMAC-SHA256 over `${timestamp}.${nonce}.${rawBody}`, verified with `crypto.timingSafeEqual`.
+3. **SHA-256 Hashed Nonce Keys & Native KVS TTL ([src/nonce-store.ts](../../src/nonce-store.ts)):**
+   - Raw nonce identifiers are hashed with `toKvsNonceKey(key)` (`nonce:<sha256>`) to avoid key-length or character issues in KVS.
+   - `kvsNonceStore.claimDetailed(key, ttlMs)` uses atomic `kvs.set(..., { keyPolicy: 'FAIL_IF_EXISTS', ttl: { value: Math.max(1, Math.ceil(ttlMs / 60000)), unit: 'MINUTES' } })` so Forge KVS enforces expiry natively without lazy `delete()` sweeps on access.
+   - Nonce claim outcomes distinguish `'CLAIMED'`, `'REPLAY'` (HTTP `409`), and `'STORAGE_ERROR'` (HTTP `500` fail-closed).
+4. **Strict Request Parsing & Actor Attribution:** Malformed `POST` JSON returns HTTP `400` immediately (no fallback to `GET` parameters), responses omit wildcard CORS headers, and `action=remediate` attributes audit entries to `'service:mcp-webtrigger'` (ignoring any caller-supplied `accountId`).
 
 ## Consequences
-- Protects the production webtrigger against unauthorized modification, parameter tampering, and replay attacks.
-- Eliminates timing side-channels during signature validation (`crypto.timingSafeEqual`).
-- **Nonce claim is atomic:** `claimNonce()` uses a conditional write (`keyPolicy: 'FAIL_IF_EXISTS'`) against `@forge/kvs`, so concurrent replays cannot both claim the same nonce; expired records are pruned lazily on access.
-- The CI-facing `verify-release-gate` action maps the validator verdict to HTTP 200/403 so pipeline gating needs no body parsing.
-- Validated via automated test suite in `tests/compliance-engine.test.cjs`.
-
-## Key Files
-
-| Path | Role |
-|---|---|
-| `src/index.ts` | Webtrigger handler implementing `verifyHmacSignature()`. |
-| `mcp-server/index.mjs` | Local MCP client generating HMAC-SHA256 headers. |
-| `tests/compliance-engine.test.cjs` | Automated security tests for signature tampering and replay rejection. |
-
-## Related
-
-- [Live MCP Sync Architecture](../03-mcp-integration/live-sync.md)
-- [How-To: Add an MCP Tool](../00-how-to/02-add-mcp-tool.md)
+- Prevents replay attacks across stateless Forge invocations and avoids Forge KVS failure modes silently masquerading as valid nonces or replays.
+- Operators must configure identical `MEDTRACE_MCP_SECRET` values in Forge encrypted variables (`forge variables set MEDTRACE_MCP_SECRET --encrypt`) and client/CI environments; rotation is automated via [scripts/rotate-mcp-secret.sh](../../scripts/rotate-mcp-secret.sh).

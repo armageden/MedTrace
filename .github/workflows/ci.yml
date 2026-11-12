@@ -1,0 +1,78 @@
+name: MedTrace CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  verify:
+    name: Typecheck, Build, Test, Docs & Manifest
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: |
+            package-lock.json
+            static/frontend/package-lock.json
+
+      - name: Install backend dependencies
+        run: npm ci
+
+      - name: Install frontend dependencies
+        run: cd static/frontend && npm ci
+
+      - name: Typecheck backend
+        run: npx tsc --noEmit
+
+      - name: Typecheck frontend
+        run: cd static/frontend && npx tsc --noEmit
+
+      - name: Build backend
+        run: npm run build
+
+      - name: Build frontend
+        run: cd static/frontend && npm run build
+
+      - name: Run test suite
+        run: npm test
+
+      - name: Check documentation links and coverage
+        run: npm run docs:check
+
+      - name: Syntax check MCP stdio server
+        run: node --check mcp-server/index.mjs
+
+      - name: Validate Forge manifest schema
+        run: |
+          node -e "
+            const { validate } = require('@forge/manifest');
+            validate(false, 'manifest.yml')
+              .then((res) => {
+                if (!res.success || (res.errors && res.errors.length > 0)) {
+                  console.error(JSON.stringify(res.errors, null, 2));
+                  process.exit(1);
+                }
+                console.log('Forge manifest schema validation passed.');
+              })
+              .catch((err) => {
+                console.error(err);
+                process.exit(1);
+              });
+          "
+
+      - name: Forge CLI lint (when credentials configured)
+        if: env.FORGE_API_TOKEN != '' && env.FORGE_EMAIL != ''
+        env:
+          FORGE_EMAIL: ${{ secrets.FORGE_EMAIL }}
+          FORGE_API_TOKEN: ${{ secrets.FORGE_API_TOKEN }}
+          FORGE_DISABLE_ANALYTICS: 'true'
+        run: |
+          npm install -g @forge/cli@15
+          forge lint

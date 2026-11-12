@@ -31,9 +31,14 @@ jobs:
           WEBTRIGGER_URL: ${{ secrets.MEDTRACE_WEBTRIGGER_URL }}
           ISSUE_KEY: ${{ inputs.issueKey }}
         run: |
+          set -euo pipefail
+          if [ -z "${MEDTRACE_SECRET:-}" ] || [ -z "${WEBTRIGGER_URL:-}" ]; then
+            echo "❌ Fail-closed: MEDTRACE_MCP_SECRET and MEDTRACE_WEBTRIGGER_URL secrets must be configured."
+            exit 1
+          fi
           TIMESTAMP=$(date +%s%3N)
           NONCE=$(uuidgen)
-          if [ -n "$ISSUE_KEY" ] && ! echo "$ISSUE_KEY" | grep -Eq '^[A-Za-z][A-Za-z0-9]*-[0-9]+$'; then
+          if [ -n "$ISSUE_KEY" ] && ! echo "$ISSUE_KEY" | grep -Eq '^[A-Za-z][A-Za-z0-9_]*-[0-9]+$'; then
             echo "❌ Invalid issueKey format: '$ISSUE_KEY' (expected e.g. MED-42)"
             exit 1
           fi
@@ -52,6 +57,10 @@ jobs:
           cat /tmp/gate.json
           if [ "$HTTP_CODE" -ne 200 ]; then
             echo "❌ MedTrace Safety Gate: release blocked or verification failed (HTTP $HTTP_CODE)."
+            exit 1
+          fi
+          if ! node -e "const fs=require('node:fs'); const d=JSON.parse(fs.readFileSync('/tmp/gate.json','utf8')); if (d.result !== true) process.exit(1);" 2>/dev/null; then
+            echo "❌ MedTrace Safety Gate: response did not confirm result:true."
             exit 1
           fi
           echo "✅ MedTrace Safety Gate open: IEC 62304 verification satisfied."

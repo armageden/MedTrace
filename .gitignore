@@ -7,8 +7,13 @@ static/frontend/dist/
 .DS_Store
 .env
 .env.local
+.forge-env
+*.forge-env
 .mimosa/
 .commandcode/
+.remember/
+*.mp4
+scripts/video_generator/
 !.env.example
 .commandcode/
 .mimosa/

@@ -10,17 +10,25 @@ import readline from 'readline';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-// Load local .env if present
+// Load local .env from cwd or repo root relative to this module
 try {
-  const envPath = path.resolve(process.cwd(), '.env');
-  if (fs.existsSync(envPath)) {
-    const lines = fs.readFileSync(envPath, 'utf8').split('\n');
-    for (const line of lines) {
-      const match = line.match(/^\s*([\w.-]+)\s*=\s*(.*)?\s*$/);
-      if (match && !process.env[match[1]]) {
-        process.env[match[1]] = (match[2] || '').trim().replace(/^['"]|['"]$/g, '');
+  const moduleDir = path.dirname(fileURLToPath(import.meta.url));
+  const candidateEnvPaths = [
+    path.resolve(process.cwd(), '.env'),
+    path.resolve(moduleDir, '..', '.env'),
+  ];
+  for (const envPath of candidateEnvPaths) {
+    if (fs.existsSync(envPath)) {
+      const lines = fs.readFileSync(envPath, 'utf8').split('\n');
+      for (const line of lines) {
+        const match = line.match(/^\s*([\w.-]+)\s*=\s*(.*)?\s*$/);
+        if (match && !process.env[match[1]]) {
+          process.env[match[1]] = (match[2] || '').trim().replace(/^['"]|['"]$/g, '');
+        }
       }
+      break;
     }
   }
 } catch {}
@@ -32,7 +40,7 @@ const rl = readline.createInterface({
 });
 
 const SERVER_NAME = 'medtrace-mcp-server';
-const SERVER_VERSION = '1.0.0';
+const SERVER_VERSION = '1.1.0';
 const MCP_SECRET = process.env.MEDTRACE_MCP_SECRET;
 
 if (!MCP_SECRET) {
@@ -42,157 +50,171 @@ if (!MCP_SECRET) {
   process.exit(1);
 }
 
-// Live Production Webtrigger endpoint on Atlassian Cloud
 const FORGE_WEBTRIGGER_URL = process.env.MEDTRACE_WEBTRIGGER_URL;
 if (!FORGE_WEBTRIGGER_URL) {
   console.error('[MedTrace MCP Server] Warning: MEDTRACE_WEBTRIGGER_URL is not configured.');
   console.error('[MedTrace MCP Server] Export MEDTRACE_WEBTRIGGER_URL="<url>" to connect to your live Forge webtrigger.');
 }
 
-/**
- * Fetches live compliance state from deployed Forge backend (KVS persistence)
- */
-async function fetchLiveComplianceState() {
-  if (!FORGE_WEBTRIGGER_URL) return null;
-  try {
-    const timestamp = Date.now().toString();
-    const nonce = crypto.randomUUID();
-    const signature = crypto.createHmac('sha256', MCP_SECRET).update(`${timestamp}.${nonce}.`).digest('hex');
-    const resp = await fetch(FORGE_WEBTRIGGER_URL, {
-      method: 'GET',
-      headers: {
-        'Accept': 'application/json',
-        'x-medtrace-timestamp': timestamp,
-        'x-medtrace-nonce': nonce,
-        'x-medtrace-signature': `sha256=${signature}`,
-      },
-      signal: AbortSignal.timeout(4000), // 4s timeout
-    });
-    if (resp.ok) {
-      const data = await resp.json();
-      return data;
-    }
-  } catch (err) {
-    console.error('[MedTrace MCP] Notice: Cloud fetch failed, falling back to local cache:', err.message);
+async function signedCloudRequest(method, payloadObj) {
+  if (!FORGE_WEBTRIGGER_URL) {
+    return {
+      ok: false,
+      status: 0,
+      error: 'MEDTRACE_WEBTRIGGER_URL is not configured.',
+    };
   }
-  return null;
-}
 
-/**
- * Remediates Class C gap directly on Atlassian Cloud
- */
-async function postCloudRemediation(hazardKey) {
-  if (!FORGE_WEBTRIGGER_URL) return null;
   try {
     const timestamp = Date.now().toString();
     const nonce = crypto.randomUUID();
-    const payload = JSON.stringify({ action: 'remediate', hazardKey });
-    const signature = crypto.createHmac('sha256', MCP_SECRET).update(`${timestamp}.${nonce}.${payload}`).digest('hex');
+    const payload = method === 'POST' ? JSON.stringify(payloadObj || {}) : '';
+    const signature = crypto
+      .createHmac('sha256', MCP_SECRET)
+      .update(`${timestamp}.${nonce}.${payload}`)
+      .digest('hex');
+
+    const headers = {
+      Accept: 'application/json',
+      'x-medtrace-timestamp': timestamp,
+      'x-medtrace-nonce': nonce,
+      'x-medtrace-signature': `sha256=${signature}`,
+    };
+    if (method === 'POST') {
+      headers['Content-Type'] = 'application/json';
+    }
 
     const resp = await fetch(FORGE_WEBTRIGGER_URL, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-medtrace-timestamp': timestamp,
-        'x-medtrace-nonce': nonce,
-        'x-medtrace-signature': `sha256=${signature}`,
-      },
-      body: payload,
+      method,
+      headers,
+      ...(method === 'POST' ? { body: payload } : {}),
       signal: AbortSignal.timeout(4000),
     });
-    if (resp.ok) {
-      return await resp.json();
-    }
-  } catch (err) {
-    console.error('[MedTrace MCP] Cloud remediation notice:', err.message);
-  }
-  return null;
-}
 
-/**
- * Forwards verification to the live Forge backend so Cursor/Claude get the real BFS.
- */
-async function postCloudVerify(inputs) {
-  if (!FORGE_WEBTRIGGER_URL) return null;
-  try {
-    const timestamp = Date.now().toString();
-    const nonce = crypto.randomUUID();
-    const payload = JSON.stringify({ action: 'verify', ...inputs });
-    const signature = crypto.createHmac('sha256', MCP_SECRET).update(`${timestamp}.${nonce}.${payload}`).digest('hex');
-
-    const resp = await fetch(FORGE_WEBTRIGGER_URL, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-medtrace-timestamp': timestamp,
-        'x-medtrace-nonce': nonce,
-        'x-medtrace-signature': `sha256=${signature}`,
-      },
-      body: payload,
-      signal: AbortSignal.timeout(4000),
-    });
-    if (resp.ok) {
-      return await resp.json();
+    const rawText = await resp.text();
+    let parsed = null;
+    try {
+      parsed = rawText ? JSON.parse(rawText) : null;
+    } catch {
+      parsed = { raw: rawText };
     }
+
+    if (!resp.ok) {
+      return {
+        ok: false,
+        status: resp.status,
+        error: parsed?.error || `HTTP ${resp.status} ${resp.statusText || ''}`.trim(),
+        data: parsed,
+      };
+    }
+
+    return { ok: true, status: resp.status, data: parsed };
   } catch (err) {
-    console.error('[MedTrace MCP] Cloud verify notice:', err.message);
+    return {
+      ok: false,
+      status: 0,
+      error: err?.message || 'Network/timeout error communicating with Forge webtrigger.',
+    };
   }
-  return null;
 }
 
 const TOOLS = [
   {
     name: 'medtrace_get_hazard_lineage',
-    description: 'Retrieves complete ISO 14971 hazard safety lineage, linked Confluence SRS specifications, and verification test status for medical device software live from Atlassian Cloud.',
+    description:
+      'Retrieves complete ISO 14971 hazard safety lineage, linked Confluence SRS specifications, and verification test status live from Atlassian Cloud.',
     inputSchema: {
       type: 'object',
       properties: {
         hazardKey: {
           type: 'string',
-          description: 'Optional hazard or issue key (e.g. HAZ-101, MED-42, TEST-88). Omit to retrieve full project lineage.',
+          description: 'Optional hazard, Jira issue, spec, or test key (e.g. HAZ-101, MED-42, TEST-88). Omit to retrieve full project lineage.',
+        },
+        issueKey: {
+          type: 'string',
+          description: 'Optional alias for hazardKey (e.g. MED-42).',
         },
       },
     },
   },
   {
     name: 'medtrace_verify_iec_compliance',
-    description: 'Audits the active sprint or PR diff against IEC 62304 and FDA 21 CFR Part 11 requirements, checking live from Atlassian Cloud for unmitigated Class C hazards and signature drift.',
+    description:
+      'Audits the active sprint or PR diff against IEC 62304 and FDA 21 CFR Part 11 requirements via the live Forge BFS compliance engine.',
     inputSchema: {
       type: 'object',
       properties: {
-          prDiff: {
-            type: 'string',
-            description: 'Git PR diff or modified code snippet to analyze against safety hazards.',
-          },
-          componentName: {
-            type: 'string',
-            description: 'Optional component or subsystem name (e.g. bolus clamp motor, droplet sensor, OLED power rail).',
-          },
-          issueKey: {
-            type: 'string',
-            description: 'Optional Jira issue key referenced by the change under audit (e.g. MED-42).',
-          },
+        prDiff: {
+          type: 'string',
+          description: 'Git PR diff or modified code snippet to analyze against safety hazards.',
         },
+        componentName: {
+          type: 'string',
+          description: 'Optional component or subsystem name.',
+        },
+        issueKey: {
+          type: 'string',
+          description: 'Optional Jira issue key referenced by the change under audit (e.g. MED-42).',
+        },
+      },
     },
   },
   {
     name: 'medtrace_remediate_safety_gap',
-    description: 'Executes automated Hardware-in-the-Loop verification tests for Class C hazards and re-certifies 21 CFR Part 11 electronic signatures live on Atlassian Cloud.',
+    description:
+      'Runs an explicit demo-mode remediation simulation on Atlassian Cloud (disabled in LIVE mode; requires simulate: true and attestationConfirmed: true).',
     inputSchema: {
       type: 'object',
       properties: {
         hazardKey: {
           type: 'string',
-          description: 'Hazard key to remediate (e.g. HAZ-101).',
+          description: 'Required hazard key to remediate (e.g. HAZ-101).',
+        },
+        simulate: {
+          type: 'boolean',
+          description: 'Must be true to confirm demo simulation mode.',
+        },
+        attestationConfirmed: {
+          type: 'boolean',
+          description: 'Must be true to confirm 21 CFR Part 11 attestation meaning.',
+        },
+        meaning: {
+          type: 'string',
+          description: 'Signature meaning statement (e.g. Clinical Safety Re-Certification).',
         },
       },
-      required: ['hazardKey'],
+      required: ['hazardKey', 'simulate', 'attestationConfirmed'],
     },
   },
 ];
 
+function unavailableResult(id, cloudResp) {
+  return {
+    jsonrpc: '2.0',
+    id,
+    result: {
+      isError: true,
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify(
+            {
+              source: 'UNAVAILABLE',
+              httpStatus: cloudResp.status,
+              error: cloudResp.error,
+              hint: 'Verify MEDTRACE_WEBTRIGGER_URL and MEDTRACE_MCP_SECRET, then retry.',
+            },
+            null,
+            2
+          ),
+        },
+      ],
+    },
+  };
+}
+
 async function handleMessage(message) {
-  const { id, method, params } = message;
+  const { id, method, params } = message || {};
 
   if (method === 'initialize') {
     return {
@@ -226,70 +248,49 @@ async function handleMessage(message) {
   }
 
   if (method === 'tools/call') {
-    const { name, arguments: args } = params;
-
-    // Fetch live state from Atlassian Cloud
-    const liveSuite = await fetchLiveComplianceState();
+    const { name, arguments: args = {} } = params || {};
 
     if (name === 'medtrace_get_hazard_lineage') {
-      const hazardKey = args?.hazardKey;
-      if (!liveSuite || !liveSuite.traceLinks) {
-        return {
-          jsonrpc: '2.0',
-          id,
-          result: {
-            content: [
-              {
-                type: 'text',
-                text: JSON.stringify(
-                  {
-                    source: 'UNAVAILABLE',
-                    error: 'Live compliance state could not be fetched from Atlassian Cloud (webtrigger unreachable or credentials invalid). No lineage data is fabricated locally.',
-                    hint: 'Verify MEDTRACE_WEBTRIGGER_URL and MEDTRACE_MCP_SECRET, then retry.',
-                  },
-                  null,
-                  2
-                ),
-              },
-            ],
-          },
-        };
+      const cloudResp = await signedCloudRequest('GET');
+      if (!cloudResp.ok || !cloudResp.data?.traceLinks) {
+        return unavailableResult(id, cloudResp);
       }
-      if (liveSuite.traceLinks) {
-        if (hazardKey) {
-          const match = liveSuite.traceLinks.find(
-            (l) =>
-              l.hazard.key.toLowerCase() === hazardKey.toLowerCase() ||
-              l.work.key.toLowerCase() === hazardKey.toLowerCase() ||
-              l.test.testKey.toLowerCase() === hazardKey.toLowerCase()
-          );
-          if (match) {
-            return {
-              jsonrpc: '2.0',
-              id,
-              result: {
-                content: [
-                  {
-                    type: 'text',
-                    text: JSON.stringify(
-                      {
-                        source: 'Atlassian Cloud (Forge Production KVS)',
-                        hazard: match.hazard,
-                        spec: match.spec,
-                        work: match.work,
-                        test: match.test,
-                        signature: match.signature,
-                        complianceState: match.complianceState,
-                        violations: match.violations,
-                      },
-                      null,
-                      2
-                    ),
-                  },
-                ],
-              },
-            };
-          }
+
+      const liveSuite = cloudResp.data;
+      const lookupKey = String(args?.hazardKey || args?.issueKey || '').trim();
+
+      if (lookupKey) {
+        const lower = lookupKey.toLowerCase();
+        const match = liveSuite.traceLinks.find(
+          (l) =>
+            l.hazard?.key?.toLowerCase() === lower ||
+            l.work?.key?.toLowerCase() === lower ||
+            l.test?.testKey?.toLowerCase() === lower ||
+            l.spec?.id?.toLowerCase() === lower ||
+            (l.spec?.pageId && String(l.spec.pageId).toLowerCase() === lower)
+        );
+        if (!match) {
+          return {
+            jsonrpc: '2.0',
+            id,
+            result: {
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify(
+                    {
+                      source: 'Atlassian Cloud (Forge Production KVS)',
+                      found: false,
+                      queriedKey: lookupKey,
+                      message: `No trace link found for key "${lookupKey}".`,
+                    },
+                    null,
+                    2
+                  ),
+                },
+              ],
+            },
+          };
         }
 
         return {
@@ -302,11 +303,14 @@ async function handleMessage(message) {
                 text: JSON.stringify(
                   {
                     source: 'Atlassian Cloud (Forge Production KVS)',
-                    projectName: liveSuite.projectName,
-                    totalHazards: liveSuite.totalHazards,
-                    verifiedPercentage: `${liveSuite.verifiedPercentage}%`,
-                    releaseBlocked: liveSuite.releaseBlocked,
-                    traceLinks: liveSuite.traceLinks,
+                    found: true,
+                    hazard: match.hazard,
+                    spec: match.spec,
+                    work: match.work,
+                    test: match.test,
+                    signature: match.signature,
+                    complianceState: match.complianceState,
+                    violations: match.violations,
                   },
                   null,
                   2
@@ -316,44 +320,6 @@ async function handleMessage(message) {
           },
         };
       }
-    }
-
-    if (name === 'medtrace_verify_iec_compliance') {
-      const result = await postCloudVerify({
-        prDiff: args?.prDiff,
-        componentName: args?.componentName,
-        issueKey: args?.issueKey,
-      });
-
-      const text = result
-        ? JSON.stringify(result, null, 2)
-        : JSON.stringify(
-            {
-              source: 'UNAVAILABLE',
-              error: 'Live compliance verification could not be fetched from Atlassian Cloud (webtrigger unreachable or credentials invalid). No verdict is fabricated locally.',
-              hint: 'Verify MEDTRACE_WEBTRIGGER_URL and MEDTRACE_MCP_SECRET, then retry.',
-            },
-            null,
-            2
-          );
-
-      return {
-        jsonrpc: '2.0',
-        id,
-        result: {
-          content: [{ type: 'text', text }],
-        },
-      };
-    }
-
-    if (name === 'medtrace_remediate_safety_gap') {
-      const hazardKey = args?.hazardKey || 'HAZ-101';
-      const remediated = await postCloudRemediation(hazardKey);
-
-      // Report only what actually happened on the cloud — never a fabricated success
-      const text = remediated
-        ? `✅ Remediated ${hazardKey} on Atlassian Cloud: ${remediated.summary ? 'compliance suite updated (test marked PASSED, Part 11 signature re-certified).' : 'cloud accepted the remediation request.'} Jira Safety Gate should unlock on next inspection.`
-        : `⚠️ Remediation FAILED or was left unapplied: no confirmation was received from Atlassian Cloud (webtrigger unreachable, credentials invalid, or MEDTRACE_WEBTRIGGER_URL not set). No compliance state was changed. Verify MEDTRACE_WEBTRIGGER_URL / MEDTRACE_MCP_SECRET and retry.`;
 
       return {
         jsonrpc: '2.0',
@@ -362,7 +328,88 @@ async function handleMessage(message) {
           content: [
             {
               type: 'text',
-              text,
+              text: JSON.stringify(
+                {
+                  source: 'Atlassian Cloud (Forge Production KVS)',
+                  projectName: liveSuite.projectName,
+                  datasetMode: liveSuite.datasetMode,
+                  totalHazards: liveSuite.totalHazards,
+                  verifiedPercentage: `${liveSuite.verifiedPercentage}%`,
+                  releaseBlocked: liveSuite.releaseBlocked,
+                  traceLinks: liveSuite.traceLinks,
+                },
+                null,
+                2
+              ),
+            },
+          ],
+        },
+      };
+    }
+
+    if (name === 'medtrace_verify_iec_compliance') {
+      const cloudResp = await signedCloudRequest('POST', {
+        action: 'verify',
+        prDiff: args?.prDiff,
+        componentName: args?.componentName,
+        issueKey: args?.issueKey,
+      });
+
+      if (!cloudResp.ok) {
+        return unavailableResult(id, cloudResp);
+      }
+
+      return {
+        jsonrpc: '2.0',
+        id,
+        result: {
+          content: [{ type: 'text', text: JSON.stringify(cloudResp.data, null, 2) }],
+        },
+      };
+    }
+
+    if (name === 'medtrace_remediate_safety_gap') {
+      const hazardKey = typeof args?.hazardKey === 'string' ? args.hazardKey.trim() : '';
+      if (!hazardKey) {
+        return {
+          jsonrpc: '2.0',
+          id,
+          error: {
+            code: -32602,
+            message: 'Invalid params: hazardKey is required.',
+          },
+        };
+      }
+
+      const cloudResp = await signedCloudRequest('POST', {
+        action: 'remediate',
+        hazardKey,
+        simulate: Boolean(args?.simulate),
+        attestationConfirmed: Boolean(args?.attestationConfirmed),
+        meaning: typeof args?.meaning === 'string' ? args.meaning : undefined,
+      });
+
+      if (!cloudResp.ok) {
+        return unavailableResult(id, cloudResp);
+      }
+
+      return {
+        jsonrpc: '2.0',
+        id,
+        result: {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify(
+                {
+                  source: 'Atlassian Cloud (Forge Production KVS)',
+                  remediated: true,
+                  hazardKey,
+                  summary: cloudResp.data?.summary,
+                },
+                null,
+                2
+              ),
             },
           ],
         },
@@ -401,7 +448,6 @@ rl.on('line', async (line) => {
       process.stdout.write(JSON.stringify(response) + '\n');
     }
   } catch (err) {
-    // Always answer the client — a silent failure leaves the MCP client hanging forever.
     console.error('Error handling MCP JSON-RPC message:', err);
     if (messageId != null) {
       const isParseError = err instanceof SyntaxError;

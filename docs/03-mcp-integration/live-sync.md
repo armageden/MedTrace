@@ -1,113 +1,45 @@
-**Back:** [00-overview](./00-overview.md)
+[<- MCP Integration Overview](./00-overview.md)
 
-# Live MCP Sync & Stdio Server
+# MCP Live Sync, Webtrigger Bridge & Tool Contracts
 
-MedTrace provides dual Model Context Protocol support:
-1. **Cloud-Native `rovo:mcp`:** Declared in `manifest.yml` and routed through `rovo-action-fn` (`src/mcp-server.ts`) for Atlassian Rovo conversational agents.
-2. **Local Stdio JSON-RPC Server:** Standalone, zero-dependency Node.js script in `mcp-server/index.mjs` for local IDE coding environments (Cursor, Claude Desktop).
+MedTrace exposes compliance inspection and CI gate verification through two synchronized entrypoints:
+1. **Rovo MCP & Actions (In-Cloud):** Defined in [manifest.yml](../../manifest.yml) (`medtrace-mcp-server`, `get-hazard-lineage-action`, `verify-iec-compliance-action`) and handled by `rovoActionHandler` in [src/mcp-server.ts](../../src/mcp-server.ts).
+2. **Local MCP Stdio Bridge:** Implemented in [mcp-server/index.mjs](../../mcp-server/index.mjs) (`SERVER_VERSION = '1.1.0'`), communicating over JSON-RPC 2.0 `stdio` and forwarding authenticated requests to `mcpWebtriggerHandler` in [src/index.ts](../../src/index.ts).
 
----
+## Environment & Startup Fail-Closed Behavior
 
-## Tool Registry Specifications
+- [mcp-server/index.mjs](../../mcp-server/index.mjs) loads `.env` from `process.cwd()` first and falls back to the module parent directory (`..`).
+- `MEDTRACE_MCP_SECRET` is mandatory. If unset or empty, local MCP startup and `mcpWebtriggerHandler` (HTTP `500`) both fail closed.
+- `MEDTRACE_WEBTRIGGER_URL` points to the deployed `mcp-sync-webtrigger` URL (`forge webtrigger -f mcp-sync-webtrigger`).
 
-### 1. Local Stdio Tools (`mcp-server/index.mjs`)
+## Webtrigger HMAC-SHA256 & Nonce Replay Protection
 
-| Tool Identifier | Input Schema | Return Payload (stdio server) | Purpose |
+Requests sent by `signedCloudRequest()` in [mcp-server/index.mjs](../../mcp-server/index.mjs) use a single `POST` call (no extra `GET` preflight) with:
+- `x-medtrace-timestamp`: Unix epoch seconds (digits only, validated within a `±300` second window).
+- `x-medtrace-nonce`: Unique random UUID/hex per request.
+- `x-medtrace-signature`: Hex HMAC-SHA256 over `${timestamp}.${nonce}.${rawBody}`, verified with `crypto.timingSafeEqual`.
+
+### Nonce Store ([src/nonce-store.ts](../../src/nonce-store.ts))
+
+- `getNonceStore()` selects `kvsNonceStore` whenever `isForgeRuntime()` ([src/runtime.ts](../../src/runtime.ts)) is true, and `defaultInMemoryStore` in unit tests unless overridden via `setNonceStore()`.
+- `toKvsNonceKey(key)` hashes raw nonce keys into ``nonce:${sha256(key)}`` so Forge KVS keys stay fixed-length and safe.
+- `claimDetailed(key, ttlMs)` uses atomic `kvs.set(..., { keyPolicy: 'FAIL_IF_EXISTS', ttl: { value: Math.max(1, Math.ceil(ttlMs / 60000)), unit: 'MINUTES' } })` and returns a 3-state `NonceClaimResult`:
+  - `'CLAIMED'` -> proceeds.
+  - `'REPLAY'` (409 / EXISTS / CONFLICT) -> webtrigger returns HTTP `409`.
+  - `'STORAGE_ERROR'` (KVS unavailability) -> webtrigger fails closed with HTTP `500`.
+
+### Request Validation & Error Propagation
+
+- Malformed JSON on `POST` returns HTTP `400` immediately without falling back to `GET` query parameters.
+- Responses include `Content-Type: application/json` with no wildcard `Access-Control-Allow-Origin: *` header.
+- `signedCloudRequest()` propagates non-2xx HTTP responses cleanly as MCP tool errors (`isError: true`, `{ httpStatus, error }`).
+
+## Tool Contracts
+
+| MCP Tool | Rovo Action | Required Parameters | Behavior & Contracts |
 |---|---|---|---|
-| `medtrace_get_hazard_lineage` | `{ hazardKey?: string }` | `{ source, hazard, spec, work, test, signature, complianceState, violations }` for a match, or `{ source, projectName, totalHazards, verifiedPercentage, releaseBlocked, traceLinks }` for the full suite; `source: 'UNAVAILABLE'` when the cloud is unreachable | Returns the 5-stage trace lineage for a specific hazard or the full project suite, live from Forge KVS. |
-| `medtrace_verify_iec_compliance` | `{ prDiff?: string, componentName?: string, issueKey?: string }` | `{ source, releaseGateStatus, verifiedCoverage, touchesSafetyCriticalCode, affectedHazards, safetyWarning, activeViolations }` — `source: 'UNAVAILABLE'` when the cloud is unreachable | Keyword-matches a diff against safety-critical hazards against live cloud state; full blast-radius traversal runs on the Forge backend. |
-| `medtrace_remediate_safety_gap` | `{ hazardKey: string }` | Text confirming the cloud applied the remediation, or an explicit failure notice when no confirmation was received — never a fabricated success | Marks the verification test PASSED and re-certifies the Part 11 signature live on Atlassian Cloud. |
+| `medtrace_get_hazard_lineage` | `get-hazard-lineage-action` | One of `hazardKey` or `issueKey` | Returns `{ found: true, ... }` with the 5-stage trace chain, or `{ found: false, queriedKey, message, availableKeys }` if no matching link exists. |
+| `medtrace_verify_iec_compliance` | `verify-iec-compliance-action` | `prDiff` | Extracts suite keys plus dynamic meaningful tokens (`findLinksMatchingTextTokens`) and safety keywords (`pump`, `infusion`, `alarm`, `dose`, `sensor`, `watchdog`, `class c`, etc.), computes 5-stage blast radius (`ComplianceEngine.computeBlastRadius`), and never logs raw `prDiff` contents in `rovoActionHandler`. |
+| `medtrace_remediate_safety_gap` | — | `hazardKey`, `simulate`, `attestationConfirmed` | Missing `hazardKey` fails JSON-RPC validation (`-32602`). Calls `action=remediate` on the webtrigger. Actor identity is hardcoded to `'service:mcp-webtrigger'` (any caller `accountId` is ignored). Demo-only: rejected in `LIVE` mode. |
 
-### 2. Atlassian Rovo Action Modules (`manifest.yml` / `src/mcp-server.ts`)
-
-| Action Key | Action Verb | Handler Method | Inputs |
-|---|---|---|---|
-| `get-hazard-lineage-action` | `GET` | `McpToolService.getHazardLineage` | `{ issueKey?: string }` |
-| `verify-iec-compliance-action` | `GET` | `McpToolService.verifyIecCompliance` | `{ issueKey?: string, prDiff?: string, componentName?: string }` |
-
----
-
-## 2-Way Cloud Synchronization Architecture
-
-`mcp-server/index.mjs` communicates with Atlassian Cloud via an authenticated HTTPS webtrigger (`mcp-sync-webtrigger` in `src/index.ts`):
-
-```mermaid
-sequenceDiagram
-    participant IDE as Cursor / Claude Desktop
-    participant MCP as Local MCP Server (mcp-server/index.mjs)
-    participant Cloud as Forge Webtrigger (src/index.ts)
-    participant KVS as @forge/kvs Persistence
-
-    IDE->>MCP: tools/call (medtrace_get_hazard_lineage)
-    MCP->>Cloud: GET /x1/... (HMAC authenticated)
-    Cloud->>KVS: Read medtrace:compliance:active_suite
-    KVS-->>Cloud: ComplianceSummary JSON
-    Cloud-->>MCP: 200 OK (Live Cloud State)
-    MCP-->>IDE: Tool result JSON
-
-    Note over IDE,KVS: Autonomous Remediation Flow
-    IDE->>MCP: tools/call (medtrace_remediate_safety_gap, HAZ-101)
-    MCP->>Cloud: POST /x1/... { action: 'remediate', hazardKey: 'HAZ-101' }
-    Cloud->>KVS: Update TEST-88 -> PASSED & re-certify Part 11 signature
-    KVS-->>Cloud: Updated ComplianceSummary
-    Cloud-->>MCP: 200 OK ({ success: true, summary })
-    MCP-->>IDE: Tool result: release gate unlocked (or explicit failure notice)
-```
-
-* **Configuration Parameters:**
-  * **Webtrigger URL:** Set via environment variable `MEDTRACE_WEBTRIGGER_URL` (points to your deployed Forge `mcp-sync-webtrigger`).
-  * **Shared Secret:** Set via environment variable `MEDTRACE_MCP_SECRET`. Mandatory in production; the webtrigger and MCP server fail closed if unset.
-* **Offline Behavior (no fabricated state):** If the cloud webtrigger is unreachable (network drop or 4-second timeout), no mock suite is used: lineage and compliance checks return `source: 'UNAVAILABLE'`, and remediation reports an explicit failure. The server never invents compliance state.
-
----
-
-## Cryptographic Security & Anti-Replay Defense
-
-The webtrigger endpoint in `src/index.ts` verifies incoming requests using `verifyHmacSignature()`:
-1. **HMAC-SHA256 Payload Signature:** All requests (`GET` and `POST`) must provide `x-medtrace-timestamp`, `x-medtrace-nonce` (required), and `x-medtrace-signature: sha256=<hex>` over `${timestamp}.${nonce}.${rawBody}` using the shared secret.
-2. **Anti-Replay Window (300 Seconds):** The server verifies `x-medtrace-timestamp`. If `Math.abs(Date.now() - reqTime) > 300_000`, the request is rejected with HTTP 401.
-3. **Timing-Safe Digest Comparison:** Verifies signatures using `crypto.timingSafeEqual` over pre-computed digest buffers, preventing timing side-channel attacks.
-4. **In-Window Nonce Replay Defense (`x-medtrace-nonce`):** Rejects replayed requests within the 300-second window using persistent Forge app storage (`storage:app`), halting duplicate invocations with HTTP 409 Conflict across ephemeral serverless containers.
-5. **Header-Only Authentication:** Rejects credentials passed via URL query parameters (`query.token`) to prevent secrets from leaking into server logs, proxies, and browser histories.
-
-Automated verification tests are maintained in `tests/compliance-engine.test.cjs`.
-
----
-
-## IDE Setup (Cursor Configuration)
-
-```json
-{
-  "mcpServers": {
-    "medtrace": {
-      "command": "node",
-      "args": ["/absolute/path/to/medtrace/mcp-server/index.mjs"],
-      "env": {
-        "MEDTRACE_MCP_SECRET": "<your-forge-mcp-secret>",
-        "MEDTRACE_WEBTRIGGER_URL": "https://<forge-app-id>.hello.atlassian-dev.net/x1/..."
-      }
-    }
-  }
-}
-```
-
----
-
-## Key Files
-
-| Path | Role |
-|---|---|
-| `mcp-server/index.mjs` | Local stdio JSON-RPC MCP server with live cloud sync and honest unavailability reporting. |
-| `src/mcp-server.ts` | Handlers for manifest-declared `rovo:mcp` tools and Rovo chat actions. |
-| `src/nonce-store.ts` | NonceStore interface and `@forge/kvs` persistent store with lazy pruning. |
-| `src/index.ts` | Webtrigger handler verifying HMAC signatures and executing mutations. |
-| `tests/compliance-engine.test.cjs` | Unit tests for HMAC generation, timing safety, and replay window expiration. |
-
----
-
-## Related
-
-- [Forge Modules & Manifest Extensions](../01-architecture/forge-modules.md)
-- [Compliance Evaluation Rules](../02-compliance-engine/evaluation-rules.md)
-- [ADR 002: Webtrigger HMAC Authentication](../99-design-decisions/002-webtrigger-hmac-authentication.md)
-- [How-To: Add an MCP Tool](../00-how-to/02-add-mcp-tool.md)
+In addition, `mcpWebtriggerHandler` exposes `action=verify-release-gate` (shared `ComplianceEngine.evaluateIssueReleaseGate`, returning HTTP `200` on pass or `403` on compliance block) and `action=validate` / `simulate_transition` (`workflowValidatorHandler`), used by [.github/workflows/medtrace-release-gate.yml](../../.github/workflows/medtrace-release-gate.yml).

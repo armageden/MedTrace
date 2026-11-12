@@ -1,140 +1,185 @@
-import React, { useEffect, useRef, useState } from 'react';
-import { invoke, view } from '@forge/bridge';
-import { ComplianceSummary, BlastRadiusReport } from './types';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { view } from '@forge/bridge';
+import { invokeResolver } from './bridge';
+import {
+  ComplianceSummary,
+  BlastRadiusReport,
+  ForgePanelContext,
+  SeedDemoResponse,
+  LiveSyncResult,
+  BindIssueResponse,
+  TransitionResult,
+  VerificationTest,
+} from './types';
 import { AuditHeader } from './components/AuditHeader';
 import { LineageGraph } from './components/LineageGraph';
 import { TraceMatrixTable } from './components/TraceMatrixTable';
 import { InspectionDrawer } from './components/InspectionDrawer';
 import { FdaExportModal } from './components/FdaExportModal';
 import { TransitionModal } from './components/TransitionModal';
+import { AuditLogModal } from './components/AuditLogModal';
 import { ShieldCheck } from 'lucide-react';
 
-// A transition-gate evaluation outcome. `evalError` marks a backend evaluation failure:
-// the UI must never render a blocked/approved verdict that the validator did not actually produce.
-type TransitionResult = { result: boolean; errorMessage?: string; evalError?: string };
+const DEFAULT_PANEL_CONTEXT: ForgePanelContext = {
+  extensionType: '',
+  isCompactPanel: false,
+  isConfluence: false,
+};
+
+function parseForgeContext(raw: Awaited<ReturnType<typeof view.getContext>>): ForgePanelContext {
+  const ext = raw?.extension;
+  const extensionType = typeof ext?.type === 'string' ? ext.type : '';
+  const isCompactPanel =
+    extensionType === 'jira:issuePanel' || extensionType === 'confluence:contentBylineItem';
+  const isConfluence = extensionType.startsWith('confluence');
+  const issueKey = typeof ext?.issue?.key === 'string' ? ext.issue.key : undefined;
+  const projectKey = typeof ext?.project?.key === 'string' ? ext.project.key : undefined;
+  const contentId = ext?.content?.id !== undefined ? String(ext.content.id) : undefined;
+  const spaceKey = typeof ext?.space?.key === 'string' ? ext.space.key : undefined;
+
+  return {
+    extensionType,
+    isCompactPanel,
+    isConfluence,
+    issueKey,
+    projectKey,
+    contentId,
+    spaceKey,
+  };
+}
 
 export const App: React.FC = () => {
-  // Null until the live suite arrives — no built-in fake dataset in a compliance tool.
   const [summary, setSummary] = useState<ComplianceSummary | null>(null);
+  const [panelContext, setPanelContext] = useState<ForgePanelContext>(DEFAULT_PANEL_CONTEXT);
   const [notice, setNotice] = useState<string | null>(null);
+  const [isInitialLoading, setIsInitialLoading] = useState<boolean>(true);
   const [activeView, setActiveView] = useState<'graph' | 'table'>('graph');
   const [selectedLinkId, setSelectedLinkId] = useState<string | null>(null);
   const [isExportOpen, setIsExportOpen] = useState(false);
+  const [isAuditLogOpen, setIsAuditLogOpen] = useState(false);
   const [isSeeding, setIsSeeding] = useState(false);
-  const [isRemediating, setIsRemediating] = useState(false);
-  const isSeedingRef = useRef(isSeeding);
-  const isRemediatingRef = useRef(isRemediating);
-  useEffect(() => { isSeedingRef.current = isSeeding; }, [isSeeding]);
-  useEffect(() => { isRemediatingRef.current = isRemediating; }, [isRemediating]);
+  const [isSyncingLive, setIsSyncingLive] = useState(false);
+  const [isMutating, setIsMutating] = useState(false);
   const [transitionResult, setTransitionResult] = useState<TransitionResult | null>(null);
   const [isTransitionModalOpen, setIsTransitionModalOpen] = useState(false);
   const [blastRadius, setBlastRadius] = useState<BlastRadiusReport | null>(null);
   const [isAnalyzingBlastRadius, setIsAnalyzingBlastRadius] = useState(false);
-  const [graphContext, setGraphContext] = useState<any>(null);
 
-  // Live Teamwork Graph (AGG GraphQL) context query, fired once per mount using the current issue key
-  const loadAndProbe = async () => {
-    try {
-      const ctx = await view.getContext();
-      const issueKey = ctx?.extension?.issue?.key || 'MED-42';
-      const res = await invoke('queryGraphContext', { issueKey });
-      setGraphContext(res);
-    } catch {
-      try {
-        const res = await invoke('queryGraphContext', { issueKey: 'MED-42' });
-        setGraphContext(res);
-      } catch {
-        setGraphContext(null);
-      }
-    }
-  };
+  const isBusyRef = useRef(false);
+  const lastFocusFetchRef = useRef(0);
+  const autoSelectedForContextRef = useRef(false);
 
-  const loadData = async () => {
+  useEffect(() => {
+    isBusyRef.current = isSeeding || isSyncingLive || isMutating;
+  }, [isSeeding, isSyncingLive, isMutating]);
+
+  const loadData = useCallback(async () => {
+    setIsInitialLoading(true);
     try {
-      const result = (await invoke('getComplianceSuite')) as ComplianceSummary;
-      if (result && result.traceLinks) {
+      const result = (await invokeResolver<ComplianceSummary | null>('getComplianceSuite')) ?? null;
+      if (result && Array.isArray(result.traceLinks)) {
         setSummary(result);
         setNotice(null);
-        loadAndProbe();
+      } else {
+        setNotice(
+          'Forge backend returned an empty or malformed compliance suite payload. Click "Retry Live Load" to try again.'
+        );
       }
     } catch (err) {
-      console.warn('Forge bridge invoke failed:', err);
-      setNotice('Live compliance suite could not be loaded from the Forge backend. Nothing is simulated in its place — retry or click "Seed Demo Suite".');
-    }
-  };
-
-  // Deterministic Regulatory Blast Radius & Transitive Impact Analyzer
-  const handleAnalyzeBlastRadius = async () => {
-    setIsAnalyzingBlastRadius(true);
-    try {
-      const triggerKey = selectedLink?.spec?.id || 'srs-104';
-      const report = (await invoke('analyzeBlastRadius', { triggerKey })) as BlastRadiusReport;
-      if (report) {
-        setBlastRadius(report);
-        setSelectedLinkId(selectedLink?.id || 'trace-HAZ-101');
-      }
-    } catch {
-      setBlastRadius(null);
-      setNotice('Blast radius analysis failed on the Forge backend — no simulated report is shown.');
+      const detail = err instanceof Error ? err.message : 'Forge bridge invoke failed';
+      setNotice(`Live compliance suite could not be loaded (${detail}). Nothing is simulated in its place.`);
     } finally {
-      setIsAnalyzingBlastRadius(false);
+      setIsInitialLoading(false);
     }
-  };
+  }, []);
 
-  // Test Jira Transition Validator Lockout
-  const handleTestTransition = async () => {
-    try {
-      let issueKey = 'MED-42';
-      try {
-        const ctx = await view.getContext();
-        const currentKey = ctx?.extension?.issue?.key;
-        const linked = !!currentKey && !!summary?.traceLinks?.some((l) => l.work?.key === currentKey);
-        issueKey = linked ? (currentKey as string) : 'MED-42';
-      } catch {}
-      const res = (await invoke('simulateTransition', { issueKey })) as TransitionResult;
-      setTransitionResult(res);
-    } catch {
-      setTransitionResult({
-        result: false,
-        evalError: 'Forge backend could not evaluate the safety gate — no transition decision was made.',
+  // Resolve Forge Jira/Confluence extension context once on mount
+  useEffect(() => {
+    let cancelled = false;
+    view
+      .getContext()
+      .then((ctx) => {
+        if (cancelled) return;
+        const parsed = parseForgeContext(ctx);
+        setPanelContext(parsed);
+        if (parsed.isCompactPanel) {
+          setActiveView('table');
+        }
+      })
+      .catch(() => {
+        // Leave default context outside Forge runtime
       });
-    }
-    setIsTransitionModalOpen(true);
-  };
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
-  // Load from Forge backend on mount + live background polling for Rovo Chat & MCP updates
+  // Auto-select matching trace link once when opened inside a specific Jira issue or Confluence page
+  useEffect(() => {
+    if (!summary || autoSelectedForContextRef.current || selectedLinkId) return;
+    if (panelContext.issueKey) {
+      const match = summary.traceLinks.find(
+        (l) => l.work.key.toUpperCase() === panelContext.issueKey!.toUpperCase()
+      );
+      if (match) {
+        autoSelectedForContextRef.current = true;
+        setSelectedLinkId(match.id);
+      }
+    } else if (panelContext.contentId) {
+      const match = summary.traceLinks.find(
+        (l) => l.spec.pageId && String(l.spec.pageId) === panelContext.contentId
+      );
+      if (match) {
+        autoSelectedForContextRef.current = true;
+        setSelectedLinkId(match.id);
+      }
+    }
+  }, [summary, panelContext, selectedLinkId]);
+
+  // Initial load + adaptive 8s polling + deduplicated focus/visibility refresh
   useEffect(() => {
     loadData();
 
-    // Adaptive 8-second polling active only when tab is visible (saves Forge serverless quotas).
-    // A failed poll leaves state untouched — it never fabricates an update.
     const pollInterval = setInterval(async () => {
       if (typeof document !== 'undefined' && document.visibilityState !== 'visible') {
         return;
       }
+      if (isBusyRef.current) return;
       try {
-        if (isSeedingRef.current || isRemediatingRef.current) return;
-        const latest = (await invoke('getComplianceSuite')) as ComplianceSummary;
-        if (latest && latest.traceLinks) {
+        const latest = (await invokeResolver<ComplianceSummary | null>('getComplianceSuite')) ?? null;
+        if (latest && Array.isArray(latest.traceLinks)) {
           setSummary((prev) => {
             if (
               prev &&
               prev.lastAuditTimestamp === latest.lastAuditTimestamp &&
               prev.releaseBlocked === latest.releaseBlocked &&
-              prev.verifiedPercentage === latest.verifiedPercentage
+              prev.verifiedPercentage === latest.verifiedPercentage &&
+              prev.signatureDriftCount === latest.signatureDriftCount &&
+              prev.auditEntryCount === latest.auditEntryCount &&
+              prev.auditHeadHash === latest.auditHeadHash &&
+              prev.datasetMode === latest.datasetMode
             ) {
               return prev;
             }
             return latest;
           });
         }
-      } catch {}
+      } catch {
+        // Silent background poll preserves current verified state
+      }
     }, 8000);
 
     const onVisibilityOrFocus = () => {
-      if (typeof document === 'undefined' || document.visibilityState === 'visible') {
-        loadData();
+      if (typeof document !== 'undefined' && document.visibilityState !== 'visible') {
+        return;
       }
+      if (isBusyRef.current) return;
+      const now = Date.now();
+      if (now - lastFocusFetchRef.current < 1500) {
+        return;
+      }
+      lastFocusFetchRef.current = now;
+      loadData();
     };
 
     window.addEventListener('focus', onVisibilityOrFocus);
@@ -145,45 +190,186 @@ export const App: React.FC = () => {
       window.removeEventListener('focus', onVisibilityOrFocus);
       document.removeEventListener('visibilitychange', onVisibilityOrFocus);
     };
-  }, []);
+  }, [loadData]);
 
-  // 1-Click Seeder Action
   const handleSeed = async () => {
     setIsSeeding(true);
     try {
-      const resp = (await invoke('seedDemoSuite')) as any;
+      const resp = await invokeResolver<SeedDemoResponse>('seedDemoSuite');
       if (resp && resp.summary) {
         setSummary(resp.summary);
         setNotice(null);
         setBlastRadius(null);
       }
-    } catch {
-      setNotice('Seeding failed — the Forge backend is unreachable. Existing state was NOT changed.');
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Seeding failed';
+      setNotice(`Seeding failed (${msg}). Existing state was NOT changed.`);
     } finally {
       setIsSeeding(false);
     }
   };
 
-  // Remediate Class C Gap (Hero Demo Fix)
-  const handleRemediate = async () => {
-    if (!selectedLink) return;
-    setIsRemediating(true);
+  const handleSyncLive = async () => {
+    setIsSyncingLive(true);
     try {
-      const resp = (await invoke('remediateGap', { hazardKey: selectedLink.hazard.key })) as ComplianceSummary;
-      if (resp && resp.traceLinks) {
-        setSummary(resp);
+      const resp = await invokeResolver<LiveSyncResult>('syncLiveSuite', {
+        projectKey: panelContext.projectKey,
+      });
+      if (resp && resp.summary) {
+        setSummary(resp.summary);
         setBlastRadius(null);
+        if (resp.warnings && resp.warnings.length > 0) {
+          setNotice(
+            `Live sync scanned ${resp.jiraIssuesScanned} Jira issue(s) and ${resp.confluencePagesScanned} Confluence page(s): ${resp.warnings.join(' ')}`
+          );
+        } else {
+          setNotice(null);
+        }
       }
-    } catch {
-      setNotice('Remediation failed on the Forge backend — nothing was changed. The compliance gap remains OPEN.');
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Live tenant sync failed';
+      setNotice(`Live Atlassian sync failed (${msg}). Existing state was NOT changed.`);
     } finally {
-      setIsRemediating(false);
+      setIsSyncingLive(false);
+    }
+  };
+
+  const handleAnalyzeBlastRadius = async () => {
+    if (!summary) return;
+    setIsAnalyzingBlastRadius(true);
+    try {
+      const currentSelected = summary.traceLinks.find((l) => l.id === selectedLinkId) || summary.traceLinks[0];
+      const triggerKey = currentSelected?.spec?.id || currentSelected?.hazard?.key || '';
+      const report = await invokeResolver<BlastRadiusReport>('analyzeBlastRadius', { triggerKey });
+      if (report) {
+        setBlastRadius(report);
+        const firstAffected =
+          report.affectedHazardKeys.length > 0
+            ? summary.traceLinks.find((l) => l.hazard.key === report.affectedHazardKeys[0])
+            : undefined;
+        if (firstAffected) {
+          setSelectedLinkId(firstAffected.id);
+        } else if (currentSelected) {
+          setSelectedLinkId(currentSelected.id);
+        }
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Blast radius analysis failed';
+      setBlastRadius(null);
+      setNotice(`Blast radius analysis failed (${msg}) — no simulated report is shown.`);
+    } finally {
+      setIsAnalyzingBlastRadius(false);
+    }
+  };
+
+  const handleTestTransition = async () => {
+    const selected = summary?.traceLinks.find((l) => l.id === selectedLinkId);
+    const issueKey = panelContext.issueKey || selected?.work?.key || undefined;
+    try {
+      const res = await invokeResolver<TransitionResult>('simulateTransition', issueKey ? { issueKey } : {});
+      setTransitionResult({
+        ...res,
+        evaluatedIssueKey: issueKey,
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Forge backend unreachable';
+      setTransitionResult({
+        result: false,
+        evaluatedIssueKey: issueKey,
+        evalError: `Forge backend could not evaluate the safety gate (${msg}) — no transition decision was made.`,
+      });
+    }
+    setIsTransitionModalOpen(true);
+  };
+
+  const handleBindIssue = async (hazardKey: string, issueKey: string) => {
+    setIsMutating(true);
+    try {
+      const resp = await invokeResolver<BindIssueResponse>('bindIssueToHazard', { hazardKey, issueKey });
+      if (!resp.success || !resp.summary) {
+        setNotice(`Bind issue failed: ${resp.error || 'Unknown backend error'}`);
+        return;
+      }
+      setSummary(resp.summary);
+      setNotice(null);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Bind issue failed';
+      setNotice(`Bind issue failed (${msg}).`);
+    } finally {
+      setIsMutating(false);
+    }
+  };
+
+  const handleRecordTestResult = async (params: {
+    hazardKey: string;
+    testKey: string;
+    status: VerificationTest['status'];
+    evidenceUrl?: string;
+    notes?: string;
+  }) => {
+    setIsMutating(true);
+    try {
+      const updated = await invokeResolver<ComplianceSummary>('recordTestResult', params);
+      if (updated && updated.traceLinks) {
+        setSummary(updated);
+        setBlastRadius(null);
+        setNotice(null);
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Failed to record test result';
+      setNotice(`Recording test result failed (${msg}).`);
+    } finally {
+      setIsMutating(false);
+    }
+  };
+
+  const handleSignOffPart11 = async (params: {
+    hazardKey: string;
+    meaning: string;
+    role?: string;
+    attestationConfirmed: boolean;
+    attestationPhrase?: string;
+  }) => {
+    setIsMutating(true);
+    try {
+      const updated = await invokeResolver<ComplianceSummary>('signOffPart11', params);
+      if (updated && updated.traceLinks) {
+        setSummary(updated);
+        setBlastRadius(null);
+        setNotice(null);
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : '21 CFR Part 11 sign-off failed';
+      setNotice(`Part 11 electronic signature failed (${msg}).`);
+    } finally {
+      setIsMutating(false);
+    }
+  };
+
+  const handleRemediateDemo = async (hazardKey: string, meaning: string) => {
+    setIsMutating(true);
+    try {
+      const updated = await invokeResolver<ComplianceSummary>('remediateGap', {
+        hazardKey,
+        simulate: true,
+        attestationConfirmed: true,
+        meaning,
+      });
+      if (updated && updated.traceLinks) {
+        setSummary(updated);
+        setBlastRadius(null);
+        setNotice(null);
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Demo remediation failed';
+      setNotice(`Simulated remediation failed (${msg}). Compliance gap remains OPEN.`);
+    } finally {
+      setIsMutating(false);
     }
   };
 
   const selectedLink = summary ? summary.traceLinks.find((l) => l.id === selectedLinkId) || null : null;
 
-  // Pre-load screen: never render a fabricated suite while the live one is unavailable
   if (!summary) {
     return (
       <div
@@ -195,56 +381,60 @@ export const App: React.FC = () => {
           alignItems: 'center',
           justifyContent: 'center',
           gap: 14,
-          fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
           padding: 24,
         }}
       >
         <div style={{ background: '#0052cc', borderRadius: 10, padding: 12, display: 'flex' }}>
           <ShieldCheck size={30} color="#ffffff" />
         </div>
-        <div style={{ fontSize: 16, fontWeight: 800, color: '#172b4d' }}>Loading MedTrace compliance suite…</div>
+        <div style={{ fontSize: 16, fontWeight: 800, color: '#172b4d' }}>
+          {isInitialLoading ? 'Loading MedTrace compliance suite…' : 'MedTrace compliance suite unavailable'}
+        </div>
         {notice && (
-          <div style={{ maxWidth: 480, fontSize: 12, color: '#de350b', textAlign: 'center', lineHeight: '18px' }}>
+          <div style={{ maxWidth: 480, fontSize: 12, color: '#bf2600', textAlign: 'center', lineHeight: '18px' }}>
             {notice}
           </div>
         )}
         <button
+          type="button"
           onClick={loadData}
+          disabled={isInitialLoading}
+          className="mt-btn"
           style={{
             padding: '8px 18px',
-            borderRadius: 6,
             border: '1.5px solid #0052cc',
             background: '#deebff',
             color: '#0052cc',
-            fontWeight: 700,
-            fontSize: 12,
-            cursor: 'pointer',
           }}
         >
-          Retry Live Load
+          {isInitialLoading ? 'Loading…' : 'Retry Live Load'}
         </button>
       </div>
     );
   }
 
   return (
-    <div style={{ minHeight: '100vh', background: '#f4f5f7', display: 'flex', flexDirection: 'column' }}>
-      {/* Regulatory Command Header */}
+    <div className={`mt-app ${panelContext.isCompactPanel ? 'mt-panel-compact' : ''}`}>
       <AuditHeader
         summary={summary}
+        panelContext={panelContext}
         activeView={activeView}
         onToggleView={setActiveView}
         onSeed={handleSeed}
+        onSyncLive={handleSyncLive}
+        onOpenAuditLog={() => setIsAuditLogOpen(true)}
         onOpenExport={() => setIsExportOpen(true)}
         onTestTransition={handleTestTransition}
         onAnalyzeBlastRadius={handleAnalyzeBlastRadius}
         isSeeding={isSeeding}
+        isSyncingLive={isSyncingLive}
         isAnalyzingBlastRadius={isAnalyzingBlastRadius}
       />
 
-      {/* Honest-error banner: backend failures are surfaced, never papered over */}
       {notice && (
         <div
+          className="no-print"
+          role="status"
           style={{
             margin: '12px 24px 0',
             padding: '10px 14px',
@@ -260,46 +450,53 @@ export const App: React.FC = () => {
             gap: 12,
           }}
         >
-          <span>⚠️ {notice}</span>
+          <span>{notice}</span>
           <button
+            type="button"
             onClick={() => setNotice(null)}
-            style={{ border: 'none', background: 'transparent', color: '#bf2600', cursor: 'pointer', fontWeight: 700, fontSize: 13 }}
-            title="Dismiss"
+            aria-label="Dismiss notification"
+            className="mt-icon-btn"
+            style={{ color: '#bf2600', fontWeight: 700, fontSize: 13 }}
           >
             ✕
           </button>
         </div>
       )}
 
-      {/* Main Workspace Body */}
-      <div style={{ flex: 1, padding: '20px 24px' }}>
+      <main className="mt-main no-print">
         {activeView === 'graph' ? (
-          <LineageGraph summary={summary} onSelectTraceLink={setSelectedLinkId} />
+          <LineageGraph
+            summary={summary}
+            compact={panelContext.isCompactPanel}
+            onSelectTraceLink={setSelectedLinkId}
+          />
         ) : (
           <TraceMatrixTable summary={summary} onSelectTraceLink={setSelectedLinkId} />
         )}
-      </div>
+      </main>
 
-      {/* Slide-in Inspection Drawer */}
       <InspectionDrawer
         link={selectedLink}
+        datasetMode={summary.datasetMode}
+        panelContext={panelContext}
         blastRadius={blastRadius}
-        graphContext={graphContext}
         onClose={() => setSelectedLinkId(null)}
-        onRemediate={handleRemediate}
-        isRemediating={isRemediating}
+        onBindIssue={handleBindIssue}
+        onRecordTestResult={handleRecordTestResult}
+        onSignOffPart11={handleSignOffPart11}
+        onRemediateDemo={handleRemediateDemo}
+        isMutating={isMutating}
       />
 
-      {/* FDA 510(k) Export Dossier Modal */}
-      {isExportOpen && (
-        <FdaExportModal summary={summary} onClose={() => setIsExportOpen(false)} />
-      )}
+      {isExportOpen && <FdaExportModal summary={summary} onClose={() => setIsExportOpen(false)} />}
 
-      {/* Jira Transition Safety Gate Live Intercept Modal */}
+      <AuditLogModal isOpen={isAuditLogOpen} onClose={() => setIsAuditLogOpen(false)} />
+
       <TransitionModal
         isOpen={isTransitionModalOpen}
         onClose={() => setIsTransitionModalOpen(false)}
         result={transitionResult}
+        summary={summary}
       />
     </div>
   );

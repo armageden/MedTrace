@@ -1,24 +1,56 @@
-import { SeederService } from './seeder';
 import { ComplianceEngine } from './compliance-engine';
+import { SeederService } from './seeder';
+import { TraceLink } from './types';
+
+const STOP_WORDS = new Set([
+  'with', 'from', 'that', 'this', 'must', 'every', 'during', 'within', 'clause',
+  'test', 'tests', 'spec', 'specs', 'jira', 'confluence', 'hazard', 'issue',
+  'firmware', 'software', 'system', 'systems', 'verification', 'safety', 'implement',
+  'updated', 'modified', 'version', 'approved', 'pending', 'passed', 'failed',
+]);
+
+function extractMeaningfulTokens(text: string): string[] {
+  const tokens = text.toLowerCase().match(/[a-z0-9_]{4,}/g) || [];
+  return Array.from(new Set(tokens.filter((t) => !STOP_WORDS.has(t))));
+}
+
+function findLinksMatchingTextTokens(fullText: string, traceLinks: TraceLink[]): TraceLink[] {
+  const lower = fullText.toLowerCase();
+  if (!lower.trim()) return [];
+
+  const matched: TraceLink[] = [];
+  for (const link of traceLinks) {
+    const corpus = `${link.spec?.title || ''} ${link.spec?.contentSnippet || ''} ${link.hazard?.title || ''} ${link.work?.title || ''}`;
+    const tokens = extractMeaningfulTokens(corpus);
+    if (tokens.some((tok) => lower.includes(tok))) {
+      matched.push(link);
+    }
+  }
+  return matched;
+}
 
 /**
- * MedTrace MCP Tools & Rovo Action Handlers
- * Serves both Atlassian Rovo agent invocations and external MCP coding assistants (Cursor, Claude Desktop).
+ * MedTrace MCP Tools & Rovo Action Handlers.
+ * Serves both Atlassian Rovo agent invocations and external MCP coding assistants.
  */
 export class McpToolService {
   /**
    * Tool: get-hazard-lineage-action
-   * Retrieves complete ISO 14971 hazard safety lineage for an issue or project
+   * Retrieves complete ISO 14971 hazard safety lineage for an issue/hazard/test key or full project.
    */
-  public static async getHazardLineage(inputs?: { issueKey?: string }): Promise<any> {
+  public static async getHazardLineage(inputs?: { issueKey?: string; hazardKey?: string }): Promise<any> {
     const suite = await SeederService.getActiveComplianceSuite();
+    const lookupKey = (inputs?.issueKey || inputs?.hazardKey || '').trim();
 
-    if (inputs?.issueKey) {
+    if (lookupKey) {
+      const lower = lookupKey.toLowerCase();
       const match = suite.traceLinks.find(
         (l) =>
-          l.hazard.key.toLowerCase() === inputs.issueKey?.toLowerCase() ||
-          l.work.key.toLowerCase() === inputs.issueKey?.toLowerCase() ||
-          l.test.testKey.toLowerCase() === inputs.issueKey?.toLowerCase()
+          l.hazard.key.toLowerCase() === lower ||
+          l.work.key.toLowerCase() === lower ||
+          l.test.testKey.toLowerCase() === lower ||
+          l.spec.id.toLowerCase() === lower ||
+          (l.spec.pageId && l.spec.pageId.toLowerCase() === lower)
       );
       if (match) {
         return {
@@ -31,10 +63,23 @@ export class McpToolService {
           part11Valid: match.signature.isValid,
         };
       }
+
+      return {
+        found: false,
+        queriedKey: lookupKey,
+        message: `No trace link found for key "${lookupKey}" in project "${suite.projectName}".`,
+        availableKeys: suite.traceLinks.map((l) => ({
+          hazardKey: l.hazard.key,
+          workKey: l.work.key,
+          specId: l.spec.id,
+          testKey: l.test.testKey,
+        })),
+      };
     }
 
     return {
       projectName: suite.projectName,
+      datasetMode: suite.datasetMode,
       totalHazards: suite.totalHazards,
       traceLinks: suite.traceLinks.map((l) => ({
         hazardKey: l.hazard.key,
@@ -52,54 +97,88 @@ export class McpToolService {
 
   /**
    * Tool: verify-iec-compliance-action
-   * Audits active codebase/sprint against IEC 62304 and FDA 21 CFR Part 11 requirements
-   * Performs real BFS graph traversal to calculate blast radius on referenced artifacts.
+   * Audits active codebase/sprint against IEC 62304 and FDA 21 CFR Part 11 requirements.
+   * Matches explicit suite keys and dynamic tokens from active specs/hazards/work items,
+   * then runs deterministic BFS blast-radius traversal.
    */
-  public static async verifyIecCompliance(inputs?: { prDiff?: string; componentName?: string; issueKey?: string }): Promise<any> {
+  public static async verifyIecCompliance(inputs?: {
+    prDiff?: string;
+    componentName?: string;
+    issueKey?: string;
+  }): Promise<any> {
     const suite = await SeederService.getActiveComplianceSuite();
     const fullText = `${inputs?.prDiff || ''} ${inputs?.componentName || ''} ${inputs?.issueKey || ''}`;
 
-    // 1. Extract explicit issue, hazard, test, or spec keys (e.g. MED-42, HAZ-101, SRS-104, TEST-88)
-    //    Keep only keys that actually exist in the active compliance suite, so stray tokens
-    //    like "UTF-8" or "RFC-7231" cannot override the safety-critical keyword fallback.
-    const rawKeyMatches = Array.from(new Set(fullText.match(/\b[A-Za-z]{2,5}-\d+\b/g) || [])).map((k) => k.toUpperCase());
+    // 1. Match explicit keys present in the active suite
+    const rawKeyMatches = Array.from(new Set(fullText.match(/\b[A-Za-z]{2,8}-\d+\b/g) || [])).map((k) =>
+      k.toUpperCase()
+    );
     const suiteKeys = new Set(
-      suite.traceLinks.flatMap((l) => [l.hazard.key, l.work.key, l.spec.id, l.test.testKey].map((k) => String(k).toUpperCase()))
+      suite.traceLinks.flatMap((l) =>
+        [l.hazard.key, l.work.key, l.spec.id, l.spec.pageId || '', l.test.testKey, l.signature.id]
+          .filter(Boolean)
+          .map((k) => String(k).toUpperCase())
+      )
     );
     const keyMatches = rawKeyMatches.filter((k) => suiteKeys.has(k));
 
-    // 2. Resolve trigger key for BFS graph traversal
+    // 2. Dynamic token matching across active suite specs/hazards/work items + safety fallback keywords
     let triggerKey = keyMatches[0];
+    let tokenMatchedLinks: TraceLink[] = [];
     if (!triggerKey) {
-      const lower = fullText.toLowerCase();
-      if (lower.includes('bolus') || lower.includes('clamp') || lower.includes('motor') || lower.includes('flow') || lower.includes('pwm')) {
-        triggerKey = 'srs-104';
-      } else if (lower.includes('droplet') || lower.includes('sensor') || lower.includes('stall') || lower.includes('photodiode')) {
-        triggerKey = 'srs-105';
-      } else if (lower.includes('oled') || lower.includes('battery') || lower.includes('voltage') || lower.includes('spi')) {
-        triggerKey = 'srs-106';
+      tokenMatchedLinks = findLinksMatchingTextTokens(fullText, suite.traceLinks);
+      if (tokenMatchedLinks.length > 0) {
+        triggerKey = tokenMatchedLinks[0].spec.id;
+      } else {
+        const lower = fullText.toLowerCase();
+        if (
+          lower.includes('bolus') ||
+          lower.includes('clamp') ||
+          lower.includes('motor') ||
+          lower.includes('flow') ||
+          lower.includes('pwm')
+        ) {
+          triggerKey = 'srs-104';
+        } else if (
+          lower.includes('droplet') ||
+          lower.includes('sensor') ||
+          lower.includes('stall') ||
+          lower.includes('photodiode')
+        ) {
+          triggerKey = 'srs-105';
+        } else if (
+          lower.includes('oled') ||
+          lower.includes('battery') ||
+          lower.includes('voltage') ||
+          lower.includes('spi')
+        ) {
+          triggerKey = 'srs-106';
+        }
       }
     }
 
     // 3. Execute deterministic BFS blast-radius traversal on active compliance graph
     const blastRadius = triggerKey ? ComplianceEngine.computeBlastRadius(triggerKey, suite) : undefined;
-    const affectedHazards = blastRadius && blastRadius.affectedHazardKeys.length > 0
-      ? blastRadius.affectedHazardKeys.map((k) => {
-          const l = suite.traceLinks.find((link) => link.hazard.key.toUpperCase() === k.toUpperCase());
-          return l ? `${l.hazard.key} (${l.hazard.riskClass.replace('_', ' ')} - ${l.hazard.title.split(':')[0]})` : k;
-        })
-      : [];
+    const affectedHazards =
+      blastRadius && blastRadius.affectedHazardKeys.length > 0
+        ? blastRadius.affectedHazardKeys.map((k) => {
+            const l = suite.traceLinks.find((link) => link.hazard.key.toUpperCase() === k.toUpperCase());
+            return l ? `${l.hazard.key} (${l.hazard.riskClass.replace('_', ' ')} - ${l.hazard.title.split(':')[0]})` : k;
+          })
+        : [];
 
-    // Match any trace links touched by detected keys or trigger
     const matchedLinks = suite.traceLinks.filter((l) => {
-      const linkKeys = [l.hazard.key, l.work.key, l.spec.id, l.test.testKey].map((k) => k.toUpperCase());
-      return keyMatches.some((k) => linkKeys.includes(k)) || (triggerKey && linkKeys.includes(triggerKey.toUpperCase()));
+      const linkKeys = [l.hazard.key, l.work.key, l.spec.id, l.spec.pageId || '', l.test.testKey]
+        .filter(Boolean)
+        .map((k) => k.toUpperCase());
+      return (
+        keyMatches.some((k) => linkKeys.includes(k)) ||
+        (triggerKey && linkKeys.includes(triggerKey.toUpperCase())) ||
+        tokenMatchedLinks.includes(l)
+      );
     });
 
     const isTargeted = affectedHazards.length > 0 || matchedLinks.length > 0;
-
-    // Release gate: only block if touched safety links have unverified compliance states (failing tests, signature drift)
-    // Non-blocking Class A/B changes with passing verification tests and valid signatures are authorized to ship.
     const hasUnverifiedGaps = isTargeted
       ? matchedLinks.some((l) => l.complianceState !== 'VERIFIED')
       : suite.releaseBlocked;
@@ -120,6 +199,7 @@ export class McpToolService {
 
     return {
       standards: suite.standards,
+      datasetMode: suite.datasetMode,
       canShipToClinicalProduction: canShip,
       verifiedCoveragePercentage: `${suite.verifiedPercentage}%`,
       classCSummary: {
@@ -127,8 +207,8 @@ export class McpToolService {
         status: suite.releaseBlocked ? 'BLOCKED_BY_SAFETY_GATE' : 'CERTIFIED_READY',
       },
       signatureDriftDetected: suite.signatureDriftCount > 0,
-      touchesSafetyCriticalCode: !!isTargeted,
-      affectedHazards: affectedHazards.length > 0 ? affectedHazards : ['None (General non-critical change)'],
+      touchesSafetyCriticalCode: Boolean(isTargeted),
+      affectedHazards: affectedHazards.length > 0 ? affectedHazards : ['None (No matched safety-critical artifacts in change scope)'],
       activeViolations: suite.blockingReasons,
       remediationGuidance: guidance,
       graphBlastRadius: blastRadius
@@ -146,28 +226,31 @@ export class McpToolService {
 }
 
 /**
- * Handler for manifest module: action (used by rovo:agent and rovo:mcp)
- *
- * Forge rovo:action contract: the function receives (payload, context) where declared inputs
- * are spread at the top of `payload` and the invoked action is identified by `context.moduleKey`
- * (also mirrored under `payload.context.moduleKey` on some invocation paths).
+ * Handler for manifest module: action (used by rovo:agent and rovo:mcp).
+ * Never logs raw PR diff payloads to prevent sensitive source exposure in platform logs.
  */
 export async function rovoActionHandler(payload: any, context?: any): Promise<any> {
-  console.log('[MedTrace RovoAction] Received action invocation:', JSON.stringify(payload));
+  const actionKey = String(context?.moduleKey || payload?.context?.moduleKey || payload?.actionKey || payload?.key || '').trim();
+  const inputs =
+    payload?.inputs && typeof payload.inputs === 'object'
+      ? { ...payload.inputs }
+      : (() => {
+          const { context: _ctx, actionKey: _ak, key: _k, ...rest } = payload || {};
+          return rest;
+        })();
 
-  const actionKey = context?.moduleKey || payload?.context?.moduleKey || payload?.actionKey || payload?.key || '';
-  const inputs = payload?.inputs && typeof payload.inputs === 'object'
-    ? { ...payload.inputs }
-    : (() => {
-        const { context: _ctx, actionKey: _ak, key: _k, ...rest } = payload || {};
-        return rest;
-      })();
+  console.log('[MedTrace RovoAction] Dispatching action:', {
+    actionKey,
+    issueKey: inputs?.issueKey || inputs?.hazardKey || null,
+    componentName: inputs?.componentName || null,
+    hasPrDiff: Boolean(inputs?.prDiff),
+  });
 
-  if (actionKey.includes('get-hazard-lineage') || actionKey.includes('lineage')) {
+  if (actionKey === 'get-hazard-lineage-action' || actionKey === 'get-hazard-lineage') {
     return await McpToolService.getHazardLineage(inputs);
   }
 
-  if (actionKey.includes('verify-iec-compliance') || actionKey.includes('compliance')) {
+  if (actionKey === 'verify-iec-compliance-action' || actionKey === 'verify-iec-compliance') {
     return await McpToolService.verifyIecCompliance(inputs);
   }
 

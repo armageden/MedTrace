@@ -1,18 +1,19 @@
 # MedTrace Privacy Policy
 
-**Effective Date:** November 5, 2026  
-**Last Updated:** November 5, 2026  
-**Product:** MedTrace IEC 62304 & FDA 21 CFR Part 11 Regulatory Traceability Sentinel  
+**Effective Date:** `[CONFIGURE BEFORE LISTING: YYYY-MM-DD]`  
+**Last Updated:** `[CONFIGURE BEFORE LISTING: YYYY-MM-DD]`  
+**Vendor / Data Controller Contact:** `[CONFIGURE BEFORE LISTING: Legal Entity Name]` (`[CONFIGURE BEFORE LISTING: privacy@your-domain.example]`)  
+**Product:** MedTrace IEC 62304 & FDA 21 CFR Part 11 Regulatory Traceability Engine
 
 ---
 
 ### 1. Architectural Privacy by Design
 
-MedTrace is built exclusively on the **Atlassian Forge** serverless platform. This architecture guarantees that the application runs directly within Atlassian's isolated cloud runtime environment (`nodejs22.x`) and inherits Atlassian's enterprise security boundary.
+MedTrace is built on the **Atlassian Forge** serverless platform (`nodejs22.x`) and runs inside Atlassian's isolated cloud runtime environment within the customer's Atlassian Cloud security boundary.
 
-- **No External Servers:** MedTrace does not operate secondary backend databases or multi-tenant servers outside of Atlassian Cloud.
-- **Tenant Isolation:** All audit links, ISO 14971 hazard evaluations, Confluence specification hashes, and verification test states are persisted exclusively within the customer's own Atlassian tenant via `@forge/kvs`.
-- **Zero Protected Health Information (PHI) / PII Ingestion:** MedTrace processes only engineering metadata (Jira issue keys, Confluence page titles, Git commit SHAs, automated test statuses, and cryptographic SHA-256 digests). MedTrace does not ingest, store, or transmit patient records, clinical trial subject data, or PII.
+- **No External Backend Servers:** MedTrace does not operate secondary databases or multi-tenant servers outside of Atlassian Cloud, and `manifest.yml` declares no `permissions.external.fetch.backend` outbound network permissions.
+- **Tenant Isolation (`@forge/kvs`):** All hazard trace links, Confluence specification SHA-256 digests, verification test records, signature attestations, and hash-chained audit ledger entries are persisted exclusively within the customer's Atlassian tenant via `@forge/kvs`.
+- **Non-PHI / Non-Patient Data Boundary:** MedTrace is engineered to process engineering metadata only (Jira issue keys, Confluence page IDs/titles/content hashes, verification test states, Atlassian Account IDs, and signature attestation records). Customers must not store Protected Health Information (PHI) or clinical patient records in MedTrace-tracked fields.
 
 ---
 
@@ -20,30 +21,31 @@ MedTrace is built exclusively on the **Atlassian Forge** serverless platform. Th
 
 | Data Category | Purpose | Storage Location | Retention |
 |---|---|---|---|
-| **ISO 14971 Risk Metadata** | Hazard classifications (Class A/B/C), severity, and probability thresholds | Forge Tenant KVS | Controlled by tenant lifecycle |
-| **Confluence Spec Hashes** | Cryptographic SHA-256 digests for 21 CFR Part 11 signature verification | Forge Tenant KVS | Controlled by tenant lifecycle |
-| **Jira Issue Linkages** | Bidirectional traceability between tasks, tests, and requirements | Atlassian Teamwork Graph & KVS | Synchronized with Jira Cloud |
-| **Verification Test States** | Pass/Fail outcomes and execution timestamps from CI/HIL pipelines | Forge Tenant KVS | Controlled by tenant lifecycle |
+| **ISO 14971 Risk & Traceability Metadata** | Hazard classifications (Class A/B/C), linked Jira issue keys, and verification test states | Forge Tenant KVS (`@forge/kvs`) | Controlled by tenant / app uninstall lifecycle |
+| **Confluence Specification Digests** | Cryptographic SHA-256 digests of specification pages for drift detection | Forge Tenant KVS (`@forge/kvs`) | Controlled by tenant / app uninstall lifecycle |
+| **Hash-Chained Audit Ledger** | Append-only, SHA-256 hash-chained log (`prevHash` → `entryHash`) of compliance mutations, test recordings, sign-offs, and syncs | Forge Tenant KVS (`@forge/kvs`) | Controlled by tenant / app uninstall lifecycle |
+| **Replay-Protection Nonces** | SHA-256 hashed request nonces with short TTL to reject replayed webtrigger calls | Forge Tenant KVS (`@forge/kvs`) | Automatically expired via KVS TTL |
+| **Atlassian Account IDs** | Attributing remediation, test execution, and signature attestation events | Forge Tenant KVS (`@forge/kvs`) | Controlled by tenant lifecycle |
 
 ---
 
 ### 3. Third-Party Integrations & Model Context Protocol (MCP)
 
-- **Atlassian Rovo:** Agent interactions occur entirely within Atlassian Cloud using Atlassian Intelligence security guarantees. Prompts and contextual compliance lineage are never sent to external model vendors for training.
-- **Model Context Protocol (MCP) Stdio Server:** When engineers connect local development environments (e.g., Cursor, Claude Desktop), communication is routed through customer-owned, authenticated Forge webtriggers encrypted with TLS 1.3.
+- **Atlassian Rovo:** Agent and action invocations execute within Atlassian Cloud under Atlassian's intelligence and data governance boundary.
+- **Local MCP Stdio Server (`mcp-server/index.mjs`):** When engineers connect a local IDE (such as Cursor or Claude Desktop), the local process communicates exclusively with the customer's deployed Atlassian Forge webtrigger over HTTPS using HMAC-SHA256 request signing (`MEDTRACE_MCP_SECRET`).
 
 ---
 
-### 4. Regulatory Compliance Statements
+### 4. Regulatory & Privacy Statements
 
-- **FDA 21 CFR Part 11:** Audit trails are immutable and reflect state transitions without altering historical records.
-- **GDPR / CCPA:** Since no personal user data is processed beyond standard Atlassian Account IDs required for transition logging, customer admins maintain complete deletion authority through standard Atlassian user lifecycle management.
+- **Audit Trail Integrity (21 CFR Part 11 Context):** MedTrace maintains an append-only, hash-chained audit ledger in `@forge/kvs` (`medtrace:audit:entry:<seq>`) recording state-changing actions (`seed`, `sync`, `bind`, `recordTest`, `signOff`, `remediate`) with `prevHash` → `entryHash` linkage. Full organizational compliance with FDA 21 CFR Part 11 remains the customer's responsibility (including Atlassian Identity/SSO controls, procedural SOPs, and system validation).
+- **GDPR / CCPA:** MedTrace processes minimal personal identifiers (Atlassian Account IDs for audit attribution). Customer administrators manage user access and deletion requests through Atlassian Cloud user lifecycle controls and app uninstallation.
 
 ---
 
-### 5. Contact & Data Protection Officer
+### 5. Contact & Security Inquiries
 
-For inquiries regarding security, data handling, or audit compliance:
-- **Email:** `support@medtrace.dev`
-- **Developer Contact:** `farhantanvir277@gmail.com`
-- **Security Portal:** `https://github.com/armageden/MedTrace` (open the repo and contact the maintainer, or email the support address below)
+For privacy, data handling, or security inquiries:
+- **Privacy & Support Email:** `[CONFIGURE BEFORE LISTING: support@your-domain.example]`
+- **Security Contact & Disclosure Policy:** See `SECURITY.md` (`[CONFIGURE BEFORE LISTING: security@your-domain.example]`)
+- **Data Processing Addendum (DPA):** `[CONFIGURE BEFORE LISTING: URL or request contact]`
