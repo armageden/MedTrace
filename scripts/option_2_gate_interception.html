@@ -1,0 +1,487 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>MedTrace - Release Gate Interception</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    width: 1200px;
+    height: 800px;
+    overflow: hidden;
+    background: #091E42;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+    color: #172B4D;
+    display: flex;
+    flex-direction: column;
+    -webkit-font-smoothing: antialiased;
+    position: relative;
+  }
+
+  /* Real Jira Global Nav Bar */
+  .jira-navbar {
+    background: #0052CC;
+    height: 48px;
+    padding: 0 20px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    color: #FFFFFF;
+    flex-shrink: 0;
+  }
+  .nav-left {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+  }
+  .atlassian-logo {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-weight: 700;
+    font-size: 14px;
+    letter-spacing: -0.2px;
+  }
+  .nav-crumbs {
+    color: #DEEBFF;
+    font-size: 12px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .nav-crumbs b { color: #FFFFFF; font-weight: 600; }
+  .nav-right {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    font-size: 11px;
+    color: #DEEBFF;
+  }
+  .site-badge {
+    background: rgba(255, 255, 255, 0.18);
+    padding: 3px 8px;
+    border-radius: 3px;
+    font-family: ui-monospace, Menlo, Consolas, monospace;
+    font-size: 11px;
+  }
+  .avatar {
+    width: 26px;
+    height: 26px;
+    border-radius: 50%;
+    background: #FF5630;
+    color: #FFFFFF;
+    font-size: 11px;
+    font-weight: 700;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  /* Underlying Dimmed Jira Issue Page */
+  .jira-page-bg {
+    flex: 1;
+    background: #FFFFFF;
+    padding: 24px 36px;
+    display: flex;
+    flex-direction: column;
+    gap: 18px;
+    opacity: 0.35;
+    filter: blur(1.5px);
+  }
+  .issue-header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  .issue-key {
+    font-size: 14px;
+    font-weight: 700;
+    color: #0052CC;
+  }
+  .issue-title {
+    font-size: 22px;
+    font-weight: 700;
+    color: #172B4D;
+  }
+  .issue-meta-row {
+    display: flex;
+    gap: 24px;
+    font-size: 12px;
+    color: #5E6C84;
+    border-bottom: 1px solid #DFE1E6;
+    padding-bottom: 12px;
+  }
+
+  /* Dark Overlay Backdrop */
+  .modal-backdrop {
+    position: absolute;
+    inset: 48px 0 0 0;
+    background: rgba(9, 30, 66, 0.54);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+    z-index: 50;
+  }
+
+  /* Active Release Gate Modal */
+  .gate-modal {
+    width: 920px;
+    background: #FFFFFF;
+    border-radius: 8px;
+    box-shadow: 0 12px 36px rgba(9, 30, 66, 0.35), 0 0 1px rgba(9, 30, 66, 0.3);
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    border: 1px solid #DFE1E6;
+  }
+
+  /* Modal Title Bar */
+  .modal-top {
+    background: #DE350B;
+    color: #FFFFFF;
+    padding: 16px 24px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .modal-title-left {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  .modal-icon-badge {
+    background: rgba(255, 255, 255, 0.2);
+    width: 32px;
+    height: 32px;
+    border-radius: 6px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .modal-title-h1 {
+    font-size: 17px;
+    font-weight: 800;
+    letter-spacing: -0.2px;
+  }
+  .modal-title-sub {
+    font-size: 12px;
+    opacity: 0.92;
+    margin-top: 1px;
+  }
+  .gate-badge {
+    background: #FFFFFF;
+    color: #DE350B;
+    font-weight: 800;
+    font-size: 11px;
+    padding: 4px 10px;
+    border-radius: 4px;
+    letter-spacing: 0.5px;
+  }
+
+  /* Modal Body */
+  .modal-body {
+    padding: 22px 24px;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    background: #FAFBFC;
+  }
+
+  /* Transition Attempt Banner */
+  .transition-banner {
+    background: #FFFFFF;
+    border: 1.5px solid #DFE1E6;
+    border-radius: 6px;
+    padding: 12px 16px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .banner-flow {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 13px;
+    font-weight: 600;
+  }
+  .status-pill {
+    padding: 3px 8px;
+    border-radius: 3px;
+    font-size: 11px;
+    font-weight: 700;
+  }
+  .pill-inprogress { background: #EAE6FF; color: #403294; }
+  .pill-done { background: #FFEBE6; color: #DE350B; text-decoration: line-through; }
+  .banner-rule {
+    font-size: 11px;
+    color: #5E6C84;
+    font-family: ui-monospace, Menlo, Consolas, monospace;
+  }
+
+  /* Violation Cards */
+  .violations-title {
+    font-size: 12px;
+    font-weight: 800;
+    color: #DE350B;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .violation-cards {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .v-card {
+    background: #FFFFFF;
+    border: 1px solid #FFBDAD;
+    border-left: 4px solid #DE350B;
+    border-radius: 4px;
+    padding: 12px 14px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .v-left {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+  }
+  .v-headline {
+    font-size: 13px;
+    font-weight: 700;
+    color: #172B4D;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .v-code {
+    font-family: ui-monospace, Menlo, Consolas, monospace;
+    font-size: 11px;
+    background: #FFEBE6;
+    color: #DE350B;
+    padding: 1px 6px;
+    border-radius: 3px;
+    font-weight: 700;
+  }
+  .v-desc {
+    font-size: 12px;
+    color: #5E6C84;
+  }
+  .v-right {
+    text-align: right;
+  }
+  .v-tag {
+    font-size: 11px;
+    font-weight: 700;
+    color: #DE350B;
+  }
+  .v-action {
+    font-size: 10.5px;
+    color: #6B778C;
+  }
+
+  /* Audit Guarantee Footer Bar */
+  .modal-stats-bar {
+    background: #FFFFFF;
+    border-top: 1px solid #EBECF0;
+    padding: 12px 24px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-size: 11.5px;
+    color: #5E6C84;
+  }
+  .stat-group {
+    display: flex;
+    gap: 20px;
+  }
+  .stat-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .stat-item b { color: #172B4D; }
+
+  /* Modal Footer Actions */
+  .modal-actions {
+    background: #F4F5F7;
+    border-top: 1px solid #DFE1E6;
+    padding: 12px 24px;
+    display: flex;
+    justify-content: flex-end;
+    gap: 10px;
+  }
+  .btn-secondary {
+    background: #FFFFFF;
+    border: 1px solid #DFE1E6;
+    padding: 8px 14px;
+    border-radius: 4px;
+    font-size: 12px;
+    font-weight: 600;
+    color: #42526E;
+  }
+  .btn-primary {
+    background: #0052CC;
+    border: none;
+    padding: 8px 16px;
+    border-radius: 4px;
+    font-size: 12px;
+    font-weight: 600;
+    color: #FFFFFF;
+  }
+</style>
+</head>
+<body>
+
+  <!-- Jira Global Nav -->
+  <div class="jira-navbar">
+    <div class="nav-left">
+      <div class="atlassian-logo">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#FFFFFF" stroke-width="2.5">
+          <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path>
+          <path d="m9 12 2 2 4-4"></path>
+        </svg>
+        <span>Jira Cloud</span>
+      </div>
+      <div class="nav-crumbs">
+        <span>Projects</span> / <span>Smart Infusion Pump Firmware</span> / <b>MED-42</b>
+      </div>
+    </div>
+    <div class="nav-right">
+      <span class="site-badge">one-atlas-feur.atlassian.net</span>
+      <span>Zero Outbound Egress</span>
+      <div class="avatar">FT</div>
+    </div>
+  </div>
+
+  <!-- Background Dimmed Jira Issue -->
+  <div class="jira-page-bg">
+    <div class="issue-header">
+      <span class="issue-key">MED-42</span>
+      <span class="issue-title">Implement Dual-Core Hardware PWM Clamp on Infusion Motor</span>
+    </div>
+    <div class="issue-meta-row">
+      <span>Status: <b>In Progress</b></span>
+      <span>Assignee: <b>Dr. Sarah Lin</b></span>
+      <span>Priority: <b>Highest</b></span>
+      <span>IEC 62304 Safety Class: <b>Class C</b></span>
+      <span>Linked Pull Request: <b>PR #142</b></span>
+    </div>
+  </div>
+
+  <!-- Active Modal Overlay -->
+  <div class="modal-backdrop">
+    <div class="gate-modal">
+      <!-- Title -->
+      <div class="modal-top">
+        <div class="modal-title-left">
+          <div class="modal-icon-badge">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#FFFFFF" stroke-width="2.5">
+              <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path>
+              <line x1="12" y1="8" x2="12" y2="12"></line>
+              <line x1="12" y1="16" x2="12.01" y2="16"></line>
+            </svg>
+          </div>
+          <div>
+            <div class="modal-title-h1">Release Gate Blocked: Transition Halted for MED-42</div>
+            <div class="modal-title-sub">Enforced by MedTrace IEC 62304 / ISO 14971 Workflow Validator</div>
+          </div>
+        </div>
+        <div class="gate-badge">FAIL-CLOSED ENFORCEMENT</div>
+      </div>
+
+      <!-- Body -->
+      <div class="modal-body">
+        <div class="transition-banner">
+          <div class="banner-flow">
+            <span>Requested Jira Transition:</span>
+            <span class="status-pill pill-inprogress">In Progress</span>
+            <span>➔</span>
+            <span class="status-pill pill-done">Done</span>
+          </div>
+          <div class="banner-rule">Rule: IEC-62304-CLAUSE-5.3.4 (Verification Mandatory Before Closure)</div>
+        </div>
+
+        <div class="violations-title">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#DE350B" stroke-width="2.5">
+            <circle cx="12" cy="12" r="10"></circle>
+            <line x1="12" y1="8" x2="12" y2="12"></line>
+            <line x1="12" y1="16" x2="12.01" y2="16"></line>
+          </svg>
+          <span>3 Unmitigated Regulatory Violations Detected Across Blast Radius:</span>
+        </div>
+
+        <div class="violation-cards">
+          <!-- Card 1 -->
+          <div class="v-card">
+            <div class="v-left">
+              <div class="v-headline">
+                <span class="v-code">HAZ-101 (CLASS C)</span>
+                <span>Unmitigated Catastrophic Risk: Bolus delivery exceeds 5.0 mL/hr</span>
+              </div>
+              <div class="v-desc">ISO 14971 mandates independent verification evidence prior to production closure.</div>
+            </div>
+            <div class="v-right">
+              <div class="v-tag">ZERO PASSING TESTS</div>
+              <div class="v-action">Blocking Closure</div>
+            </div>
+          </div>
+
+          <!-- Card 2 -->
+          <div class="v-card">
+            <div class="v-left">
+              <div class="v-headline">
+                <span class="v-code">TEST-88</span>
+                <span>Hardware-in-the-Loop Occlusion & Over-Infusion Stress Test is UNTESTED</span>
+              </div>
+              <div class="v-desc">Automated HIL bench execution has not posted passing execution telemetry.</div>
+            </div>
+            <div class="v-right">
+              <div class="v-tag">EXECUTION PENDING</div>
+              <div class="v-action">HIL Bench Required</div>
+            </div>
+          </div>
+
+          <!-- Card 3 -->
+          <div class="v-card">
+            <div class="v-left">
+              <div class="v-headline">
+                <span class="v-code">SRS-104 (DRIFT)</span>
+                <span>Confluence Specification hash differs from 21 CFR Part 11 Digital Signature</span>
+              </div>
+              <div class="v-desc">SHA-256 digest modified (v3 threshold: 5.5 mL/hr vs v2 approved: 5.0 mL/hr). Signature invalidated.</div>
+            </div>
+            <div class="v-right">
+              <div class="v-tag">SIGNATURE REVOKED</div>
+              <div class="v-action">CMO Sign-Off Required</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Stats -->
+      <div class="modal-stats-bar">
+        <div class="stat-group">
+          <div class="stat-item">Traversal Latency: <b>1.12 ms</b></div>
+          <div class="stat-item">Algorithm: <b>Deterministic Transitive BFS</b></div>
+          <div class="stat-item">Audit Hash: <b>SHA-256 Validated</b></div>
+        </div>
+        <div class="stat-item">
+          <span>Security Model: <b>Zero Outbound Egress (100% In-Tenant Forge)</b></span>
+        </div>
+      </div>
+
+      <!-- Footer Buttons -->
+      <div class="modal-actions">
+        <button class="btn-secondary">Dismiss & Return to Issue</button>
+        <button class="btn-primary">Open MedTrace Living Lineage Graph ➔</button>
+      </div>
+    </div>
+  </div>
+
+</body>
+</html>

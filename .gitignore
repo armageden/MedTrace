@@ -7,6 +7,8 @@ static/frontend/dist/
 .DS_Store
 .env
 .env.local
+.mimosa/
+.commandcode/
 !.env.example
 .commandcode/
 .mimosa/

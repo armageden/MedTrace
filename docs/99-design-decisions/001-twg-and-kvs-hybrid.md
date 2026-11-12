@@ -7,7 +7,7 @@ Atlassian's Teamwork Graph (TWG) connects Jira issues, Confluence pages, and rem
 
 ## Decision
 Adopt a hybrid persistence architecture:
-1. Use `src/teamwork-graph.ts` to execute AGG GraphQL queries (`api.asApp().requestGraph()`) to traverse native cross-product entities and register ISO 14971 hazard nodes into the graph context.
+1. Use `src/teamwork-graph.ts` to execute AGG GraphQL queries (`api.asApp().requestGraph()`) to traverse native cross-product entities, and model ISO 14971 hazard nodes with demo ARIs (Forge cannot write custom entities into the Teamwork Graph; the seeder records them as `MODELED` lineage, never as gateway traversal evidence).
 2. Maintain high-speed pre-computed compliance states inside `@forge/kvs` via `src/seeder.ts`.
 3. Read exclusively from `@forge/kvs` inside `src/workflow-validator.ts` to ensure transition checks complete in <80ms.
 

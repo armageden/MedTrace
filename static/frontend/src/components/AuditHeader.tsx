@@ -1,6 +1,6 @@
 import React from 'react';
 import { ComplianceSummary } from '../types';
-import { ShieldAlert, ShieldCheck, RefreshCw, FileDown, GitFork, Table, Sparkles, Zap } from 'lucide-react';
+import { ShieldAlert, ShieldCheck, FileDown, GitFork, Table, Sparkles, Zap } from 'lucide-react';
 
 interface AuditHeaderProps {
   summary: ComplianceSummary;
@@ -38,8 +38,25 @@ export const AuditHeader: React.FC<AuditHeaderProps> = ({
               <div style={{ fontSize: 18, fontWeight: 800, color: '#172b4d', letterSpacing: '-0.2px' }}>
                 MedTrace <span style={{ fontSize: 13, fontWeight: 500, color: '#6b778c' }}>| IEC 62304 & FDA 21 CFR Part 11 Living Traceability Engine</span>
               </div>
-              <div style={{ fontSize: 11, color: '#5e6c84', marginTop: 2 }}>
-                Device System: <b>{summary.projectName}</b> • Teamwork Graph Verified
+              <div style={{ fontSize: 11, color: '#5e6c84', marginTop: 2, display: 'flex', alignItems: 'center', gap: 8 }}>
+                <span>Device System: <b>{summary.projectName}</b> • Zero Outbound Egress</span>
+                {summary.datasetMode !== 'LIVE' && (
+                  <span
+                    style={{
+                      padding: '1px 7px',
+                      borderRadius: 3,
+                      background: '#fff0b3',
+                      border: '1px solid #ffe380',
+                      color: '#7f5f00',
+                      fontWeight: 800,
+                      fontSize: 9,
+                      letterSpacing: '0.4px',
+                    }}
+                    title="All records are modeled demo data seeded by the app (Confluence availability is preflight-checked). No tenant evidence is fabricated."
+                  >
+                    DEMO DATASET — MODELED RECORDS
+                  </span>
+                )}
               </div>
             </div>
           </div>

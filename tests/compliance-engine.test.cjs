@@ -2,7 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert');
 const crypto = require('node:crypto');
 const { ComplianceEngine } = require('../dist/compliance-engine');
-const { verifyHmacSignature, mcpWebtriggerHandler, workflowValidatorHandler, setNonceStore, createInMemoryNonceStore, claimNonce } = require('../dist/index');
+const { verifyHmacSignature, mcpWebtriggerHandler, workflowValidatorHandler, rovoActionHandler, setNonceStore, createInMemoryNonceStore, claimNonce } = require('../dist/index');
 const { SeederService } = require('../dist/seeder');
 const { McpToolService } = require('../dist/mcp-server');
 
@@ -109,6 +109,13 @@ test.describe('ComplianceEngine - IEC 62304 traceability & signature-fingerprint
     assert.strictEqual(report.verifiedPercentage, 50);
     assert.strictEqual(report.releaseBlocked, true);
     assert.strictEqual(report.blockingReasons.length, 1);
+    assert.strictEqual(report.datasetMode, 'DEMO');
+
+    // Supports LIVE datasetMode when evaluating live project entities
+    const liveReport = ComplianceEngine.generateComplianceReport([link2], 'LIVE', 'Infusion Pump Production');
+    assert.strictEqual(liveReport.datasetMode, 'LIVE');
+    assert.strictEqual(liveReport.projectName, 'Infusion Pump Production');
+    assert.strictEqual(liveReport.releaseBlocked, false);
   });
 });
 
@@ -152,7 +159,43 @@ test.describe('Webtrigger Cryptographic Security - HMAC-SHA256 & Replay Protecti
   test.it('rejects unauthenticated GET webtrigger requests with HTTP 401', async () => {
     const resp = await mcpWebtriggerHandler({ method: 'GET', headers: {} });
     assert.strictEqual(resp.statusCode, 401);
-    assert.match(resp.body, /Unauthorized: Missing or invalid x-medtrace-key header/);
+    assert.match(resp.body, /Unauthorized: Missing x-medtrace-timestamp header/);
+  });
+
+  test.it('accepts a validly signed GET webtrigger request with HTTP 200', async () => {
+    const ts = Date.now().toString();
+    const nonce = 'get-' + crypto.randomUUID();
+    const sig = crypto.createHmac('sha256', secret).update(`${ts}.${nonce}.`).digest('hex');
+    const resp = await mcpWebtriggerHandler({
+      method: 'GET',
+      headers: {
+        'x-medtrace-timestamp': ts,
+        'x-medtrace-nonce': nonce,
+        'x-medtrace-signature': `sha256=${sig}`,
+      },
+    });
+    assert.strictEqual(resp.statusCode, 200);
+    const parsed = JSON.parse(resp.body);
+    assert.ok(parsed.traceLinks || parsed.projectName);
+  });
+
+  test.it('rejects remediation of an unknown hazard with HTTP 500 instead of reporting success', async () => {
+    const ts = Date.now().toString();
+    const nonce = 'rem-' + crypto.randomUUID();
+    const body = JSON.stringify({ action: 'remediate', hazardKey: 'HAZ-999' });
+    const sig = crypto.createHmac('sha256', secret).update(`${ts}.${nonce}.${body}`).digest('hex');
+    const resp = await mcpWebtriggerHandler({
+      method: 'POST',
+      headers: {
+        'x-medtrace-key': secret,
+        'x-medtrace-timestamp': ts,
+        'x-medtrace-nonce': nonce,
+        'x-medtrace-signature': `sha256=${sig}`,
+      },
+      body,
+    });
+    assert.strictEqual(resp.statusCode, 500);
+    assert.match(resp.body, /not found.*nothing was remediated/i);
   });
 
   test.it('rejects secrets passed in URL query parameters (header-only defense against log leakage)', async () => {
@@ -202,10 +245,13 @@ test.describe('Webtrigger Cryptographic Security - HMAC-SHA256 & Replay Protecti
 
   test.it('fails closed with HTTP 500 when MEDTRACE_MCP_SECRET is unset in environment', async () => {
     delete process.env.MEDTRACE_MCP_SECRET;
-    const resp = await mcpWebtriggerHandler({ method: 'GET', headers: { 'x-medtrace-key': 'anything' } });
-    assert.strictEqual(resp.statusCode, 500);
-    assert.match(resp.body, /fail-closed/);
-    process.env.MEDTRACE_MCP_SECRET = secret;
+    try {
+      const resp = await mcpWebtriggerHandler({ method: 'GET', headers: { 'x-medtrace-key': 'anything' } });
+      assert.strictEqual(resp.statusCode, 500);
+      assert.match(resp.body, /fail-closed/);
+    } finally {
+      process.env.MEDTRACE_MCP_SECRET = secret;
+    }
   });
 
   test.it('allows external transition validation via webtrigger action simulate_transition', async () => {
@@ -226,6 +272,136 @@ test.describe('Webtrigger Cryptographic Security - HMAC-SHA256 & Replay Protecti
     assert.strictEqual(resp.statusCode, 200);
     const parsed = JSON.parse(resp.body);
     assert.strictEqual(typeof parsed.result, 'boolean');
+  });
+
+  test.it('CI release gate action verify-release-gate returns HTTP 403 + result:false on a blocked suite', async () => {
+    const originalGet = SeederService.getActiveComplianceSuite;
+    SeederService.getActiveComplianceSuite = async () => ({
+      projectName: 'CI Gate Suite', standards: [], totalHazards: 1, classCCount: 1, classBCount: 0, classACount: 0,
+      verifiedPercentage: 0, releaseBlocked: true,
+      blockingReasons: ['IEC 62304 Critical Gap: HAZ-101 unverified'],
+      signatureDriftCount: 0, lastAuditTimestamp: new Date().toISOString(),
+      traceLinks: [],
+    });
+    try {
+      const ts = Date.now().toString();
+      const nonce = 'ci-' + crypto.randomUUID();
+      const body = JSON.stringify({ action: 'verify-release-gate' });
+      const sig = crypto.createHmac('sha256', secret).update(`${ts}.${nonce}.${body}`).digest('hex');
+      const resp = await mcpWebtriggerHandler({
+        method: 'POST',
+        headers: {
+          'x-medtrace-key': secret,
+          'x-medtrace-timestamp': ts,
+          'x-medtrace-nonce': nonce,
+          'x-medtrace-signature': `sha256=${sig}`,
+        },
+        body,
+      });
+      assert.strictEqual(resp.statusCode, 403);
+      const parsed = JSON.parse(resp.body);
+      assert.strictEqual(parsed.result, false);
+      assert.match(parsed.errorMessage, /Safety Gate/);
+    } finally {
+      SeederService.getActiveComplianceSuite = originalGet;
+    }
+  });
+
+  test.it('CI release gate action verify-release-gate returns HTTP 200 + result:true on a clean suite', async () => {
+    const originalGet = SeederService.getActiveComplianceSuite;
+    SeederService.getActiveComplianceSuite = async () => ({
+      projectName: 'CI Gate Suite', standards: [], totalHazards: 1, classCCount: 1, classBCount: 0, classACount: 0,
+      verifiedPercentage: 100, releaseBlocked: false,
+      blockingReasons: [],
+      signatureDriftCount: 0, lastAuditTimestamp: new Date().toISOString(),
+      traceLinks: [],
+    });
+    try {
+      const ts = Date.now().toString();
+      const nonce = 'ci-clean-' + crypto.randomUUID();
+      const body = JSON.stringify({ action: 'verify-release-gate' });
+      const sig = crypto.createHmac('sha256', secret).update(`${ts}.${nonce}.${body}`).digest('hex');
+      const resp = await mcpWebtriggerHandler({
+        method: 'POST',
+        headers: {
+          'x-medtrace-key': secret,
+          'x-medtrace-timestamp': ts,
+          'x-medtrace-nonce': nonce,
+          'x-medtrace-signature': `sha256=${sig}`,
+        },
+        body,
+      });
+      assert.strictEqual(resp.statusCode, 200);
+      const parsed = JSON.parse(resp.body);
+      assert.strictEqual(parsed.result, true);
+    } finally {
+      SeederService.getActiveComplianceSuite = originalGet;
+    }
+  });
+
+  test.it('CI release gate honors issueKey scoping (clean issue passes even while the suite has other gaps)', async () => {
+    const originalGet = SeederService.getActiveComplianceSuite;
+    SeederService.getActiveComplianceSuite = async () => ({
+      projectName: 'CI Gate Suite', standards: [], totalHazards: 2, classCCount: 1, classBCount: 0, classACount: 0,
+      verifiedPercentage: 50, releaseBlocked: true,
+      blockingReasons: ['IEC 62304 Critical Gap: HAZ-101 unverified'],
+      signatureDriftCount: 0, lastAuditTimestamp: new Date().toISOString(),
+      traceLinks: [
+        { work: { key: 'MED-42' }, hazard: { key: 'HAZ-101' }, complianceState: 'SAFETY_VIOLATION', violations: ['IEC 62304 Critical Gap: HAZ-101 requires verified test coverage.'] },
+        { work: { key: 'MED-43' }, hazard: { key: 'HAZ-102' }, complianceState: 'VERIFIED', violations: [] },
+      ],
+    });
+    try {
+      const callGate = async (issueKey) => {
+        const ts = Date.now().toString();
+        const nonce = 'ci-scope-' + crypto.randomUUID();
+        const body = JSON.stringify({ action: 'verify-release-gate', issueKey });
+        const sig = crypto.createHmac('sha256', secret).update(`${ts}.${nonce}.${body}`).digest('hex');
+        return mcpWebtriggerHandler({
+          method: 'POST',
+          headers: {
+            'x-medtrace-key': secret,
+            'x-medtrace-timestamp': ts,
+            'x-medtrace-nonce': nonce,
+            'x-medtrace-signature': `sha256=${sig}`,
+          },
+          body,
+        });
+      };
+
+      const blocked = await callGate('MED-42');
+      assert.strictEqual(blocked.statusCode, 403);
+      assert.strictEqual(JSON.parse(blocked.body).result, false);
+
+      const passed = await callGate('MED-43');
+      assert.strictEqual(passed.statusCode, 200);
+      assert.strictEqual(JSON.parse(passed.body).result, true);
+    } finally {
+      SeederService.getActiveComplianceSuite = originalGet;
+    }
+  });
+});
+
+test.describe('Rovo Action Handler - Forge rovo:action payload contract', () => {
+  test.it('dispatches get-hazard-lineage from context.moduleKey with inputs spread on payload', async () => {
+    const payload = { issueKey: 'MED-42', context: { moduleKey: 'get-hazard-lineage-action', cloudId: 'cloud-x' } };
+    const res = await rovoActionHandler(payload, { moduleKey: 'get-hazard-lineage-action' });
+    assert.strictEqual(res.found, true);
+    assert.strictEqual(res.traceLink.work.key, 'MED-42');
+    assert.strictEqual(res.riskClass, 'CLASS_C');
+  });
+
+  test.it('dispatches verify-iec-compliance from payload.context.moduleKey without a second context argument', async () => {
+    const payload = { prDiff: 'diff --git a/pump.c b/pump.c\n+ clamp bolus motor rate 5.5', context: { moduleKey: 'verify-iec-compliance-action' } };
+    const res = await rovoActionHandler(payload);
+    assert.strictEqual(res.touchesSafetyCriticalCode, true);
+    assert.ok(res.graphBlastRadius);
+  });
+
+  test.it('returns availableTools for an unknown moduleKey', async () => {
+    const res = await rovoActionHandler({ context: { moduleKey: 'nope-action' } }, { moduleKey: 'nope-action' });
+    assert.match(res.error, /Unknown action/);
+    assert.ok(Array.isArray(res.availableTools));
   });
 });
 
@@ -690,5 +866,63 @@ test.describe('Deterministic Regulatory Blast Radius & Transitive Impact Analyze
     assert.strictEqual(report.affectedHazardKeys.includes('HAZ-SYNTH-0'), true);
     assert.ok(totalTimeMs < 20, `500-node graph traversal took ${totalTimeMs.toFixed(2)}ms, exceeding 20ms ceiling`);
     assert.ok(report.executionTimeMs < 20, `Report internal timer ${report.executionTimeMs}ms exceeds 20ms`);
+  });
+
+  test.it('defaults to the first link when the trigger is empty or whitespace', () => {
+    const secondLink = {
+      id: 'trace-second',
+      complianceState: 'VERIFIED',
+      violations: [],
+      hazard: { ...sampleSuite.traceLinks[0].hazard, id: 'haz-999', key: 'HAZ-999' },
+      spec: { ...sampleSuite.traceLinks[0].spec, id: 'srs-999', title: 'SRS-999: Unrelated' },
+      work: { ...sampleSuite.traceLinks[0].work, id: 'med-777', key: 'MED-777' },
+      test: { ...sampleSuite.traceLinks[0].test, id: 'test-777', testKey: 'TEST-777' },
+      signature: { ...sampleSuite.traceLinks[0].signature, id: 'sig-777' },
+    };
+    const twoLinks = { ...sampleSuite, traceLinks: [sampleSuite.traceLinks[0], secondLink] };
+    for (const trigger of ['', '   ']) {
+      const report = ComplianceEngine.computeBlastRadius(trigger, twoLinks);
+      assert.deepStrictEqual(report.blockedWorkItemKeys, ['MED-42'], `Trigger "${trigger}" must not sweep the whole suite`);
+      assert.strictEqual(report.triggerArtifact.id, 'srs-104');
+    }
+  });
+
+  test.it('propagates blast radius transitively to sibling links sharing the hazard node', () => {
+    const linkA = { ...sampleSuite.traceLinks[0], id: 'trace-A' };
+    const linkB = {
+      id: 'trace-B',
+      complianceState: 'VERIFIED',
+      violations: [],
+      hazard: { ...sampleSuite.traceLinks[0].hazard, mitigationRequirementId: 'srs-105' },
+      spec: {
+        id: 'srs-105',
+        title: 'SRS-105: Secondary Watchdog Timer',
+        version: 1,
+        sha256Hash: 'hash-b-current-content',
+        lastSignedHash: 'hash-b-current-content',
+        isSignatureInvalidated: false,
+        contentSnippet: 'Watchdog clause',
+        lastUpdated: '1 day ago',
+      },
+      work: { id: 'med-43', key: 'MED-43', title: 'Watchdog Timer Task', status: 'Done', assignee: 'K. Patel' },
+      test: { id: 'test-89', testKey: 'TEST-89', title: 'Watchdog Timeout Test', testType: 'Unit Test', status: 'PASSED' },
+      signature: {
+        id: 'sig-002',
+        signedBy: 'R. Adams',
+        signedAt: '2026-10-20T00:00:00Z',
+        role: 'QA Director',
+        meaning: 'Approval',
+        artifactSha256: 'hash-b-current-content',
+        isValid: true,
+      },
+    };
+
+    const report = ComplianceEngine.computeBlastRadius('srs-104', { ...sampleSuite, traceLinks: [linkA, linkB] });
+
+    assert.deepStrictEqual(report.affectedHazardKeys, ['HAZ-101']);
+    assert.deepStrictEqual(report.blockedWorkItemKeys, ['MED-42', 'MED-43']);
+    assert.deepStrictEqual(report.invalidatedTestKeys, ['TEST-88', 'TEST-89']);
+    assert.strictEqual(report.traversalPath.length, 7, 'Expected 4 hops on link A + 3 newly discovered hops on sibling link B');
+    assert.ok(report.traversalPath.some((h) => h.edge === 'MITIGATES' && h.from.includes('SRS-105')), 'Sibling spec must appear as its own MITIGATES hop');
   });
 });

@@ -25,7 +25,7 @@ Implement a dual-engine architecture in `src/teamwork-graph.ts`:
 | Path | Role |
 |---|---|
 | `src/teamwork-graph.ts` | Teamwork Graph AGG GraphQL query runner with REST fallback. |
-| `src/types.ts` | Type definitions for `GraphMetadata` and `GraphContext`. |
+| `src/types.ts` | Type definitions for `GraphMetadata` (AGG context is returned as raw GraphQL data, REST JSON, or `null`). |
 | `static/frontend/src/components/InspectionDrawer.tsx` | UI component displaying graph entity details. |
 
 ## Related

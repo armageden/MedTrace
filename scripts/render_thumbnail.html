@@ -1,0 +1,441 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    width: 1200px;
+    height: 800px;
+    overflow: hidden;
+    background: #040914;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+    color: #ffffff;
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    padding: 48px 56px;
+  }
+
+  /* Background Ambient Glows & Grid */
+  .glow-top-right {
+    position: absolute;
+    top: -120px;
+    right: -100px;
+    width: 600px;
+    height: 600px;
+    background: radial-gradient(circle, rgba(0, 199, 229, 0.22) 0%, rgba(0, 82, 204, 0.15) 45%, transparent 70%);
+    filter: blur(40px);
+    pointer-events: none;
+  }
+  .glow-bottom-left {
+    position: absolute;
+    bottom: -150px;
+    left: -100px;
+    width: 650px;
+    height: 650px;
+    background: radial-gradient(circle, rgba(54, 179, 126, 0.18) 0%, rgba(0, 82, 204, 0.12) 50%, transparent 70%);
+    filter: blur(50px);
+    pointer-events: none;
+  }
+  .grid-pattern {
+    position: absolute;
+    inset: 0;
+    background-image: 
+      linear-gradient(rgba(255, 255, 255, 0.03) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(255, 255, 255, 0.03) 1px, transparent 1px);
+    background-size: 40px 40px;
+    opacity: 0.8;
+    pointer-events: none;
+  }
+
+  /* Header Section */
+  .header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    position: relative;
+    z-index: 10;
+  }
+  .brand-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    background: rgba(0, 82, 204, 0.2);
+    border: 1px solid rgba(0, 199, 229, 0.4);
+    padding: 8px 16px;
+    border-radius: 999px;
+    font-size: 13px;
+    font-weight: 700;
+    letter-spacing: 0.8px;
+    color: #00C7E5;
+    text-transform: uppercase;
+    box-shadow: 0 0 20px rgba(0, 199, 229, 0.15);
+  }
+  .track-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    background: rgba(255, 171, 0, 0.15);
+    border: 1px solid rgba(255, 171, 0, 0.45);
+    padding: 8px 16px;
+    border-radius: 999px;
+    font-size: 13px;
+    font-weight: 700;
+    color: #FFAB00;
+    letter-spacing: 0.5px;
+  }
+
+  /* Main Hero Area */
+  .hero-container {
+    display: flex;
+    gap: 40px;
+    align-items: center;
+    position: relative;
+    z-index: 10;
+    margin: auto 0;
+  }
+
+  .hero-left {
+    flex: 1.15;
+  }
+  .title-line {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    margin-bottom: 12px;
+  }
+  .logo-shield {
+    width: 64px;
+    height: 64px;
+    background: linear-gradient(135deg, #0052CC 0%, #00C7E5 100%);
+    border-radius: 16px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    box-shadow: 0 8px 30px rgba(0, 199, 229, 0.35);
+  }
+  h1 {
+    font-size: 66px;
+    font-weight: 900;
+    letter-spacing: -1.5px;
+    line-height: 1;
+    background: linear-gradient(180deg, #FFFFFF 30%, #B3D4FF 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+  .subtitle {
+    font-size: 23px;
+    font-weight: 600;
+    color: #A5B2C6;
+    line-height: 1.35;
+    margin-bottom: 24px;
+  }
+  .subtitle strong {
+    color: #FFFFFF;
+  }
+
+  .pill-matrix {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin-bottom: 24px;
+  }
+  .spec-pill {
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    padding: 7px 14px;
+    border-radius: 8px;
+    font-size: 13px;
+    font-weight: 600;
+    color: #DFE1E6;
+    display: flex;
+    align-items: center;
+    gap: 7px;
+  }
+  .spec-pill.highlight {
+    background: rgba(0, 199, 229, 0.12);
+    border-color: rgba(0, 199, 229, 0.35);
+    color: #E6FCFF;
+  }
+
+  /* Hero Right: 3D-Styled Living Pipeline Card */
+  .hero-right {
+    flex: 1.1;
+    background: rgba(13, 23, 42, 0.82);
+    border: 1.5px solid rgba(0, 199, 229, 0.28);
+    border-radius: 20px;
+    padding: 24px;
+    backdrop-filter: blur(20px);
+    box-shadow: 
+      0 20px 50px rgba(0, 0, 0, 0.6),
+      0 0 40px rgba(0, 82, 204, 0.2);
+    position: relative;
+  }
+
+  .pipeline-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+    padding-bottom: 14px;
+    margin-bottom: 16px;
+  }
+  .pipeline-title {
+    font-size: 13px;
+    font-weight: 800;
+    letter-spacing: 0.8px;
+    color: #79F2C0;
+    text-transform: uppercase;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .pipeline-bench {
+    font-size: 11px;
+    font-family: monospace;
+    background: rgba(54, 179, 126, 0.15);
+    border: 1px solid rgba(54, 179, 126, 0.3);
+    color: #57D9A3;
+    padding: 3px 8px;
+    border-radius: 5px;
+  }
+
+  /* Pipeline 5-Stage Items */
+  .pipeline-stages {
+    display: flex;
+    flex-direction: column;
+    gap: 9px;
+  }
+  .stage-row {
+    display: flex;
+    align-items: center;
+    background: rgba(255, 255, 255, 0.035);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 10px;
+    padding: 10px 14px;
+    gap: 12px;
+  }
+  .stage-row.alert {
+    background: rgba(222, 53, 11, 0.12);
+    border-color: rgba(255, 86, 48, 0.4);
+    box-shadow: 0 0 15px rgba(222, 53, 11, 0.2);
+  }
+  .stage-row.warn {
+    background: rgba(255, 171, 0, 0.1);
+    border-color: rgba(255, 171, 0, 0.35);
+  }
+  .stage-badge {
+    font-size: 10px;
+    font-weight: 800;
+    letter-spacing: 0.5px;
+    padding: 3px 7px;
+    border-radius: 5px;
+    min-width: 82px;
+    text-align: center;
+  }
+  .stage-badge.red { background: #FF5630; color: #FFFFFF; }
+  .stage-badge.yellow { background: #FFAB00; color: #172B4D; }
+  .stage-badge.blue { background: #0052CC; color: #FFFFFF; }
+  .stage-badge.green { background: #36B37E; color: #040914; }
+
+  .stage-info {
+    flex: 1;
+    min-width: 0;
+  }
+  .stage-name {
+    font-size: 13px;
+    font-weight: 700;
+    color: #FFFFFF;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .stage-desc {
+    font-size: 11px;
+    color: #8993A4;
+  }
+  .stage-status {
+    font-size: 11px;
+    font-weight: 700;
+  }
+  .stage-status.red { color: #FF5630; }
+  .stage-status.yellow { color: #FFAB00; }
+  .stage-status.green { color: #57D9A3; }
+
+  /* Gate Alert Banner */
+  .gate-lock-banner {
+    margin-top: 14px;
+    background: linear-gradient(90deg, rgba(222, 53, 11, 0.3) 0%, rgba(222, 53, 11, 0.15) 100%);
+    border: 1px solid #FF5630;
+    border-radius: 8px;
+    padding: 9px 14px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-size: 12px;
+    font-weight: 700;
+    color: #FFBDAD;
+  }
+
+  /* Footer */
+  .footer {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    border-top: 1px solid rgba(255, 255, 255, 0.08);
+    padding-top: 18px;
+    position: relative;
+    z-index: 10;
+    font-size: 12px;
+    color: #7A869A;
+    letter-spacing: 0.6px;
+  }
+  .footer-tech {
+    display: flex;
+    gap: 20px;
+    font-weight: 600;
+  }
+  .footer-tech span {
+    color: #C1C7D0;
+  }
+  .footer-security {
+    color: #57D9A3;
+    font-weight: 700;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+</style>
+</head>
+<body>
+  <div class="glow-top-right"></div>
+  <div class="glow-bottom-left"></div>
+  <div class="grid-pattern"></div>
+
+  <!-- Header -->
+  <div class="header">
+    <div class="brand-badge">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#00C7E5" stroke-width="2.5">
+        <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon>
+      </svg>
+      Built on Atlassian Forge • Codegeist 2026
+    </div>
+    <div class="track-pill">
+      <span>🏆</span> Apps for Specialized Industries
+    </div>
+  </div>
+
+  <!-- Hero Content Area -->
+  <div class="hero-container">
+    <div class="hero-left">
+      <div class="title-line">
+        <div class="logo-shield">
+          <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path>
+            <path d="m9 12 2 2 4-4"></path>
+          </svg>
+        </div>
+        <h1>MedTrace</h1>
+      </div>
+      <div class="subtitle">
+        Deterministic <strong>IEC 62304 & ISO 14971</strong> Regulatory Traceability & Blast Radius Engine
+      </div>
+
+      <div class="pill-matrix">
+        <div class="spec-pill highlight">
+          <span>⚡</span> Sub-20ms BFS Graph Traversal
+        </div>
+        <div class="spec-pill">
+          <span>🔒</span> Fail-Closed Release Gate
+        </div>
+        <div class="spec-pill">
+          <span>📜</span> FDA 21 CFR Part 11 Audit Trail
+        </div>
+        <div class="spec-pill">
+          <span>🤖</span> Atlassian Rovo & Cursor MCP
+        </div>
+      </div>
+    </div>
+
+    <!-- Living Pipeline Graphic -->
+    <div class="hero-right">
+      <div class="pipeline-header">
+        <div class="pipeline-title">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#79F2C0" stroke-width="2.5">
+            <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline>
+          </svg>
+          Living Regulatory Chain
+        </div>
+        <div class="pipeline-bench">BFS &lt;20ms</div>
+      </div>
+
+      <div class="pipeline-stages">
+        <div class="stage-row alert">
+          <div class="stage-badge red">1. HAZARD</div>
+          <div class="stage-info">
+            <div class="stage-name">HAZ-101: Bolus Over-Infusion</div>
+            <div class="stage-desc">ISO 14971 Class C Catastrophic</div>
+          </div>
+          <div class="stage-status red">UNVERIFIED</div>
+        </div>
+
+        <div class="stage-row warn">
+          <div class="stage-badge yellow">2. SRS SPEC</div>
+          <div class="stage-info">
+            <div class="stage-name">SRS-104: Hardware Bolus Clamp</div>
+            <div class="stage-desc">Confluence v3 post-signoff edit</div>
+          </div>
+          <div class="stage-status yellow">DRIFT ⚠️</div>
+        </div>
+
+        <div class="stage-row alert">
+          <div class="stage-badge blue">3. JIRA TASK</div>
+          <div class="stage-info">
+            <div class="stage-name">MED-42: Dual-Core PWM Clamp</div>
+            <div class="stage-desc">Pull Request #142 firmware change</div>
+          </div>
+          <div class="stage-status red">LOCKED 🔒</div>
+        </div>
+
+        <div class="stage-row alert">
+          <div class="stage-badge red">4. HIL TEST</div>
+          <div class="stage-info">
+            <div class="stage-name">TEST-88: Motor Stress Run</div>
+            <div class="stage-desc">Hardware-in-the-Loop benchmark</div>
+          </div>
+          <div class="stage-status red">UNTESTED ❌</div>
+        </div>
+
+        <div class="stage-row warn">
+          <div class="stage-badge green">5. PART 11</div>
+          <div class="stage-info">
+            <div class="stage-name">Chief Medical Officer Approval</div>
+            <div class="stage-desc">SHA-256 e-Signature Digest</div>
+          </div>
+          <div class="stage-status yellow">REVOKED</div>
+        </div>
+      </div>
+
+      <div class="gate-lock-banner">
+        <span>🚨 JIRA SAFETY GATE: Transition to Done BLOCKED</span>
+        <span style="font-family: monospace; font-size: 11px;">[ECO-624 Preempted]</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Footer -->
+  <div class="footer">
+    <div class="footer-tech">
+      <span>Jira Cloud</span> • <span>Confluence Cloud</span> • <span>Teamwork Graph (AGG)</span> • <span>Forge KVS</span> • <span>React 18 + @xyflow</span>
+    </div>
+    <div class="footer-security">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#57D9A3" stroke-width="2.5">
+        <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path>
+      </svg>
+      ZERO OUTBOUND EGRESS • TENANT CONFINED
+    </div>
+  </div>
+</body>
+</html>

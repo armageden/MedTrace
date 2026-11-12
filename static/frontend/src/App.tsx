@@ -1,5 +1,5 @@
-import React, { useEffect, useState } from 'react';
-import { invoke } from '@forge/bridge';
+import React, { useEffect, useRef, useState } from 'react';
+import { invoke, view } from '@forge/bridge';
 import { ComplianceSummary, BlastRadiusReport } from './types';
 import { AuditHeader } from './components/AuditHeader';
 import { LineageGraph } from './components/LineageGraph';
@@ -7,143 +7,75 @@ import { TraceMatrixTable } from './components/TraceMatrixTable';
 import { InspectionDrawer } from './components/InspectionDrawer';
 import { FdaExportModal } from './components/FdaExportModal';
 import { TransitionModal } from './components/TransitionModal';
+import { ShieldCheck } from 'lucide-react';
 
-// Initial fallback mock data for smooth local rendering / offline previews
-const fallbackSummary: ComplianceSummary = {
-  projectName: 'Smart Infusion Pump Firmware v2.1',
-  standards: [
-    'IEC 62304:2006+A1:2015 (Medical Device Software Lifecycle)',
-    'ISO 14971:2019 (Risk Management for Medical Devices)',
-    'FDA 21 CFR Part 11 (Electronic Records & Signatures)',
-  ],
-  totalHazards: 1,
-  classCCount: 1,
-  classBCount: 0,
-  classACount: 0,
-  verifiedPercentage: 0,
-  releaseBlocked: true,
-  blockingReasons: [
-    'IEC 62304 Critical Gap: Class C Hazard [HAZ-101] requires verified test coverage. Current test [TEST-88] status is UNTESTED.',
-  ],
-  signatureDriftCount: 1,
-  lastAuditTimestamp: new Date().toISOString(),
-  traceLinks: [
-    {
-      id: 'trace-HAZ-101',
-      complianceState: 'SAFETY_VIOLATION',
-      violations: [
-        'IEC 62304 Critical Gap: Class C Hazard [HAZ-101] requires verified test coverage. Current test [TEST-88] status is UNTESTED.',
-        '21 CFR Part 11 Signature Drift: Confluence Spec modified after sign-off.',
-      ],
-      hazard: {
-        id: 'haz-101',
-        key: 'HAZ-101',
-        title: 'Over-Infusion Hazard: Bolus delivery exceeds 5.0 mL/hr clinical safety threshold',
-        riskClass: 'CLASS_C',
-        severity: 'CATASTROPHIC',
-        probability: 'OCCASIONAL',
-        mitigationRequirementId: 'srs-104',
-        status: 'UNVERIFIED_RISK',
-      },
-      spec: {
-        id: 'srs-104',
-        title: 'SRS-104: Dual-Core Microcontroller Hardware Bolus Clamp (Max 5.0 mL/hr)',
-        version: 3,
-        sha256Hash: 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
-        lastSignedHash: 'a789ef2398fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b112',
-        isSignatureInvalidated: true,
-        contentSnippet: 'Clause 4.2.1: Bolus rate must be hardware-clamped by MCU2 with 10ms watchdog timeout.',
-        lastUpdated: '10 minutes ago (Modified by engineer: changed threshold 5.0 -> 5.5 mL/hr)',
-      },
-      work: {
-        id: 'med-42',
-        key: 'MED-42',
-        title: 'Implement Dual-Core Hardware PWM Clamp on Infusion Motor',
-        status: 'In Progress',
-        assignee: 'Dr. Sarah Lin (Lead Firmware)',
-        prNumber: '#142',
-        commitSha: '7f9a12c',
-      },
-      test: {
-        id: 'test-88',
-        testKey: 'TEST-88',
-        title: 'Hardware-in-the-Loop Occlusion & Over-Infusion Motor Stress Test',
-        testType: 'Automated HIL (Hardware-in-Loop)',
-        status: 'UNTESTED',
-        executionDate: 'Pending HIL Bench Run',
-        evidenceUrl: 'https://ci.medical-devices.internal/test-runs/hil-88',
-      },
-      signature: {
-        id: 'sig-001',
-        signedBy: 'Marcus Vance, MD (Chief Medical Officer)',
-        signedAt: '2026-10-15T11:30:00Z',
-        role: 'Clinical Safety Authority',
-        meaning: 'Approval of ISO 14971 Risk Assessment & Mitigation Architecture',
-        artifactSha256: 'a789ef2398fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b112',
-        isValid: false,
-        invalidationReason: 'AUTOMATIC REVOCATION: Confluence spec modified at version 3 without clinical re-signature.',
-      },
-      graphMetadata: {
-        entityAri: 'ari:cloud:jira:5cbf2ff9-658a-44d8-9004-dbe8a96e952b:issue/10042',
-        linkedSpecAri: 'ari:cloud:confluence:d601ebde-589a-45d8-ab19-a8edfb1d5a47:page/98304',
-        edgeType: 'iso14971:mitigates-hazard -> atlassian:work-item-links-page',
-        aggTraversalStatus: 'TRAVERSED (AGG GraphQL Gateway 200 OK)',
-      },
-    },
-  ],
-};
+// A transition-gate evaluation outcome. `evalError` marks a backend evaluation failure:
+// the UI must never render a blocked/approved verdict that the validator did not actually produce.
+type TransitionResult = { result: boolean; errorMessage?: string; evalError?: string };
 
 export const App: React.FC = () => {
-  const [summary, setSummary] = useState<ComplianceSummary>(fallbackSummary);
+  // Null until the live suite arrives — no built-in fake dataset in a compliance tool.
+  const [summary, setSummary] = useState<ComplianceSummary | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const [activeView, setActiveView] = useState<'graph' | 'table'>('graph');
-  const [selectedLinkId, setSelectedLinkId] = useState<string | null>('trace-HAZ-101');
+  const [selectedLinkId, setSelectedLinkId] = useState<string | null>(null);
   const [isExportOpen, setIsExportOpen] = useState(false);
   const [isSeeding, setIsSeeding] = useState(false);
   const [isRemediating, setIsRemediating] = useState(false);
-  const [transitionResult, setTransitionResult] = useState<{ result: boolean; errorMessage?: string } | null>(null);
+  const isSeedingRef = useRef(isSeeding);
+  const isRemediatingRef = useRef(isRemediating);
+  useEffect(() => { isSeedingRef.current = isSeeding; }, [isSeeding]);
+  useEffect(() => { isRemediatingRef.current = isRemediating; }, [isRemediating]);
+  const [transitionResult, setTransitionResult] = useState<TransitionResult | null>(null);
   const [isTransitionModalOpen, setIsTransitionModalOpen] = useState(false);
   const [blastRadius, setBlastRadius] = useState<BlastRadiusReport | null>(null);
   const [isAnalyzingBlastRadius, setIsAnalyzingBlastRadius] = useState(false);
+  const [graphContext, setGraphContext] = useState<any>(null);
+
+  // Live Teamwork Graph (AGG GraphQL) context query, fired once per mount using the current issue key
+  const loadAndProbe = async () => {
+    try {
+      const ctx = await view.getContext();
+      const issueKey = ctx?.extension?.issue?.key || 'MED-42';
+      const res = await invoke('queryGraphContext', { issueKey });
+      setGraphContext(res);
+    } catch {
+      try {
+        const res = await invoke('queryGraphContext', { issueKey: 'MED-42' });
+        setGraphContext(res);
+      } catch {
+        setGraphContext(null);
+      }
+    }
+  };
+
+  const loadData = async () => {
+    try {
+      const result = (await invoke('getComplianceSuite')) as ComplianceSummary;
+      if (result && result.traceLinks) {
+        setSummary(result);
+        setNotice(null);
+        loadAndProbe();
+      }
+    } catch (err) {
+      console.warn('Forge bridge invoke failed:', err);
+      setNotice('Live compliance suite could not be loaded from the Forge backend. Nothing is simulated in its place — retry or click "Seed Demo Suite".');
+    }
+  };
 
   // Deterministic Regulatory Blast Radius & Transitive Impact Analyzer
   const handleAnalyzeBlastRadius = async () => {
     setIsAnalyzingBlastRadius(true);
     try {
-      const report = (await invoke('analyzeBlastRadius', { triggerKey: 'srs-104' })) as BlastRadiusReport;
+      const triggerKey = selectedLink?.spec?.id || 'srs-104';
+      const report = (await invoke('analyzeBlastRadius', { triggerKey })) as BlastRadiusReport;
       if (report) {
         setBlastRadius(report);
-        setSelectedLinkId('trace-HAZ-101');
+        setSelectedLinkId(selectedLink?.id || 'trace-HAZ-101');
       }
     } catch {
-      // Offline / local preview simulation
-      setBlastRadius({
-        triggerArtifact: {
-          type: 'SPEC',
-          id: 'srs-104',
-          key: 'SRS-104',
-          title: 'SRS-104: Dual-Core Microcontroller Hardware Bolus Clamp',
-          deltaReason: 'Content modified at v3 (changed threshold 5.0 -> 5.5 mL/hr)',
-        },
-        impactSeverity: 'CRITICAL_CATASTROPHIC',
-        affectedHazardKeys: ['HAZ-101'],
-        blockedWorkItemKeys: ['MED-42'],
-        invalidatedTestKeys: ['TEST-88'],
-        invalidatedSignatureIds: ['sig-001'],
-        traversalPath: [
-          { hop: 1, from: 'Spec [SRS-104]', edge: 'SIGNS', to: 'Signature [Marcus Vance, MD]', effect: 'Signature evidence invalidated: hash drift detected (expected a789ef23..., current e3b0c442...).' },
-          { hop: 2, from: 'Spec [SRS-104]', edge: 'MITIGATES', to: 'Hazard [HAZ-101]', effect: 'Safety mitigation compromised: Bolus Over-Infusion Hazard (Class C).' },
-          { hop: 3, from: 'Hazard [HAZ-101]', edge: 'IMPLEMENTS', to: 'Jira Item [MED-42]', effect: 'Human-initiated transition blocked: Firmware task assigned to Dr. Sarah Lin locked under policy gate.' },
-          { hop: 4, from: 'Hazard [HAZ-101]', edge: 'VERIFIES', to: 'Test [TEST-88]', effect: 'Verification test evidence invalidated: must be executed against new specification parameters.' },
-        ],
-        transitiveActionPlan: [
-          'Re-certify clinical sign-off with Marcus Vance, MD (Chief Medical Officer) for revised spec.',
-          'Review ISO 14971 risk mitigations for HAZ-101 against revised specifications.',
-          'Verify firmware implementation in MED-42 matches updated parameters.',
-          'Execute automated verification run for TEST-88 (Automated HIL) to regenerate passing evidence.',
-        ],
-        executionTimeMs: 1.7,
-      });
-      setSelectedLinkId('trace-HAZ-101');
+      setBlastRadius(null);
+      setNotice('Blast radius analysis failed on the Forge backend — no simulated report is shown.');
     } finally {
       setIsAnalyzingBlastRadius(false);
     }
@@ -152,57 +84,48 @@ export const App: React.FC = () => {
   // Test Jira Transition Validator Lockout
   const handleTestTransition = async () => {
     try {
-      const res = (await invoke('simulateTransition')) as { result: boolean; errorMessage?: string };
+      let issueKey = 'MED-42';
+      try {
+        const ctx = await view.getContext();
+        const currentKey = ctx?.extension?.issue?.key;
+        const linked = !!currentKey && !!summary?.traceLinks?.some((l) => l.work?.key === currentKey);
+        issueKey = linked ? (currentKey as string) : 'MED-42';
+      } catch {}
+      const res = (await invoke('simulateTransition', { issueKey })) as TransitionResult;
       setTransitionResult(res);
     } catch {
-      // Local preview fallback based on current state
-      if (summary.releaseBlocked) {
-        setTransitionResult({
-          result: false,
-          errorMessage:
-            '❌ [MedTrace Safety Gate] Transition Blocked!\n• IEC 62304 Critical Gap: Class C Hazard [HAZ-101] requires verified test coverage (TEST-88 is UNTESTED).\n• 21 CFR Part 11 Signature Drift: Confluence Spec modified at v3 without clinical re-certification.',
-        });
-      } else {
-        setTransitionResult({ result: true });
-      }
+      setTransitionResult({
+        result: false,
+        evalError: 'Forge backend could not evaluate the safety gate — no transition decision was made.',
+      });
     }
     setIsTransitionModalOpen(true);
   };
 
   // Load from Forge backend on mount + live background polling for Rovo Chat & MCP updates
   useEffect(() => {
-    async function loadData() {
-      try {
-        const result = (await invoke('getComplianceSuite')) as ComplianceSummary;
-        if (result && result.traceLinks) {
-          setSummary(result);
-        }
-        // Execute real Teamwork Graph (AGG GraphQL) context query
-        invoke('queryGraphContext', { issueKey: 'MED-42' }).catch(() => {});
-      } catch (err) {
-        console.warn('Forge bridge invoke notice (using local demo suite):', err);
-      }
-    }
-
     loadData();
 
-    // Adaptive 8-second polling active only when tab is visible (saves Forge serverless quotas)
+    // Adaptive 8-second polling active only when tab is visible (saves Forge serverless quotas).
+    // A failed poll leaves state untouched — it never fabricates an update.
     const pollInterval = setInterval(async () => {
       if (typeof document !== 'undefined' && document.visibilityState !== 'visible') {
         return;
       }
       try {
+        if (isSeedingRef.current || isRemediatingRef.current) return;
         const latest = (await invoke('getComplianceSuite')) as ComplianceSummary;
         if (latest && latest.traceLinks) {
           setSummary((prev) => {
             if (
-              prev.lastAuditTimestamp !== latest.lastAuditTimestamp ||
-              prev.releaseBlocked !== latest.releaseBlocked ||
-              prev.verifiedPercentage !== latest.verifiedPercentage
+              prev &&
+              prev.lastAuditTimestamp === latest.lastAuditTimestamp &&
+              prev.releaseBlocked === latest.releaseBlocked &&
+              prev.verifiedPercentage === latest.verifiedPercentage
             ) {
-              return latest;
+              return prev;
             }
-            return prev;
+            return latest;
           });
         }
       } catch {}
@@ -231,10 +154,11 @@ export const App: React.FC = () => {
       const resp = (await invoke('seedDemoSuite')) as any;
       if (resp && resp.summary) {
         setSummary(resp.summary);
+        setNotice(null);
+        setBlastRadius(null);
       }
     } catch {
-      // Local preview fallback
-      setSummary({ ...fallbackSummary });
+      setNotice('Seeding failed — the Forge backend is unreachable. Existing state was NOT changed.');
     } finally {
       setIsSeeding(false);
     }
@@ -242,56 +166,66 @@ export const App: React.FC = () => {
 
   // Remediate Class C Gap (Hero Demo Fix)
   const handleRemediate = async () => {
+    if (!selectedLink) return;
     setIsRemediating(true);
     try {
-      const resp = (await invoke('remediateGap')) as ComplianceSummary;
+      const resp = (await invoke('remediateGap', { hazardKey: selectedLink.hazard.key })) as ComplianceSummary;
       if (resp && resp.traceLinks) {
         setSummary(resp);
+        setBlastRadius(null);
       }
     } catch {
-      // Local preview simulation
-      const updatedLinks = summary.traceLinks.map((l) => {
-        if (l.hazard.key === 'HAZ-101') {
-          return {
-            ...l,
-            complianceState: 'VERIFIED' as const,
-            violations: [],
-            test: {
-              ...l.test,
-              status: 'PASSED' as const,
-              executionDate: 'Just now (Automated HIL Run: 120/120 Passed)',
-            },
-            spec: {
-              ...l.spec,
-              isSignatureInvalidated: false,
-            },
-            signature: {
-              ...l.signature,
-              artifactSha256: l.spec.sha256Hash,
-              isValid: true,
-              signedAt: new Date().toISOString(),
-              signedBy: 'Marcus Vance, MD (Re-certified)',
-              invalidationReason: undefined,
-            },
-          };
-        }
-        return l;
-      });
-
-      setSummary({
-        ...summary,
-        verifiedPercentage: 100,
-        releaseBlocked: false,
-        blockingReasons: [],
-        signatureDriftCount: 0,
-        traceLinks: updatedLinks,
-      });
+      setNotice('Remediation failed on the Forge backend — nothing was changed. The compliance gap remains OPEN.');
     } finally {
       setIsRemediating(false);
     }
   };
 
-  const selectedLink = summary.traceLinks.find((l) => l.id === selectedLinkId) || null;
+  const selectedLink = summary ? summary.traceLinks.find((l) => l.id === selectedLinkId) || null : null;
+
+  // Pre-load screen: never render a fabricated suite while the live one is unavailable
+  if (!summary) {
+    return (
+      <div
+        style={{
+          minHeight: '100vh',
+          background: '#f4f5f7',
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          justifyContent: 'center',
+          gap: 14,
+          fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
+          padding: 24,
+        }}
+      >
+        <div style={{ background: '#0052cc', borderRadius: 10, padding: 12, display: 'flex' }}>
+          <ShieldCheck size={30} color="#ffffff" />
+        </div>
+        <div style={{ fontSize: 16, fontWeight: 800, color: '#172b4d' }}>Loading MedTrace compliance suite…</div>
+        {notice && (
+          <div style={{ maxWidth: 480, fontSize: 12, color: '#de350b', textAlign: 'center', lineHeight: '18px' }}>
+            {notice}
+          </div>
+        )}
+        <button
+          onClick={loadData}
+          style={{
+            padding: '8px 18px',
+            borderRadius: 6,
+            border: '1.5px solid #0052cc',
+            background: '#deebff',
+            color: '#0052cc',
+            fontWeight: 700,
+            fontSize: 12,
+            cursor: 'pointer',
+          }}
+        >
+          Retry Live Load
+        </button>
+      </div>
+    );
+  }
 
   return (
     <div style={{ minHeight: '100vh', background: '#f4f5f7', display: 'flex', flexDirection: 'column' }}>
@@ -308,6 +242,35 @@ export const App: React.FC = () => {
         isAnalyzingBlastRadius={isAnalyzingBlastRadius}
       />
 
+      {/* Honest-error banner: backend failures are surfaced, never papered over */}
+      {notice && (
+        <div
+          style={{
+            margin: '12px 24px 0',
+            padding: '10px 14px',
+            borderRadius: 6,
+            background: '#ffebe6',
+            border: '1px solid #ffbdad',
+            color: '#bf2600',
+            fontSize: 12,
+            fontWeight: 600,
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'center',
+            gap: 12,
+          }}
+        >
+          <span>⚠️ {notice}</span>
+          <button
+            onClick={() => setNotice(null)}
+            style={{ border: 'none', background: 'transparent', color: '#bf2600', cursor: 'pointer', fontWeight: 700, fontSize: 13 }}
+            title="Dismiss"
+          >
+            ✕
+          </button>
+        </div>
+      )}
+
       {/* Main Workspace Body */}
       <div style={{ flex: 1, padding: '20px 24px' }}>
         {activeView === 'graph' ? (
@@ -321,6 +284,7 @@ export const App: React.FC = () => {
       <InspectionDrawer
         link={selectedLink}
         blastRadius={blastRadius}
+        graphContext={graphContext}
         onClose={() => setSelectedLinkId(null)}
         onRemediate={handleRemediate}
         isRemediating={isRemediating}

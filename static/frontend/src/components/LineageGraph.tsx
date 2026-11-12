@@ -6,6 +6,7 @@ import {
   MiniMap,
   Node,
   Edge,
+  NodeTypes,
   MarkerType,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
@@ -48,7 +49,7 @@ export const LineageGraph: React.FC<LineageGraphProps> = ({ summary, onSelectTra
         id: `node-${link.hazard.id}`,
         type: 'hazard',
         position: { x: colX.hazard, y: yPos },
-        data: link.hazard,
+        data: link.hazard as unknown as Record<string, unknown>,
       });
 
       // 2. Confluence Spec Node
@@ -56,7 +57,7 @@ export const LineageGraph: React.FC<LineageGraphProps> = ({ summary, onSelectTra
         id: `node-${link.spec.id}`,
         type: 'spec',
         position: { x: colX.spec, y: yPos },
-        data: link.spec,
+        data: link.spec as unknown as Record<string, unknown>,
       });
 
       // 3. Jira Work Item Node
@@ -64,7 +65,7 @@ export const LineageGraph: React.FC<LineageGraphProps> = ({ summary, onSelectTra
         id: `node-${link.work.id}`,
         type: 'work',
         position: { x: colX.work, y: yPos },
-        data: link.work,
+        data: link.work as unknown as Record<string, unknown>,
       });
 
       // 4. Verification Test Node
@@ -72,7 +73,7 @@ export const LineageGraph: React.FC<LineageGraphProps> = ({ summary, onSelectTra
         id: `node-${link.test.id}`,
         type: 'test',
         position: { x: colX.test, y: yPos },
-        data: link.test,
+        data: link.test as unknown as Record<string, unknown>,
       });
 
       // 5. 21 CFR Part 11 Signature Node
@@ -80,7 +81,7 @@ export const LineageGraph: React.FC<LineageGraphProps> = ({ summary, onSelectTra
         id: `node-${link.signature.id}`,
         type: 'signature',
         position: { x: colX.signature, y: yPos },
-        data: link.signature,
+        data: link.signature as unknown as Record<string, unknown>,
       });
 
       // Edges connecting the 5 stages
@@ -125,7 +126,8 @@ export const LineageGraph: React.FC<LineageGraphProps> = ({ summary, onSelectTra
       });
     });
 
-    return { nodes: calculatedNodes, edges: calculatedEdges };
+    const dedupedNodes = calculatedNodes.filter((n, i, arr) => arr.findIndex((x) => x.id === n.id) === i);
+    return { nodes: dedupedNodes, edges: calculatedEdges };
   }, [summary]);
 
   return (
@@ -154,7 +156,7 @@ export const LineageGraph: React.FC<LineageGraphProps> = ({ summary, onSelectTra
       <ReactFlow
         nodes={nodes}
         edges={edges}
-        nodeTypes={nodeTypes}
+        nodeTypes={nodeTypes as NodeTypes}
         fitView
         onNodeClick={(_, node) => {
           const rawId = node.id.replace('node-', '');

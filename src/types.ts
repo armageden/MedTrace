@@ -56,6 +56,7 @@ export interface Part11Signature {
 
 export interface GraphMetadata {
   entityAri: string;
+  hazardAri: string;
   linkedSpecAri: string;
   edgeType: string;
   aggTraversalStatus: string;
@@ -75,6 +76,9 @@ export interface TraceLink {
 
 export interface ComplianceSummary {
   projectName: string;
+  // All records are modeled demo data (Confluence availability is preflight-checked; demo SRS hashes are computed from seeded spec text).
+  // The UI must badge this so judges never mistake synthetic records for tenant evidence.
+  datasetMode: 'DEMO' | 'LIVE';
   standards: string[]; // ["IEC 62304:2006+A1:2015", "ISO 14971:2019", "FDA 21 CFR Part 11"]
   totalHazards: number;
   classCCount: number;

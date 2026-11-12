@@ -1,6 +1,6 @@
 import React from 'react';
 import { Handle, Position } from '@xyflow/react';
-import { ShieldAlert, FileText, CheckCircle2, AlertOctagon, Lock, Unlock, GitPullRequest, Activity } from 'lucide-react';
+import { ShieldAlert, FileText, AlertOctagon, Lock, Unlock, GitPullRequest, Activity } from 'lucide-react';
 import { IsoHazard, ConfluenceSpec, JiraWorkItem, VerificationTest, Part11Signature } from '../types';
 
 interface NodeProps<T> {

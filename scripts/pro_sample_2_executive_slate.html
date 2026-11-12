@@ -1,0 +1,692 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>MedTrace - Professional Executive Slate</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    width: 1200px;
+    height: 800px;
+    overflow: hidden;
+    background: #0B1120;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+    color: #F8FAFC;
+    display: flex;
+    flex-direction: column;
+    padding: 32px 38px;
+    justify-content: space-between;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* Top Bar */
+  .top-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding-bottom: 20px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  }
+  .brand-group {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+  }
+  .brand-logo {
+    width: 48px;
+    height: 48px;
+    background: #0052CC;
+    border-radius: 10px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    box-shadow: 0 4px 14px rgba(0, 82, 204, 0.4);
+    border: 1px solid rgba(255, 255, 255, 0.15);
+  }
+  .brand-name {
+    font-size: 26px;
+    font-weight: 800;
+    letter-spacing: -0.4px;
+    color: #FFFFFF;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .brand-chip {
+    font-size: 10.5px;
+    font-weight: 800;
+    background: rgba(0, 82, 204, 0.35);
+    color: #4C9AFF;
+    border: 1px solid rgba(0, 82, 204, 0.5);
+    padding: 3px 8px;
+    border-radius: 4px;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+  }
+  .brand-subtitle {
+    font-size: 13.5px;
+    color: #94A3B8;
+    margin-top: 2px;
+    font-weight: 500;
+  }
+
+  .top-meta {
+    display: flex;
+    gap: 10px;
+  }
+  .meta-tag {
+    background: #1E293B;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    color: #CBD5E1;
+    font-size: 11px;
+    font-weight: 700;
+    padding: 6px 12px;
+    border-radius: 6px;
+    letter-spacing: 0.3px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .meta-tag b { color: #38BDF8; }
+
+  /* Main Workspace Split */
+  .main-split {
+    flex: 1;
+    display: grid;
+    grid-template-columns: 1.45fr 1fr;
+    gap: 20px;
+    padding: 20px 0;
+    overflow: hidden;
+  }
+
+  /* Left Panel: Continuous Pipeline */
+  .pipeline-panel {
+    background: #131D31;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 10px;
+    padding: 18px 20px;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    position: relative;
+    overflow: hidden;
+  }
+  .panel-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 12px;
+  }
+  .panel-title {
+    font-size: 12px;
+    font-weight: 800;
+    letter-spacing: 0.6px;
+    text-transform: uppercase;
+    color: #94A3B8;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .panel-badge-red {
+    font-size: 10px;
+    font-weight: 800;
+    background: rgba(239, 68, 68, 0.2);
+    border: 1px solid rgba(239, 68, 68, 0.4);
+    color: #F87171;
+    padding: 2px 7px;
+    border-radius: 4px;
+  }
+
+  /* Pipeline Columns and Nodes */
+  .pipeline-grid {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    flex: 1;
+    justify-content: center;
+    position: relative;
+    z-index: 2;
+  }
+  .p-row-label {
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+    gap: 10px;
+    font-size: 9px;
+    font-weight: 800;
+    color: #64748B;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+    text-align: center;
+    margin-bottom: 4px;
+  }
+  .p-row {
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+    gap: 10px;
+    position: relative;
+  }
+  .p-node {
+    background: #1E293B;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 6px;
+    padding: 10px 10px;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    min-height: 94px;
+    position: relative;
+  }
+  .p-node.danger-node {
+    border-color: #EF4444;
+    background: rgba(239, 68, 68, 0.08);
+  }
+  .p-node.warning-node {
+    border-color: #F59E0B;
+  }
+  .p-node.success-node {
+    border-color: #10B981;
+  }
+  .p-node-top {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 4px;
+  }
+  .pn-key {
+    font-size: 11px;
+    font-weight: 800;
+    color: #FFFFFF;
+  }
+  .pn-tag {
+    font-size: 8px;
+    font-weight: 800;
+    padding: 1px 4px;
+    border-radius: 3px;
+  }
+  .pnt-red { background: rgba(239, 68, 68, 0.3); color: #FCA5A5; }
+  .pnt-orange { background: rgba(245, 158, 11, 0.3); color: #FCD34D; }
+  .pnt-green { background: rgba(16, 185, 129, 0.3); color: #6EE7B7; }
+  .pnt-blue { background: rgba(56, 189, 248, 0.3); color: #7DD3FC; }
+
+  .pn-desc {
+    font-size: 10px;
+    color: #CBD5E1;
+    line-height: 13px;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+  .pn-foot {
+    font-size: 8.5px;
+    color: #94A3B8;
+    border-top: 1px solid rgba(255, 255, 255, 0.06);
+    padding-top: 3px;
+    margin-top: 3px;
+    display: flex;
+    justify-content: space-between;
+  }
+
+  /* Connecting Handles */
+  .ph-r, .ph-l {
+    position: absolute;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    border: 1px solid #1E293B;
+    z-index: 5;
+  }
+  .ph-r { right: -4px; }
+  .ph-l { left: -4px; }
+  .ph-red { background: #EF4444; }
+  .ph-green { background: #10B981; }
+
+  #svg-pipe {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    z-index: 1;
+  }
+
+  /* Right Panel: Release Gate Interception Dossier */
+  .gate-panel {
+    background: #131D31;
+    border: 1.5px solid #EF4444;
+    border-radius: 10px;
+    padding: 20px;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    box-shadow: 0 0 24px rgba(239, 68, 68, 0.15);
+  }
+  .gp-top {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .gp-title {
+    font-size: 13px;
+    font-weight: 800;
+    color: #EF4444;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .gp-badge {
+    background: #EF4444;
+    color: #FFFFFF;
+    font-size: 9.5px;
+    font-weight: 800;
+    padding: 3px 8px;
+    border-radius: 4px;
+  }
+
+  .gp-card-attempt {
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 6px;
+    padding: 10px 14px;
+    margin: 12px 0;
+    font-size: 12px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .flow-arrow { color: #EF4444; font-weight: 800; }
+
+  .gp-violations-list {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .v-item {
+    background: rgba(239, 68, 68, 0.08);
+    border-left: 3px solid #EF4444;
+    padding: 8px 12px;
+    border-radius: 0 4px 4px 0;
+  }
+  .v-item-title {
+    font-size: 11.5px;
+    font-weight: 800;
+    color: #F87171;
+    display: flex;
+    justify-content: space-between;
+  }
+  .v-item-desc {
+    font-size: 10.5px;
+    color: #CBD5E1;
+    margin-top: 2px;
+    line-height: 14px;
+  }
+
+  .gp-telemetry {
+    background: #0B1120;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 6px;
+    padding: 10px 12px;
+    font-family: ui-monospace, Menlo, Consolas, monospace;
+    font-size: 10px;
+    color: #38BDF8;
+    line-height: 15px;
+    margin-top: 10px;
+  }
+
+  /* Bottom Bar */
+  .bottom-bar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding-top: 16px;
+    border-top: 1px solid rgba(255, 255, 255, 0.08);
+    font-size: 12px;
+    color: #94A3B8;
+  }
+  .bottom-bar b { color: #FFFFFF; }
+</style>
+</head>
+<body>
+
+  <!-- Top Bar -->
+  <div class="top-header">
+    <div class="brand-group">
+      <div class="brand-logo">
+        <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#FFFFFF" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path>
+          <path d="m9 12 2 2 4-4"></path>
+        </svg>
+      </div>
+      <div>
+        <div class="brand-name">
+          MedTrace <span class="brand-chip">Enterprise Healthcare Edition</span>
+        </div>
+        <div class="brand-subtitle">
+          Continuous IEC 62304 Traceability & Fail-Closed Release Gate Engine
+        </div>
+      </div>
+    </div>
+    <div class="top-meta">
+      <div class="meta-tag">
+        <span>Framework: <b>Atlassian Forge Native</b></span>
+      </div>
+      <div class="meta-tag">
+        <span>Security: <b>Zero Outbound Egress</b></span>
+      </div>
+      <div class="meta-tag">
+        <span>Latency: <b>1.12 ms (In-Memory BFS)</b></span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Main Split -->
+  <div class="main-split">
+    <!-- Left: Continuous Pipeline -->
+    <div class="pipeline-panel" id="pipe-panel">
+      <svg id="svg-pipe">
+        <defs>
+          <marker id="pm-red" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+            <path d="M 0 1 L 9 5 L 0 9 z" fill="#EF4444" />
+          </marker>
+          <marker id="pm-green" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+            <path d="M 0 1 L 9 5 L 0 9 z" fill="#10B981" />
+          </marker>
+        </defs>
+      </svg>
+
+      <div class="panel-header">
+        <div class="panel-title">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#38BDF8" stroke-width="2.5">
+            <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline>
+          </svg>
+          <span>Deterministic Traceability Cascade</span>
+        </div>
+        <div class="panel-badge-red">1 CRITICAL SAFETY GAP DETECTED</div>
+      </div>
+
+      <div class="pipeline-grid">
+        <div class="p-row-label">
+          <div>1. ISO 14971 Hazard</div>
+          <div>2. Confluence SRS</div>
+          <div>3. Jira Work (PR)</div>
+          <div>4. IEC 62304 Test</div>
+          <div>5. 21 CFR Part 11</div>
+        </div>
+
+        <!-- Row 1: Failing Cascade -->
+        <div class="p-row">
+          <!-- 1 -->
+          <div class="p-node danger-node" id="pn1-1">
+            <div class="p-node-top">
+              <span class="pn-key" style="color: #F87171;">HAZ-101</span>
+              <span class="pn-tag pnt-red">CLASS C</span>
+            </div>
+            <div class="pn-desc">Over-Infusion: Bolus > 5.0 mL/hr</div>
+            <div class="pn-foot">
+              <span>Severity: <b>Catastrophic</b></span>
+            </div>
+            <div class="ph-r ph-red" id="ph1-1-r"></div>
+          </div>
+          <!-- 2 -->
+          <div class="p-node warning-node" id="pn1-2">
+            <div class="ph-l ph-red" id="ph1-2-l"></div>
+            <div class="p-node-top">
+              <span class="pn-key">SRS-104</span>
+              <span class="pn-tag pnt-orange">v3 (DRIFT)</span>
+            </div>
+            <div class="pn-desc">Dual-Core Hardware PWM Clamp</div>
+            <div class="pn-foot">
+              <span style="color: #F87171;">SHA-256 Diverged</span>
+            </div>
+            <div class="ph-r ph-red" id="ph1-2-r"></div>
+          </div>
+          <!-- 3 -->
+          <div class="p-node" id="pn1-3">
+            <div class="ph-l ph-red" id="ph1-3-l"></div>
+            <div class="p-node-top">
+              <span class="pn-key" style="color: #38BDF8;">MED-42</span>
+              <span class="pn-tag pnt-blue">In Progress</span>
+            </div>
+            <div class="pn-desc">Implement Motor PWM Clamp</div>
+            <div class="pn-foot">
+              <span>Dr. Sarah Lin (PR #142)</span>
+            </div>
+            <div class="ph-r ph-red" id="ph1-3-r"></div>
+          </div>
+          <!-- 4 -->
+          <div class="p-node danger-node" id="pn1-4">
+            <div class="ph-l ph-red" id="ph1-4-l"></div>
+            <div class="p-node-top">
+              <span class="pn-key" style="color: #F87171;">TEST-88</span>
+              <span class="pn-tag pnt-red">UNTESTED</span>
+            </div>
+            <div class="pn-desc">HIL Occlusion & Over-Infusion Stress</div>
+            <div class="pn-foot">
+              <span style="color: #F87171;">Bench Run Pending</span>
+            </div>
+            <div class="ph-r ph-red" id="ph1-4-r"></div>
+          </div>
+          <!-- 5 -->
+          <div class="p-node danger-node" id="pn1-5">
+            <div class="ph-l ph-red" id="ph1-5-l"></div>
+            <div class="p-node-top">
+              <span class="pn-key">CMO Sign-off</span>
+              <span class="pn-tag pnt-red">REVOKED</span>
+            </div>
+            <div class="pn-desc">Marcus Vance, MD</div>
+            <div class="pn-foot">
+              <span style="color: #F87171;">Re-authorization Req.</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Row 2: Passing Cascade -->
+        <div class="p-row">
+          <!-- 1 -->
+          <div class="p-node success-node" id="pn2-1">
+            <div class="p-node-top">
+              <span class="pn-key" style="color: #34D399;">HAZ-102</span>
+              <span class="pn-tag pnt-green">CLASS B</span>
+            </div>
+            <div class="pn-desc">Under-Infusion: Pump stall</div>
+            <div class="pn-foot">
+              <span>Severity: <b>Critical</b></span>
+            </div>
+            <div class="ph-r ph-green" id="ph2-1-r"></div>
+          </div>
+          <!-- 2 -->
+          <div class="p-node success-node" id="pn2-2">
+            <div class="ph-l ph-green" id="ph2-2-l"></div>
+            <div class="p-node-top">
+              <span class="pn-key">SRS-105</span>
+              <span class="pn-tag pnt-green">v2 (VERIFIED)</span>
+            </div>
+            <div class="pn-desc">Optical Droplet Flow Verification</div>
+            <div class="pn-foot">
+              <span style="color: #34D399;">Hash Match ✓</span>
+            </div>
+            <div class="ph-r ph-green" id="ph2-2-r"></div>
+          </div>
+          <!-- 3 -->
+          <div class="p-node success-node" id="pn2-3">
+            <div class="ph-l ph-green" id="ph2-3-l"></div>
+            <div class="p-node-top">
+              <span class="pn-key" style="color: #38BDF8;">MED-43</span>
+              <span class="pn-tag pnt-green">Done</span>
+            </div>
+            <div class="pn-desc">Droplet Sensor Interrupt Routine</div>
+            <div class="pn-foot">
+              <span>David Chen (PR #139)</span>
+            </div>
+            <div class="ph-r ph-green" id="ph2-3-r"></div>
+          </div>
+          <!-- 4 -->
+          <div class="p-node success-node" id="pn2-4">
+            <div class="ph-l ph-green" id="ph2-4-l"></div>
+            <div class="p-node-top">
+              <span class="pn-key" style="color: #34D399;">TEST-89</span>
+              <span class="pn-tag pnt-green">PASSED</span>
+            </div>
+            <div class="pn-desc">Closed-Loop Droplet Pulse Waveform</div>
+            <div class="pn-foot">
+              <span style="color: #34D399;">48/48 Assertions Passed ✓</span>
+            </div>
+            <div class="ph-r ph-green" id="ph2-4-r"></div>
+          </div>
+          <!-- 5 -->
+          <div class="p-node success-node" id="pn2-5">
+            <div class="ph-l ph-green" id="ph2-5-l"></div>
+            <div class="p-node-top">
+              <span class="pn-key">RA Director</span>
+              <span class="pn-tag pnt-green">CERTIFIED</span>
+            </div>
+            <div class="pn-desc">Rachel Adams</div>
+            <div class="pn-foot">
+              <span style="color: #34D399;">Part 11 Compliant ✓</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div style="font-size: 11px; color: #64748B; display: flex; justify-content: space-between; border-top: 1px solid rgba(255,255,255,0.06); padding-top: 8px;">
+        <span>Coverage: <b>67% Verified (2 of 3 hazards closed)</b></span>
+        <span>Graph Engine: <b>Zero Outbound Egress (100% In-Tenant Forge)</b></span>
+      </div>
+    </div>
+
+    <!-- Right: Gate Interception Dossier -->
+    <div class="gate-panel">
+      <div class="gp-top">
+        <div class="gp-title">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#EF4444" stroke-width="2.5">
+            <circle cx="12" cy="12" r="10"></circle>
+            <line x1="12" y1="8" x2="12" y2="12"></line>
+            <line x1="12" y1="16" x2="12.01" y2="16"></line>
+          </svg>
+          <span>Jira Release Gate Enforced</span>
+        </div>
+        <div class="gp-badge">TRANSITION BLOCKED</div>
+      </div>
+
+      <div class="gp-card-attempt">
+        <div>Issue: <b>MED-42</b> (Smart Infusion Pump)</div>
+        <div>
+          <span>In Progress</span>
+          <span class="flow-arrow"> ➔ </span>
+          <span style="color: #EF4444; text-decoration: line-through;">Done</span>
+        </div>
+      </div>
+
+      <div class="gp-violations-list">
+        <div class="v-item">
+          <div class="v-item-title">
+            <span>1. IEC 62304 Critical Gap</span>
+            <span>HAZ-101</span>
+          </div>
+          <div class="v-item-desc">
+            ISO 14971 Class C Hazard has 0 passing verification tests.
+          </div>
+        </div>
+
+        <div class="v-item">
+          <div class="v-item-title">
+            <span>2. Missing HIL Test Coverage</span>
+            <span>TEST-88</span>
+          </div>
+          <div class="v-item-desc">
+            Occlusion & Over-Infusion Stress Test status is UNTESTED.
+          </div>
+        </div>
+
+        <div class="v-item">
+          <div class="v-item-title">
+            <span>3. Spec Drift & Revocation</span>
+            <span>SRS-104</span>
+          </div>
+          <div class="v-item-desc">
+            Threshold modified (5.0 ➔ 5.5 mL/hr). Part 11 signature invalidated.
+          </div>
+        </div>
+      </div>
+
+      <div class="gp-telemetry">
+        <div>&gt; EVALUATION VERDICT: FAIL-CLOSED (RFC 2119)</div>
+        <div>&gt; BFS TRAVERSAL TIME: 1.12 ms (5 hops)</div>
+        <div>&gt; AUDIT INTEGRITY: SHA-256 Dynamic Digest</div>
+        <div>&gt; DATA ACCESS: 100% In-Tenant / Zero Egress</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Bottom Bar -->
+  <div class="bottom-bar">
+    <div>
+      Medical Device System: <b>Smart Infusion Pump Firmware v2.1</b> (ISO 14971:2019 / IEC 62304:2006+A1:2015)
+    </div>
+    <div>
+      Codegeist 2026: <b>Specialized Industries Track</b> • Built for Atlassian Cloud
+    </div>
+  </div>
+
+  <script>
+    function drawLines() {
+      const p = document.getElementById('pipe-panel');
+      const cR = p.getBoundingClientRect();
+      const svg = document.getElementById('svg-pipe');
+
+      const conns = [
+        // Row 1: Failing Red
+        { from: 'ph1-1-r', to: 'ph1-2-l', color: '#EF4444', dashed: true },
+        { from: 'ph1-2-r', to: 'ph1-3-l', color: '#EF4444', dashed: true },
+        { from: 'ph1-3-r', to: 'ph1-4-l', color: '#EF4444', dashed: true },
+        { from: 'ph1-4-r', to: 'pn1-5', toH: 'left', color: '#EF4444', dashed: true },
+
+        // Row 2: Passing Green
+        { from: 'ph2-1-r', to: 'ph2-2-l', color: '#10B981', dashed: false },
+        { from: 'ph2-2-r', to: 'ph2-3-l', color: '#10B981', dashed: false },
+        { from: 'ph2-3-r', to: 'ph2-4-l', color: '#10B981', dashed: false },
+        { from: 'ph2-4-r', to: 'pn2-5', toH: 'left', color: '#10B981', dashed: false },
+      ];
+
+      conns.forEach(c => {
+        const el1 = document.getElementById(c.from);
+        let el2 = document.getElementById(c.to);
+        if (!el1 || !el2) return;
+
+        const r1 = el1.getBoundingClientRect();
+        const r2 = el2.getBoundingClientRect();
+
+        const x1 = r1.left + r1.width / 2 - cR.left;
+        const y1 = r1.top + r1.height / 2 - cR.top;
+
+        let x2, y2;
+        if (c.toH === 'left') {
+          x2 = r2.left - cR.left;
+          y2 = r2.top + r2.height / 2 - cR.top;
+        } else {
+          x2 = r2.left + r2.width / 2 - cR.left;
+          y2 = r2.top + r2.height / 2 - cR.top;
+        }
+
+        const dx = Math.max(20, (x2 - x1) * 0.45);
+        const d = `M ${x1} ${y1} C ${x1 + dx} ${y1}, ${x2 - dx} ${y2}, ${x2} ${y2}`;
+
+        const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+        path.setAttribute('d', d);
+        path.setAttribute('fill', 'none');
+        path.setAttribute('stroke', c.color);
+        path.setAttribute('stroke-width', c.dashed ? '2.5' : '2');
+        if (c.dashed) {
+          path.setAttribute('stroke-dasharray', '5, 4');
+        }
+        path.setAttribute('marker-end', c.color === '#EF4444' ? 'url(#pm-red)' : 'url(#pm-green)');
+        svg.appendChild(path);
+      });
+    }
+
+    window.addEventListener('DOMContentLoaded', drawLines);
+  </script>
+</body>
+</html>

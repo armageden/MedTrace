@@ -2,7 +2,6 @@ import api, { route } from '@forge/api';
 import { kvs } from '@forge/kvs';
 import crypto from 'node:crypto';
 import { ComplianceEngine } from './compliance-engine';
-import { TeamworkGraphService } from './teamwork-graph';
 import { IsoHazard, ConfluenceSpec, JiraWorkItem, VerificationTest, Part11Signature, ComplianceSummary, GraphMetadata } from './types';
 
 export class SeederService {
@@ -148,6 +147,7 @@ export class SeederService {
 
     // Verification Tests (IEC 62304 Clause 5.7)
     // HAZ-101 has TEST-88 in UNTESTED state (Crucial demonstration trigger)
+    // Verification tests: in the modeled demo fixture, evidence URLs model private lab HIL runs
     const tests: VerificationTest[] = [
       {
         id: 'test-88',
@@ -210,95 +210,43 @@ export class SeederService {
       },
     ];
 
-    // Optional live Confluence page integration if installed & accessible
-    if (confluenceEnabled) {
-      try {
-        const confResp = await api.asApp().requestConfluence(route`/wiki/api/v2/pages?limit=3&body-format=storage`);
-        if (confResp.status === 200) {
-          const confData = await confResp.json();
-          if (confData?.results && confData.results.length > 0) {
-            confData.results.forEach((p: any, idx: number) => {
-              const body = p.body?.storage?.value || p.title || '';
-              const liveHash = computeSha256(body);
-              if (specs[idx]) {
-                specs[idx].title = `${specs[idx].id.toUpperCase()}: ${p.title}`;
-                specs[idx].contentSnippet = body.slice(0, 140).replace(/<[^>]*>/g, '') || specs[idx].contentSnippet;
-                if (idx !== 0) {
-                  // Keep HAZ-101 drifted for the demonstration, but update other specs with live hashes
-                  specs[idx].sha256Hash = liveHash;
-                  specs[idx].lastSignedHash = liveHash;
-                  if (signatures[idx]) signatures[idx].artifactSha256 = liveHash;
-                }
-              }
-            });
-          }
-        }
-      } catch (err: any) {
-        console.log('[MedTrace Seeder] Notice: Live Confluence lookup skipped:', err?.message);
-      }
-    }
+    // Demo work items stay synthetic: grafting real tenant issue keys onto modeled hazards would
+    // bind the judge's own issues to the safety gate with fabricated violations (see ADR 001).
 
-    // Optional live Jira work item integration if accessible
-    try {
-      const jiraResp = await api.asApp().requestJira(route`/rest/api/3/search?jql=order+by+created+DESC&maxResults=3`);
-      if (jiraResp.status === 200) {
-        const jiraData = await jiraResp.json();
-        if (jiraData?.issues && jiraData.issues.length > 0) {
-          jiraData.issues.forEach((iss: any, idx: number) => {
-            if (workItems[idx]) {
-              workItems[idx].key = iss.key;
-              workItems[idx].title = iss.fields?.summary || workItems[idx].title;
-              if (iss.fields?.assignee?.displayName) {
-                workItems[idx].assignee = iss.fields.assignee.displayName;
-              }
-            }
-          });
-        }
-      }
-    } catch (err: any) {
-      console.log('[MedTrace Seeder] Notice: Live Jira search skipped:', err?.message);
-    }
-
-    // Teamwork Graph (TWG) ARIs & Edge Relationships
+    // Modeled Teamwork Graph (TWG) node ARIs & edge relationships. These are demo lineage records —
+    // live AGG traversal happens in queryGraphContext; Forge cannot write custom entities to the
+    // Teamwork Graph, so the status string below must never claim a real gateway traversal.
     const graphMetadatas: GraphMetadata[] = [
       {
         entityAri: 'ari:cloud:jira:5cbf2ff9-658a-44d8-9004-dbe8a96e952b:issue/10042',
+        hazardAri: 'ari:cloud:medtrace::iso14971-hazard/HAZ-101',
         linkedSpecAri: 'ari:cloud:confluence:d601ebde-589a-45d8-ab19-a8edfb1d5a47:page/98304',
         edgeType: 'iso14971:mitigates-hazard -> atlassian:work-item-links-page',
-        aggTraversalStatus: 'TRAVERSED (AGG GraphQL Gateway 200 OK)',
+        aggTraversalStatus: 'MODELED (demo lineage — live AGG query via queryGraphContext)',
       },
       {
         entityAri: 'ari:cloud:jira:5cbf2ff9-658a-44d8-9004-dbe8a96e952b:issue/10043',
+        hazardAri: 'ari:cloud:medtrace::iso14971-hazard/HAZ-102',
         linkedSpecAri: 'ari:cloud:confluence:d601ebde-589a-45d8-ab19-a8edfb1d5a47:page/98305',
         edgeType: 'iso14971:mitigates-hazard -> atlassian:work-item-links-page',
-        aggTraversalStatus: 'TRAVERSED (AGG GraphQL Gateway 200 OK)',
+        aggTraversalStatus: 'MODELED (demo lineage — live AGG query via queryGraphContext)',
       },
       {
         entityAri: 'ari:cloud:jira:5cbf2ff9-658a-44d8-9004-dbe8a96e952b:issue/10044',
+        hazardAri: 'ari:cloud:medtrace::iso14971-hazard/HAZ-103',
         linkedSpecAri: 'ari:cloud:confluence:d601ebde-589a-45d8-ab19-a8edfb1d5a47:page/98306',
         edgeType: 'iso14971:mitigates-hazard -> atlassian:work-item-links-page',
-        aggTraversalStatus: 'TRAVERSED (AGG GraphQL Gateway 200 OK)',
+        aggTraversalStatus: 'MODELED (demo lineage — live AGG query via queryGraphContext)',
       },
     ];
 
-    // Ingest ISO 14971 Hazard into Teamwork Graph Context via TeamworkGraphService
-    await TeamworkGraphService.registerHazardNodeInGraph('HAZ-101', {
-      title: hazards[0].title,
-      riskClass: hazards[0].riskClass,
-      severity: hazards[0].severity,
-      mitigationKey: specs[0].id,
-    });
-
-    if (confluenceEnabled) {
-      await TeamworkGraphService.queryConfluencePageGraph('98304').catch(() => {});
-    }
 
     // Evaluate trace links using Compliance Engine
     const traceLinks = hazards.map((hazard, index) =>
       ComplianceEngine.evaluateTraceLink(hazard, specs[index], workItems[index], tests[index], signatures[index], graphMetadatas[index])
     );
 
-    const summary = ComplianceEngine.generateComplianceReport(traceLinks);
+    const summary = ComplianceEngine.generateComplianceReport(traceLinks, 'DEMO', 'Smart Infusion Pump Firmware v2.1');
 
     // Save to persistent Forge storage (with in-memory fallback outside Forge runtime)
     try {
@@ -316,13 +264,38 @@ export class SeederService {
   }
 
   /**
+   * Bind a real Jira issue key into a hazard's trace link work item
+   */
+  public static async bindIssueToHazard(hazardKey: string, issueKey: string): Promise<ComplianceSummary> {
+    const current = await this.getActiveComplianceSuite();
+    const targetLink = current.traceLinks.find((l) => l.hazard.key.toLowerCase() === hazardKey.toLowerCase());
+    if (!targetLink) {
+      throw new Error(`Hazard ${hazardKey} not found in the active compliance suite.`);
+    }
+    targetLink.work.key = issueKey;
+    targetLink.work.id = issueKey.toLowerCase();
+    const updatedSummary = ComplianceEngine.generateComplianceReport(
+      current.traceLinks,
+      current.datasetMode ?? 'DEMO',
+      current.projectName
+    );
+    try {
+      await kvs.set(this.STORAGE_KEY, updatedSummary);
+    } catch {
+      this.inMemorySuite = updatedSummary;
+    }
+    return updatedSummary;
+  }
+
+  /**
    * Retrieves active compliance state from Forge storage
    */
   public static async getActiveComplianceSuite(): Promise<ComplianceSummary> {
     try {
-      const data = await kvs.get(this.STORAGE_KEY) as ComplianceSummary | undefined;
+      const data = await kvs.get(this.STORAGE_KEY) as (ComplianceSummary & { datasetMode?: 'DEMO' | 'LIVE' }) | undefined;
       if (data && data.traceLinks && data.traceLinks.length > 0) {
-        return data;
+        // Backfill datasetMode for suites stored by pre-badge versions
+        return { ...data, datasetMode: data.datasetMode ?? 'DEMO' };
       }
     } catch {
       if (this.inMemorySuite && this.inMemorySuite.traceLinks && this.inMemorySuite.traceLinks.length > 0) {
@@ -337,35 +310,56 @@ export class SeederService {
   /**
    * Simulates resolving the Class C gap and re-signing the Part 11 artifact
    */
-  public static async remediateClassCGap(targetHazardKey: string = 'HAZ-101'): Promise<ComplianceSummary> {
+  public static async remediateClassCGap(targetHazardKey: string = 'HAZ-101', accountId?: string): Promise<ComplianceSummary> {
     const current = await this.getActiveComplianceSuite();
     const targetLink = current.traceLinks.find(
       (l) => l.hazard.key.toLowerCase() === targetHazardKey.toLowerCase()
     );
 
     if (!targetLink) {
-      console.warn(`[MedTrace Seeder] Hazard ${targetHazardKey} not found. Defaulting to first open hazard.`);
-      return current;
+      // Fail loudly: returning the unchanged suite here would let callers report a
+      // successful remediation that never happened.
+      throw new Error(`Hazard ${targetHazardKey} not found in the active compliance suite — nothing was remediated.`);
     }
 
     // 1. Mark test as PASSED
-      targetLink.test.status = 'PASSED';
-      targetLink.test.executionDate = 'Just now (Simulated Automated HIL Run: 120/120 Passed)';
-      
-      // 2. Re-sign 21 CFR Part 11 signature with current hash
-      targetLink.signature.artifactSha256 = targetLink.spec.sha256Hash;
-      targetLink.signature.isValid = true;
-      targetLink.signature.signedAt = new Date().toISOString();
-      targetLink.signature.invalidationReason = undefined;
-      targetLink.signature.signedBy = 'Marcus Vance, MD (Re-certified)';
-      targetLink.spec.isSignatureInvalidated = false;
-      targetLink.hazard.status = 'MITIGATED';
-      
-      // 3. Re-evaluate
-      targetLink.complianceState = 'VERIFIED';
-      targetLink.violations = [];
+    targetLink.test.status = 'PASSED';
+    targetLink.test.executionDate = 'Just now (Simulated Automated HIL Run: 120/120 Passed)';
 
-    const updatedSummary = ComplianceEngine.generateComplianceReport(current.traceLinks);
+    // 2. Re-sign 21 CFR Part 11 signature with current hash (simulated; identity recorded, not authenticated)
+    targetLink.signature.artifactSha256 = targetLink.spec.sha256Hash;
+    targetLink.signature.isValid = true;
+    targetLink.signature.signedAt = new Date().toISOString();
+    targetLink.signature.invalidationReason = undefined;
+    if (accountId) {
+      targetLink.signature.signedBy = `accountId:${accountId}`;
+    } else {
+      targetLink.signature.signedBy = targetLink.signature.signedBy.replace(/ \(Re-certified\)$/, '') + ' (Re-certified)';
+    }
+    if (!targetLink.signature.meaning.includes('(SIMULATED)')) {
+      targetLink.signature.meaning = `${targetLink.signature.meaning} (SIMULATED)`;
+    }
+    targetLink.spec.lastSignedHash = targetLink.spec.sha256Hash;
+    targetLink.spec.isSignatureInvalidated = false;
+    targetLink.hazard.status = 'MITIGATED';
+
+    // 3. Re-evaluate via the rule engine (not by hand)
+    const idx = current.traceLinks.indexOf(targetLink);
+    const reevaluated = ComplianceEngine.evaluateTraceLink(
+      targetLink.hazard,
+      targetLink.spec,
+      targetLink.work,
+      targetLink.test,
+      targetLink.signature,
+      targetLink.graphMetadata
+    );
+    if (idx >= 0) current.traceLinks[idx] = reevaluated;
+
+    const updatedSummary = ComplianceEngine.generateComplianceReport(
+      current.traceLinks,
+      current.datasetMode ?? 'DEMO',
+      current.projectName
+    );
     try {
       await kvs.set(this.STORAGE_KEY, updatedSummary);
     } catch {

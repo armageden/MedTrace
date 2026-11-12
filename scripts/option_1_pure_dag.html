@@ -1,0 +1,898 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>MedTrace - Pure DAG View</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    width: 1200px;
+    height: 800px;
+    overflow: hidden;
+    background: #F4F5F7;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+    color: #172B4D;
+    display: flex;
+    flex-direction: column;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* Real Jira Global Nav Bar */
+  .jira-navbar {
+    background: #0052CC;
+    height: 48px;
+    padding: 0 20px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    color: #FFFFFF;
+    flex-shrink: 0;
+  }
+  .nav-left {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+  }
+  .atlassian-logo {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-weight: 700;
+    font-size: 14px;
+    letter-spacing: -0.2px;
+  }
+  .nav-crumbs {
+    color: #DEEBFF;
+    font-size: 12px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .nav-crumbs b { color: #FFFFFF; font-weight: 600; }
+  .nav-right {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    font-size: 11px;
+    color: #DEEBFF;
+  }
+  .site-badge {
+    background: rgba(255, 255, 255, 0.18);
+    padding: 3px 8px;
+    border-radius: 3px;
+    font-family: ui-monospace, Menlo, Consolas, monospace;
+    font-size: 11px;
+  }
+  .avatar {
+    width: 26px;
+    height: 26px;
+    border-radius: 50%;
+    background: #FF5630;
+    color: #FFFFFF;
+    font-size: 11px;
+    font-weight: 700;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  /* MedTrace Audit Header */
+  .audit-header {
+    background: #FFFFFF;
+    border-bottom: 1px solid #DFE1E6;
+    padding: 14px 24px;
+    flex-shrink: 0;
+  }
+  .header-top {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 12px;
+  }
+  .title-group {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .shield-icon {
+    width: 32px;
+    height: 32px;
+    background: #0052CC;
+    border-radius: 6px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #FFFFFF;
+  }
+  .app-name {
+    font-size: 17px;
+    font-weight: 800;
+    color: #172B4D;
+  }
+  .app-tagline {
+    font-size: 12px;
+    font-weight: 500;
+    color: #6B778C;
+  }
+  .device-meta {
+    font-size: 11px;
+    color: #5E6C84;
+    margin-top: 2px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .modeled-badge {
+    background: #FFF0B3;
+    border: 1px solid #FFE380;
+    color: #7F5F00;
+    font-weight: 800;
+    font-size: 9px;
+    padding: 1px 6px;
+    border-radius: 3px;
+    letter-spacing: 0.3px;
+  }
+
+  /* View switch & action buttons */
+  .header-actions {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .view-switch {
+    display: flex;
+    background: #EBECF0;
+    padding: 2px;
+    border-radius: 5px;
+  }
+  .view-btn {
+    padding: 5px 10px;
+    border-radius: 4px;
+    border: none;
+    font-size: 11px;
+    font-weight: 600;
+    cursor: pointer;
+    background: transparent;
+    color: #5E6C84;
+  }
+  .view-btn.active {
+    background: #FFFFFF;
+    color: #0052CC;
+    box-shadow: 0 1px 2px rgba(9, 30, 66, 0.12);
+  }
+  .btn {
+    padding: 6px 12px;
+    border-radius: 4px;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    border: 1px solid transparent;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .btn-seed { background: #DEEBFF; color: #0052CC; border-color: #B3D4FF; }
+  .btn-blast { background: #FFF0B3; color: #172B4D; border-color: #FFAB00; }
+  .btn-gate { background: #FFEBE6; color: #DE350B; border-color: #FFBDAD; }
+  .btn-export { background: #0052CC; color: #FFFFFF; }
+
+  /* 4 Metric Cards */
+  .metrics-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 12px;
+  }
+  .metric-card {
+    background: #FAFBFC;
+    border: 1px solid #EBECF0;
+    border-radius: 6px;
+    padding: 8px 12px;
+  }
+  .metric-card.alert {
+    border-left: 3.5px solid #DE350B;
+    background: #FFF9F9;
+  }
+  .metric-label {
+    font-size: 10px;
+    font-weight: 800;
+    color: #5E6C84;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+  }
+  .metric-value {
+    font-size: 20px;
+    font-weight: 800;
+    color: #172B4D;
+    line-height: 1.2;
+    margin-top: 2px;
+  }
+  .metric-sub {
+    font-size: 10px;
+    color: #6B778C;
+    margin-top: 2px;
+  }
+
+  /* Main Lineage Graph Canvas */
+  .canvas-container {
+    flex: 1;
+    padding: 14px 20px 20px 20px;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    position: relative;
+    background: #F4F5F7;
+  }
+  .canvas-inner {
+    flex: 1;
+    background-color: #FAFBFC;
+    background-image: radial-gradient(#D0D5DD 1.2px, transparent 1.2px);
+    background-size: 16px 16px;
+    border: 1px solid #DFE1E6;
+    border-radius: 8px;
+    position: relative;
+    overflow: hidden;
+    padding: 14px 18px;
+    display: flex;
+    flex-direction: column;
+  }
+
+  /* 5 Column Stage Headers */
+  .stage-columns {
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+    gap: 16px;
+    margin-bottom: 14px;
+    position: relative;
+    z-index: 2;
+  }
+  .stage-header {
+    background: rgba(255, 255, 255, 0.96);
+    border: 1px solid #DFE1E6;
+    border-radius: 4px;
+    padding: 5px 8px;
+    font-size: 9.5px;
+    font-weight: 800;
+    letter-spacing: 0.6px;
+    color: #5E6C84;
+    text-align: center;
+    box-shadow: 0 1px 2px rgba(9, 30, 66, 0.05);
+  }
+
+  /* Trace Chains Rows */
+  .chains-container {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    position: relative;
+    z-index: 2;
+    flex: 1;
+    justify-content: space-around;
+  }
+  .chain-row {
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+    gap: 16px;
+    align-items: center;
+    position: relative;
+  }
+
+  /* Node Cards */
+  .node {
+    background: #FFFFFF;
+    border-radius: 6px;
+    padding: 9px 11px;
+    border: 1.5px solid #DFE1E6;
+    box-shadow: 0 1px 3px rgba(9, 30, 66, 0.08);
+    height: 94px;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    position: relative;
+  }
+  .node.danger {
+    border-color: #DE350B;
+    box-shadow: 0 0 10px rgba(222, 53, 11, 0.18);
+  }
+  .node.warning {
+    border-color: #FF8B00;
+    box-shadow: 0 0 8px rgba(255, 139, 0, 0.15);
+  }
+  .node.success {
+    border-color: #00875A;
+  }
+  .node.untested-active {
+    background: #FFF5F5;
+    border: 2px solid #DE350B;
+    box-shadow: 0 0 12px rgba(222, 53, 11, 0.25);
+  }
+
+  .node-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 3px;
+  }
+  .node-key {
+    font-size: 11.5px;
+    font-weight: 700;
+    color: #172B4D;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
+  .node-pill {
+    font-size: 8.5px;
+    font-weight: 800;
+    padding: 1px 5px;
+    border-radius: 3px;
+    letter-spacing: 0.3px;
+  }
+  .node-pill.red { background: #FFEBE6; color: #DE350B; }
+  .node-pill.red-solid { background: #DE350B; color: #FFFFFF; }
+  .node-pill.orange { background: #FFF0B3; color: #7F5F00; }
+  .node-pill.blue { background: #DEEBFF; color: #0052CC; }
+  .node-pill.green { background: #E3FCEF; color: #00875A; }
+  .node-pill.purple { background: #EAE6FF; color: #403294; }
+
+  .node-title {
+    font-size: 10.5px;
+    color: #42526E;
+    line-height: 14px;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+  .node-footer {
+    display: flex;
+    justify-content: space-between;
+    font-size: 9px;
+    color: #6B778C;
+    margin-top: 3px;
+    border-top: 1px solid #F4F5F7;
+    padding-top: 3px;
+  }
+
+  /* ReactFlow Handle Dots */
+  .handle-right {
+    position: absolute;
+    right: -5px;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 8px;
+    height: 8px;
+    background: #0052CC;
+    border: 1.5px solid #FFFFFF;
+    border-radius: 50%;
+    z-index: 5;
+  }
+  .handle-left {
+    position: absolute;
+    left: -5px;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 8px;
+    height: 8px;
+    background: #0052CC;
+    border: 1.5px solid #FFFFFF;
+    border-radius: 50%;
+    z-index: 5;
+  }
+  .handle-danger { background: #DE350B !important; }
+  .handle-success { background: #00875A !important; }
+
+  /* SVG Bezier Flow Connectors */
+  #edge-svg {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+    z-index: 1;
+  }
+
+  /* ReactFlow Bottom Widgets */
+  .rf-controls {
+    position: absolute;
+    bottom: 14px;
+    left: 14px;
+    background: #FFFFFF;
+    border: 1px solid #DFE1E6;
+    border-radius: 4px;
+    box-shadow: 0 1px 3px rgba(9, 30, 66, 0.12);
+    display: flex;
+    flex-direction: column;
+    z-index: 10;
+  }
+  .rf-btn {
+    width: 24px;
+    height: 24px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-bottom: 1px solid #EBECF0;
+    font-size: 13px;
+    color: #5E6C84;
+    cursor: pointer;
+  }
+  .rf-btn:last-child { border-bottom: none; }
+
+  .rf-minimap {
+    position: absolute;
+    bottom: 14px;
+    right: 14px;
+    width: 110px;
+    height: 64px;
+    background: rgba(255, 255, 255, 0.92);
+    border: 1px solid #DFE1E6;
+    border-radius: 4px;
+    box-shadow: 0 1px 3px rgba(9, 30, 66, 0.12);
+    z-index: 10;
+    padding: 6px;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-around;
+  }
+  .mm-row {
+    display: flex;
+    justify-content: space-between;
+    gap: 3px;
+  }
+  .mm-node {
+    flex: 1;
+    height: 8px;
+    border-radius: 1px;
+    background: #DFE1E6;
+  }
+  .mm-node.red { background: #DE350B; }
+  .mm-node.green { background: #00875A; }
+  .mm-node.orange { background: #FF8B00; }
+  .mm-viewport {
+    position: absolute;
+    inset: 3px;
+    border: 1px dashed rgba(0, 82, 204, 0.4);
+    pointer-events: none;
+  }
+</style>
+</head>
+<body>
+
+  <!-- Jira Global Nav -->
+  <div class="jira-navbar">
+    <div class="nav-left">
+      <div class="atlassian-logo">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#FFFFFF" stroke-width="2.5">
+          <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path>
+          <path d="m9 12 2 2 4-4"></path>
+        </svg>
+        <span>Jira Cloud</span>
+      </div>
+      <div class="nav-crumbs">
+        <span>Projects</span> / <span>Smart Infusion Pump Firmware (MED)</span> / <b>MedTrace Living Traceability</b>
+      </div>
+    </div>
+    <div class="nav-right">
+      <span class="site-badge">one-atlas-feur.atlassian.net</span>
+      <span>Zero Outbound Egress</span>
+      <div class="avatar">FT</div>
+    </div>
+  </div>
+
+  <!-- MedTrace Real Header -->
+  <div class="audit-header">
+    <div class="header-top">
+      <div class="title-group">
+        <div class="shield-icon">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#FFFFFF" stroke-width="2.5">
+            <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path>
+            <path d="m9 12 2 2 4-4"></path>
+          </svg>
+        </div>
+        <div>
+          <div style="display: flex; align-items: center; gap: 8px;">
+            <span class="app-name">MedTrace</span>
+            <span class="app-tagline">| IEC 62304 & FDA 21 CFR Part 11 Living Traceability Engine</span>
+          </div>
+          <div class="device-meta">
+            <span>Device System: <b>Smart Infusion Pump Firmware v2.1</b></span>
+            <span>•</span>
+            <span class="modeled-badge">DEMO DATASET — MODELED RECORDS</span>
+          </div>
+        </div>
+      </div>
+      <div class="header-actions">
+        <div class="view-switch">
+          <button class="view-btn active">Lineage Graph</button>
+          <button class="view-btn">Trace Matrix</button>
+        </div>
+        <button class="btn btn-seed">⚡ Seed Demo Suite</button>
+        <button class="btn btn-blast">⚡ Blast Radius</button>
+        <button class="btn btn-gate">🔒 Test Human Gate</button>
+        <button class="btn btn-export">📄 Audit Evidence Export</button>
+      </div>
+    </div>
+
+    <!-- 4 Real Stat Cards -->
+    <div class="metrics-grid">
+      <div class="metric-card">
+        <div class="metric-label">IEC 62304 VERIFICATION COVERAGE</div>
+        <div class="metric-value" style="color: #DE350B;">67%</div>
+        <div class="metric-sub">2 of 3 Hazards Verified (1 Unverified)</div>
+      </div>
+      <div class="metric-card">
+        <div class="metric-label">ISO 14971 CLASS C HAZARDS</div>
+        <div class="metric-value" style="color: #DE350B;">1 Active</div>
+        <div class="metric-sub">Catastrophic Severity Threshold</div>
+      </div>
+      <div class="metric-card alert">
+        <div class="metric-label">JIRA HUMAN RELEASE GATE</div>
+        <div class="metric-value" style="font-size: 16px; color: #DE350B; display: flex; align-items: center; gap: 6px; margin-top: 5px;">
+          <span>🚨 RELEASE BLOCKED</span>
+        </div>
+        <div class="metric-sub">Transition to Done halted for MED-42</div>
+      </div>
+      <div class="metric-card">
+        <div class="metric-label">SIGNATURE EVIDENCE STATUS</div>
+        <div class="metric-value" style="color: #FF8B00;">1 Drifted</div>
+        <div class="metric-sub">SHA-256 Digest Mismatch</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Real Lineage Graph Canvas -->
+  <div class="canvas-container">
+    <div class="canvas-inner" id="canvas-inner">
+      <svg id="edge-svg">
+        <defs>
+          <marker id="arrow-red" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+            <path d="M 0 1 L 9 5 L 0 9 z" fill="#DE350B" />
+          </marker>
+          <marker id="arrow-green" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+            <path d="M 0 1 L 9 5 L 0 9 z" fill="#00875A" />
+          </marker>
+        </defs>
+      </svg>
+
+      <!-- Stage Headers -->
+      <div class="stage-columns">
+        <div class="stage-header">1. ISO 14971 HAZARD ANALYSIS</div>
+        <div class="stage-header">2. CONFLUENCE SRS SPEC</div>
+        <div class="stage-header">3. JIRA WORK & PR</div>
+        <div class="stage-header">4. IEC 62304 VERIFICATION</div>
+        <div class="stage-header">5. 21 CFR PART 11 SIGN-OFF</div>
+      </div>
+
+      <!-- Graph Chains -->
+      <div class="chains-container">
+        <!-- Row 1: The Critical Unverified Gap (HAZ-101) -->
+        <div class="chain-row" id="row-1">
+          <!-- 1. Hazard -->
+          <div class="node danger" id="node-r1-1">
+            <div class="node-header">
+              <span class="node-key" style="color: #DE350B;">HAZ-101</span>
+              <span class="node-pill red">CLASS C</span>
+            </div>
+            <div class="node-title">Over-Infusion Hazard: Bolus delivery exceeds 5.0 mL/hr</div>
+            <div class="node-footer">
+              <span>Sev: <b>CATASTROPHIC</b></span>
+              <span>Prob: <b>OCCASIONAL</b></span>
+            </div>
+            <div class="handle-right handle-danger" id="h-r1-1-out"></div>
+          </div>
+
+          <!-- 2. Spec -->
+          <div class="node warning" id="node-r1-2">
+            <div class="handle-left handle-danger" id="h-r1-2-in"></div>
+            <div class="node-header">
+              <span class="node-key">Confluence SRS</span>
+              <span class="node-pill orange">v3 (DRIFT)</span>
+            </div>
+            <div class="node-title">SRS-104: Dual-Core Hardware Bolus Clamp (Max 5.0 mL/hr)</div>
+            <div class="node-footer">
+              <span style="color: #DE350B; font-weight: 700;">Spec drift detected</span>
+              <span>v3 vs v2</span>
+            </div>
+            <div class="handle-right handle-danger" id="h-r1-2-out"></div>
+          </div>
+
+          <!-- 3. Work -->
+          <div class="node" id="node-r1-3">
+            <div class="handle-left handle-danger" id="h-r1-3-in"></div>
+            <div class="node-header">
+              <span class="node-key" style="color: #0052CC;">MED-42</span>
+              <span class="node-pill purple">In Progress</span>
+            </div>
+            <div class="node-title">Implement Dual-Core Hardware PWM Clamp on Infusion Motor</div>
+            <div class="node-footer">
+              <span>Dr. Sarah Lin</span>
+              <span>PR #142</span>
+            </div>
+            <div class="handle-right handle-danger" id="h-r1-3-out"></div>
+          </div>
+
+          <!-- 4. Test -->
+          <div class="node untested-active" id="node-r1-4">
+            <div class="handle-left handle-danger" id="h-r1-4-in"></div>
+            <div class="node-header">
+              <span class="node-key" style="color: #DE350B;">TEST-88</span>
+              <span class="node-pill red-solid">UNTESTED</span>
+            </div>
+            <div class="node-title">Hardware-in-the-Loop Occlusion & Over-Infusion Stress Test</div>
+            <div class="node-footer">
+              <span style="color: #DE350B; font-weight: 700;">Pending HIL Bench Run</span>
+              <span>Automated</span>
+            </div>
+            <div class="handle-right handle-danger" id="h-r1-4-out"></div>
+          </div>
+
+          <!-- 5. Signature -->
+          <div class="node warning" id="node-r1-5">
+            <div class="handle-left handle-danger" id="h-r1-5-in"></div>
+            <div class="node-header">
+              <span class="node-key">21 CFR Part 11</span>
+              <span class="node-pill red">REVOKED</span>
+            </div>
+            <div class="node-title">Marcus Vance, MD (Chief Medical Officer)</div>
+            <div class="node-footer">
+              <span>SHA: e3b0c442...</span>
+              <span style="color: #DE350B; font-weight: 700;">Invalidated</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Row 2: Mitigated Class B (HAZ-102) -->
+        <div class="chain-row" id="row-2">
+          <!-- 1. Hazard -->
+          <div class="node success" id="node-r2-1">
+            <div class="node-header">
+              <span class="node-key" style="color: #FF8B00;">HAZ-102</span>
+              <span class="node-pill orange">CLASS B</span>
+            </div>
+            <div class="node-title">Under-Infusion Hazard: Unintended pump stall hypoglycemia</div>
+            <div class="node-footer">
+              <span>Sev: <b>CRITICAL</b></span>
+              <span>Prob: <b>REMOTE</b></span>
+            </div>
+            <div class="handle-right handle-success" id="h-r2-1-out"></div>
+          </div>
+
+          <!-- 2. Spec -->
+          <div class="node success" id="node-r2-2">
+            <div class="handle-left handle-success" id="h-r2-2-in"></div>
+            <div class="node-header">
+              <span class="node-key">Confluence SRS</span>
+              <span class="node-pill blue">v2</span>
+            </div>
+            <div class="node-title">SRS-105: Optical Droplet Sensor Flow Rate Verification</div>
+            <div class="node-footer">
+              <span style="color: #00875A; font-weight: 600;">Hash Verified ✓</span>
+              <span>2 days ago</span>
+            </div>
+            <div class="handle-right handle-success" id="h-r2-2-out"></div>
+          </div>
+
+          <!-- 3. Work -->
+          <div class="node success" id="node-r2-3">
+            <div class="handle-left handle-success" id="h-r2-3-in"></div>
+            <div class="node-header">
+              <span class="node-key" style="color: #0052CC;">MED-43</span>
+              <span class="node-pill green">Done</span>
+            </div>
+            <div class="node-title">Integrate Optical Droplet Sensor Interrupt Routine</div>
+            <div class="node-footer">
+              <span>David Chen</span>
+              <span>PR #139</span>
+            </div>
+            <div class="handle-right handle-success" id="h-r2-3-out"></div>
+          </div>
+
+          <!-- 4. Test -->
+          <div class="node success" id="node-r2-4">
+            <div class="handle-left handle-success" id="h-r2-4-in"></div>
+            <div class="node-header">
+              <span class="node-key" style="color: #00875A;">TEST-89</span>
+              <span class="node-pill green">PASSED</span>
+            </div>
+            <div class="node-title">Closed-Loop Droplet Pulse Waveform Verification</div>
+            <div class="node-footer">
+              <span>48/48 Assertions</span>
+              <span style="color: #00875A; font-weight: 600;">Integration Pass</span>
+            </div>
+            <div class="handle-right handle-success" id="h-r2-4-out"></div>
+          </div>
+
+          <!-- 5. Signature -->
+          <div class="node success" id="node-r2-5">
+            <div class="handle-left handle-success" id="h-r2-5-in"></div>
+            <div class="node-header">
+              <span class="node-key">21 CFR Part 11</span>
+              <span class="node-pill green">CERTIFIED</span>
+            </div>
+            <div class="node-title">Rachel Adams (Director of Regulatory Affairs)</div>
+            <div class="node-footer">
+              <span>SHA: b45c2299...</span>
+              <span style="color: #00875A; font-weight: 600;">Valid ✓</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Row 3: Mitigated Class A (HAZ-103) -->
+        <div class="chain-row" id="row-3">
+          <!-- 1. Hazard -->
+          <div class="node success" id="node-r3-1">
+            <div class="node-header">
+              <span class="node-key" style="color: #0052CC;">HAZ-103</span>
+              <span class="node-pill blue">CLASS A</span>
+            </div>
+            <div class="node-title">Display Transient Glitch: OLED backlight flicker on cutover</div>
+            <div class="node-footer">
+              <span>Sev: <b>MINOR</b></span>
+              <span>Prob: <b>OCCASIONAL</b></span>
+            </div>
+            <div class="handle-right handle-success" id="h-r3-1-out"></div>
+          </div>
+
+          <!-- 2. Spec -->
+          <div class="node success" id="node-r3-2">
+            <div class="handle-left handle-success" id="h-r3-2-in"></div>
+            <div class="node-header">
+              <span class="node-key">Confluence SRS</span>
+              <span class="node-pill blue">v1</span>
+            </div>
+            <div class="node-title">SRS-106: Power Rail Glitch Filter & OLED Retention</div>
+            <div class="node-footer">
+              <span style="color: #00875A; font-weight: 600;">Hash Verified ✓</span>
+              <span>1 week ago</span>
+            </div>
+            <div class="handle-right handle-success" id="h-r3-2-out"></div>
+          </div>
+
+          <!-- 3. Work -->
+          <div class="node success" id="node-r3-3">
+            <div class="handle-left handle-success" id="h-r3-3-in"></div>
+            <div class="node-header">
+              <span class="node-key" style="color: #0052CC;">MED-44</span>
+              <span class="node-pill green">Done</span>
+            </div>
+            <div class="node-title">Calibrate OLED SPI Bus Low-Power Sleep Transitions</div>
+            <div class="node-footer">
+              <span>Elena Rostova</span>
+              <span>PR #135</span>
+            </div>
+            <div class="handle-right handle-success" id="h-r3-3-out"></div>
+          </div>
+
+          <!-- 4. Test -->
+          <div class="node success" id="node-r3-4">
+            <div class="handle-left handle-success" id="h-r3-4-in"></div>
+            <div class="node-header">
+              <span class="node-key" style="color: #00875A;">TEST-90</span>
+              <span class="node-pill green">PASSED</span>
+            </div>
+            <div class="node-title">Power Rail Cutover Voltage Sag Automated Benchmark</div>
+            <div class="node-footer">
+              <span>Automated Pass</span>
+              <span style="color: #00875A; font-weight: 600;">Unit Test Pass</span>
+            </div>
+            <div class="handle-right handle-success" id="h-r3-4-out"></div>
+          </div>
+
+          <!-- 5. Signature -->
+          <div class="node success" id="node-r3-5">
+            <div class="handle-left handle-success" id="h-r3-5-in"></div>
+            <div class="node-header">
+              <span class="node-key">21 CFR Part 11</span>
+              <span class="node-pill green">CERTIFIED</span>
+            </div>
+            <div class="node-title">Rachel Adams (Director of Regulatory Affairs)</div>
+            <div class="node-footer">
+              <span>SHA: c67d3399...</span>
+              <span style="color: #00875A; font-weight: 600;">Valid ✓</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ReactFlow Controls -->
+      <div class="rf-controls">
+        <div class="rf-btn">+</div>
+        <div class="rf-btn">-</div>
+        <div class="rf-btn">⤢</div>
+      </div>
+
+      <!-- ReactFlow MiniMap -->
+      <div class="rf-minimap">
+        <div class="mm-row">
+          <div class="mm-node red"></div>
+          <div class="mm-node orange"></div>
+          <div class="mm-node"></div>
+          <div class="mm-node red"></div>
+          <div class="mm-node red"></div>
+        </div>
+        <div class="mm-row">
+          <div class="mm-node green"></div>
+          <div class="mm-node green"></div>
+          <div class="mm-node green"></div>
+          <div class="mm-node green"></div>
+          <div class="mm-node green"></div>
+        </div>
+        <div class="mm-row">
+          <div class="mm-node green"></div>
+          <div class="mm-node green"></div>
+          <div class="mm-node green"></div>
+          <div class="mm-node green"></div>
+          <div class="mm-node green"></div>
+        </div>
+        <div class="mm-viewport"></div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // Draw exact SVG Bezier Connectors dynamically between handles
+    function drawConnectors() {
+      const container = document.getElementById('canvas-inner');
+      const cRect = container.getBoundingClientRect();
+      const svg = document.getElementById('edge-svg');
+
+      const connections = [
+        // Row 1 (failing / red broken chain)
+        { from: 'h-r1-1-out', to: 'h-r1-2-in', color: '#DE350B', dashed: true },
+        { from: 'h-r1-2-out', to: 'h-r1-3-in', color: '#DE350B', dashed: true },
+        { from: 'h-r1-3-out', to: 'h-r1-4-in', color: '#DE350B', dashed: true },
+        { from: 'h-r1-4-out', to: 'node-r1-5', toHandle: 'left', color: '#DE350B', dashed: true },
+
+        // Row 2 (passing / green chain)
+        { from: 'h-r2-1-out', to: 'h-r2-2-in', color: '#00875A', dashed: false },
+        { from: 'h-r2-2-out', to: 'h-r2-3-in', color: '#00875A', dashed: false },
+        { from: 'h-r2-3-out', to: 'h-r2-4-in', color: '#00875A', dashed: false },
+        { from: 'h-r2-4-out', to: 'node-r2-5', toHandle: 'left', color: '#00875A', dashed: false },
+
+        // Row 3 (passing / green chain)
+        { from: 'h-r3-1-out', to: 'h-r3-2-in', color: '#00875A', dashed: false },
+        { from: 'h-r3-2-out', to: 'h-r3-3-in', color: '#00875A', dashed: false },
+        { from: 'h-r3-3-out', to: 'h-r3-4-in', color: '#00875A', dashed: false },
+        { from: 'h-r3-4-out', to: 'node-r3-5', toHandle: 'left', color: '#00875A', dashed: false },
+      ];
+
+      connections.forEach(conn => {
+        const elFrom = document.getElementById(conn.from);
+        let elTo = document.getElementById(conn.to);
+        if (!elFrom || !elTo) return;
+
+        const fRect = elFrom.getBoundingClientRect();
+        const tRect = elTo.getBoundingClientRect();
+
+        const x1 = fRect.left + fRect.width / 2 - cRect.left;
+        const y1 = fRect.top + fRect.height / 2 - cRect.top;
+
+        let x2, y2;
+        if (conn.toHandle === 'left') {
+          x2 = tRect.left - cRect.left;
+          y2 = tRect.top + tRect.height / 2 - cRect.top;
+        } else {
+          x2 = tRect.left + tRect.width / 2 - cRect.left;
+          y2 = tRect.top + tRect.height / 2 - cRect.top;
+        }
+
+        const dx = Math.max(30, (x2 - x1) * 0.45);
+        const d = `M ${x1} ${y1} C ${x1 + dx} ${y1}, ${x2 - dx} ${y2}, ${x2} ${y2}`;
+
+        const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+        path.setAttribute('d', d);
+        path.setAttribute('fill', 'none');
+        path.setAttribute('stroke', conn.color);
+        path.setAttribute('stroke-width', conn.dashed ? '2.5' : '2');
+        if (conn.dashed) {
+          path.setAttribute('stroke-dasharray', '5, 4');
+        }
+        path.setAttribute('marker-end', conn.color === '#DE350B' ? 'url(#arrow-red)' : 'url(#arrow-green)');
+        svg.appendChild(path);
+      });
+    }
+
+    window.addEventListener('DOMContentLoaded', drawConnectors);
+  </script>
+</body>
+</html>

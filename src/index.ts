@@ -1,10 +1,9 @@
 import Resolver from '@forge/resolver';
-import { kvs } from '@forge/kvs';
 import crypto from 'node:crypto';
 import { SeederService } from './seeder';
 import { TeamworkGraphService } from './teamwork-graph';
 import { workflowValidatorHandler } from './workflow-validator';
-import { rovoActionHandler } from './mcp-server';
+import { rovoActionHandler, McpToolService } from './mcp-server';
 import { ComplianceEngine } from './compliance-engine';
 
 const resolver = new Resolver();
@@ -22,13 +21,28 @@ resolver.define('seedDemoSuite', async () => {
 // 3. Remediate Class C Gap (Hero demo fix simulation)
 resolver.define('remediateGap', async (req) => {
   const hazardKey = req.payload?.hazardKey || 'HAZ-101';
-  return await SeederService.remediateClassCGap(hazardKey);
+  const accountId = req.context?.accountId;
+  return await SeederService.remediateClassCGap(hazardKey, accountId);
 });
 
 // 4. Teamwork Graph GraphQL Context Query
 resolver.define('queryGraphContext', async (req) => {
-  const issueKey = req.payload?.issueKey || 'HAZ-101';
+  const issueKey = req.payload?.issueKey || 'MED-42';
   return await TeamworkGraphService.queryIssueGraphContext(issueKey);
+});
+
+// 4b. Bind a Jira issue to a hazard trace link (makes the safety gate real)
+resolver.define('bindIssueToHazard', async (req) => {
+  const hazardKey = req.payload?.hazardKey;
+  const issueKey = req.context?.extension?.issue?.key || req.payload?.issueKey;
+  if (!hazardKey) return { success: false, error: 'hazardKey required' };
+  if (!issueKey) return { success: false, error: 'no issue context' };
+  try {
+    const summary = await SeederService.bindIssueToHazard(hazardKey, issueKey);
+    return { success: true, summary };
+  } catch (err: any) {
+    return { success: false, error: err?.message || 'bind failed' };
+  }
 });
 
 // 5. Simulate Jira Release Transition (Human-Initiated Transition Gate)
@@ -61,25 +75,8 @@ export async function claimNonce(
   const nonceKey = `nonce:${nonce.length > 64 ? crypto.createHash('sha256').update(nonce).digest('hex') : nonce}`;
   const now = Date.now();
 
-  const existing = await store.get(nonceKey);
-  if (existing && (now - existing.consumedAt < ttlMs)) {
-    return false; // Replay attack detected within window
-  }
-
-  // Lazy pruning: delete expired key before updating
-  if (existing) {
-    await store.delete(nonceKey);
-  }
-
-  await store.set(nonceKey, { consumedAt: now });
-  return true;
+  return await store.claim(nonceKey, { consumedAt: now }, ttlMs);
 }
-
-// Retained for backward-compatibility with existing exports
-export const consumedNonces = {
-  has: (nonce: string) => false,
-  add: (nonce: string) => {},
-};
 
 export { NonceStore, getNonceStore, setNonceStore, createInMemoryNonceStore };
 
@@ -136,81 +133,73 @@ export async function mcpWebtriggerHandler(request: any): Promise<any> {
       };
     }
 
-    // Header-only secret check: secrets in query parameters leak into web logs, proxies, and browser history
-    const authHeader = extractHeader(request?.headers, 'x-medtrace-key');
+    // HMAC-SHA256 required on every request (GET and POST). The shared secret itself is
+    // never transmitted: only its signature over (timestamp.nonce.body) is.
+    const timestampHeader = extractHeader(request?.headers, 'x-medtrace-timestamp');
+    const signatureHeader = extractHeader(request?.headers, 'x-medtrace-signature');
+    const nonceHeader =
+      extractHeader(request?.headers, 'x-medtrace-nonce') ||
+      extractHeader(request?.headers, 'x-medtrace-event-id');
 
-    // 1. Shared secret check (enforced on all requests to protect clinical records)
-    if (authHeader !== secret) {
+    if (!timestampHeader) {
       return {
-        body: JSON.stringify({ error: 'Unauthorized: Missing or invalid x-medtrace-key header.' }),
+        body: JSON.stringify({ error: 'Unauthorized: Missing x-medtrace-timestamp header.' }),
         headers: { 'Content-Type': ['application/json'], 'Access-Control-Allow-Origin': ['*'] },
         statusCode: 401,
       };
     }
 
-    // 2. If request contains state mutation payload (POST), require timestamp, nonce & HMAC signature
+    const reqTime = parseInt(timestampHeader, 10);
+    if (isNaN(reqTime) || Math.abs(Date.now() - reqTime) > 300_000) {
+      return {
+        body: JSON.stringify({ error: 'Unauthorized: Request timestamp expired (>300s replay window).' }),
+        headers: { 'Content-Type': ['application/json'], 'Access-Control-Allow-Origin': ['*'] },
+        statusCode: 401,
+      };
+    }
+
+    if (!signatureHeader) {
+      return {
+        body: JSON.stringify({ error: 'Unauthorized: Missing x-medtrace-signature header.' }),
+        headers: { 'Content-Type': ['application/json'], 'Access-Control-Allow-Origin': ['*'] },
+        statusCode: 401,
+      };
+    }
+
+    if (!nonceHeader) {
+      return {
+        body: JSON.stringify({ error: 'Unauthorized: Missing x-medtrace-nonce header.' }),
+        headers: { 'Content-Type': ['application/json'], 'Access-Control-Allow-Origin': ['*'] },
+        statusCode: 401,
+      };
+    }
+
+    const rawBody = typeof request.body === 'string' ? request.body : (request.body ? JSON.stringify(request.body) : '');
+    const isValidSig = verifyHmacSignature(rawBody, timestampHeader, signatureHeader, secret, nonceHeader);
+    if (!isValidSig) {
+      return {
+        body: JSON.stringify({ error: 'Unauthorized: Cryptographic HMAC-SHA256 signature mismatch (tamper/replay protection).' }),
+        headers: { 'Content-Type': ['application/json'], 'Access-Control-Allow-Origin': ['*'] },
+        statusCode: 401,
+      };
+    }
+
+    const isClaimed = await claimNonce(nonceHeader);
+    if (!isClaimed) {
+      return {
+        body: JSON.stringify({ error: 'Unauthorized: Replay attack detected (nonce/eventId already consumed within validity window).' }),
+        headers: { 'Content-Type': ['application/json'], 'Access-Control-Allow-Origin': ['*'] },
+        statusCode: 409,
+      };
+    }
+
+    // Body parsing (for POST actions). GET requests fall through with an empty body.
+    let body: any = {};
     if (request?.method === 'POST') {
-      const timestampHeader = extractHeader(request?.headers, 'x-medtrace-timestamp');
-      const signatureHeader = extractHeader(request?.headers, 'x-medtrace-signature');
-      const nonceHeader =
-        extractHeader(request?.headers, 'x-medtrace-nonce') ||
-        extractHeader(request?.headers, 'x-medtrace-event-id');
-
-      // Replay attack prevention: enforce 5-minute request validity window
-      if (!timestampHeader) {
-        return {
-          body: JSON.stringify({ error: 'Unauthorized: Missing x-medtrace-timestamp header.' }),
-          headers: { 'Content-Type': ['application/json'], 'Access-Control-Allow-Origin': ['*'] },
-          statusCode: 401,
-        };
-      }
-
-      const reqTime = parseInt(timestampHeader, 10);
-      if (isNaN(reqTime) || Math.abs(Date.now() - reqTime) > 300_000) {
-        return {
-          body: JSON.stringify({ error: 'Unauthorized: Request timestamp expired (>300s replay window).' }),
-          headers: { 'Content-Type': ['application/json'], 'Access-Control-Allow-Origin': ['*'] },
-          statusCode: 401,
-        };
-      }
-
-      // Cryptographic HMAC-SHA256 binding signature over (timestamp + [nonce] + rawBody)
-      if (!signatureHeader) {
-        return {
-          body: JSON.stringify({ error: 'Unauthorized: Missing x-medtrace-signature header.' }),
-          headers: { 'Content-Type': ['application/json'], 'Access-Control-Allow-Origin': ['*'] },
-          statusCode: 401,
-        };
-      }
-
-      const rawBody = typeof request.body === 'string' ? request.body : JSON.stringify(request.body || {});
-      const isValidSig =
-        verifyHmacSignature(rawBody, timestampHeader, signatureHeader, secret, nonceHeader) ||
-        verifyHmacSignature(rawBody, timestampHeader, signatureHeader, secret);
-
-      if (!isValidSig) {
-        return {
-          body: JSON.stringify({ error: 'Unauthorized: Cryptographic HMAC-SHA256 signature mismatch (tamper/replay protection).' }),
-          headers: { 'Content-Type': ['application/json'], 'Access-Control-Allow-Origin': ['*'] },
-          statusCode: 401,
-        };
-      }
-
-      // Idempotency & In-Window Replay Defense: reject duplicate nonce/eventId via Forge storage:app
-      if (nonceHeader) {
-        const isClaimed = await claimNonce(nonceHeader);
-        if (!isClaimed) {
-          return {
-            body: JSON.stringify({ error: 'Unauthorized: Replay attack detected (nonce/eventId already consumed within validity window).' }),
-            headers: { 'Content-Type': ['application/json'], 'Access-Control-Allow-Origin': ['*'] },
-            statusCode: 409,
-          };
-        }
-      }
-      let body: any = {};
       try {
         body = JSON.parse(request.body || '{}');
       } catch {}
+    }
 
       if (body.action === 'seed') {
         const seeded = await SeederService.seedEnterpriseDemoSuite();
@@ -226,7 +215,8 @@ export async function mcpWebtriggerHandler(request: any): Promise<any> {
 
       if (body.action === 'remediate') {
         const hazardKey = body.hazardKey || 'HAZ-101';
-        const updated = await SeederService.remediateClassCGap(hazardKey);
+        const accountId = request?.context?.accountId || body.accountId;
+        const updated = await SeederService.remediateClassCGap(hazardKey, accountId);
         return {
           body: JSON.stringify({ success: true, summary: updated }),
           headers: {
@@ -234,6 +224,44 @@ export async function mcpWebtriggerHandler(request: any): Promise<any> {
             'Access-Control-Allow-Origin': ['*'],
           },
           statusCode: 200,
+        };
+      }
+
+      if (body.action === 'verify') {
+        const result = await McpToolService.verifyIecCompliance({
+          prDiff: body.prDiff,
+          componentName: body.componentName,
+          issueKey: body.issueKey,
+        });
+        return {
+          body: JSON.stringify(result),
+          headers: { 'Content-Type': ['application/json'], 'Access-Control-Allow-Origin': ['*'] },
+          statusCode: 200,
+        };
+      }
+
+      if (body.action === 'verify-release-gate') {
+        const issueKey = typeof body.issueKey === 'string' && body.issueKey.trim() !== '' ? body.issueKey.trim() : undefined;
+        if (issueKey) {
+          const suite = await SeederService.getActiveComplianceSuite();
+          const matchedLink = suite.traceLinks.find(
+            (l: any) => (l.work?.key || '').toUpperCase() === issueKey.toUpperCase() || (l.hazard?.key || '').toUpperCase() === issueKey.toUpperCase()
+          );
+          if (!matchedLink) {
+            // Unlinked issue: not a safety hazard. Approve unless the whole suite is globally blocked.
+            const result = !suite.releaseBlocked;
+            return {
+              body: JSON.stringify({ result, errorMessage: result ? `Issue ${issueKey} is not linked to any safety hazard; release gate approved.` : suite.blockingReasons[0] }),
+              headers: { 'Content-Type': ['application/json'], 'Access-Control-Allow-Origin': ['*'] },
+              statusCode: result ? 200 : 403,
+            };
+          }
+        }
+        const outcome = await workflowValidatorHandler(issueKey ? { issue: { key: issueKey } } : {});
+        return {
+          body: JSON.stringify(outcome),
+          headers: { 'Content-Type': ['application/json'], 'Access-Control-Allow-Origin': ['*'] },
+          statusCode: outcome.result ? 200 : 403,
         };
       }
 
@@ -249,7 +277,6 @@ export async function mcpWebtriggerHandler(request: any): Promise<any> {
           statusCode: 200,
         };
       }
-    }
 
     // Default GET: return live compliance suite
     const suite = await SeederService.getActiveComplianceSuite();

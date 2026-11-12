@@ -41,11 +41,33 @@ modules:
       description: Retrieves complete ISO 14971 hazard safety lineage, linked Confluence SRS specifications, and verification test status.
       actionVerb: GET
       function: rovo-action-fn
+      inputs:
+        issueKey:
+          title: Issue or Hazard Key
+          type: string
+          required: false
+          description: Optional Jira issue key, hazard key, or test key to inspect (e.g. MED-42, HAZ-101, TEST-88). Omit to retrieve the full project lineage.
     - key: verify-iec-compliance-action
       name: Verify IEC Compliance
       description: Checks compliance status against IEC 62304 and FDA 21 CFR Part 11 rules, returning broken links or signature drift.
       actionVerb: GET
       function: rovo-action-fn
+      inputs:
+        issueKey:
+          title: Issue Key
+          type: string
+          required: false
+          description: Optional Jira issue key referenced by the change under audit (e.g. MED-42).
+        prDiff:
+          title: PR Diff
+          type: string
+          required: false
+          description: Optional code diff or change snippet to audit against safety-critical hazards.
+        componentName:
+          title: Component Name
+          type: string
+          required: false
+          description: Optional component or subsystem name (e.g. bolus clamp motor, droplet sensor, OLED power rail).
   rovo:mcp:
     - key: medtrace-mcp-server
       name: MedTrace MCP Server
@@ -70,10 +92,8 @@ resources:
 permissions:
   scopes:
     - read:jira-work
-    - write:jira-work
     - read:jira-user
     - read:page:confluence
-    - write:page:confluence
     - read:space:confluence
     - storage:app
   content:

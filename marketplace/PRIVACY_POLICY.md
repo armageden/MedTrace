@@ -46,4 +46,4 @@ MedTrace is built exclusively on the **Atlassian Forge** serverless platform. Th
 For inquiries regarding security, data handling, or audit compliance:
 - **Email:** `support@medtrace.dev`
 - **Developer Contact:** `farhantanvir277@gmail.com`
-- **Security Portal:** `https://github.com/medtrace/security`
+- **Security Portal:** `https://github.com/armageden/MedTrace` (open the repo and contact the maintainer, or email the support address below)

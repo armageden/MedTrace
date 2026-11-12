@@ -4,12 +4,13 @@ import { X, ShieldAlert, ShieldCheck } from 'lucide-react';
 interface TransitionModalProps {
   isOpen: boolean;
   onClose: () => void;
-  result: { result: boolean; errorMessage?: string } | null;
+  result: { result: boolean; errorMessage?: string; evalError?: string } | null;
 }
 
 export const TransitionModal: React.FC<TransitionModalProps> = ({ isOpen, onClose, result }) => {
   if (!isOpen || !result) return null;
 
+  const hasEvalError = !!result.evalError;
   const isBlocked = !result.result;
 
   return (
@@ -34,12 +35,16 @@ export const TransitionModal: React.FC<TransitionModalProps> = ({ isOpen, onClos
           maxWidth: 540,
           boxShadow: '0 8px 32px rgba(9, 30, 66, 0.3)',
           overflow: 'hidden',
-          borderTop: `6px solid ${isBlocked ? '#de350b' : '#00875a'}`,
+          borderTop: `6px solid ${hasEvalError ? '#ff991f' : isBlocked ? '#de350b' : '#00875a'}`,
         }}
       >
         <div style={{ padding: '20px 24px', display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-            {isBlocked ? (
+            {hasEvalError ? (
+              <div style={{ background: '#fff0b3', borderRadius: '50%', padding: 10, display: 'flex' }}>
+                <ShieldAlert size={28} color="#ff8b00" />
+              </div>
+            ) : isBlocked ? (
               <div style={{ background: '#ffebe6', borderRadius: '50%', padding: 10, display: 'flex' }}>
                 <ShieldAlert size={28} color="#de350b" />
               </div>
@@ -53,7 +58,7 @@ export const TransitionModal: React.FC<TransitionModalProps> = ({ isOpen, onClos
                 JIRA WORKFLOW VALIDATOR GATE — SIMULATION HARNESS
               </div>
               <div style={{ fontSize: 17, fontWeight: 800, color: '#172b4d', marginTop: 2 }}>
-                {isBlocked ? 'Transition to "Done" Blocked' : 'Transition to "Done" Authorized'}
+                {hasEvalError ? 'Gate Evaluation Failed' : isBlocked ? 'Transition to "Done" Blocked' : 'Transition to "Done" Authorized'}
               </div>
               <div style={{ fontSize: 11, color: '#6b778c', marginTop: 2, fontStyle: 'italic' }}>
                 Validator handler invoked directly in this harness; attaching to a workflow requires site-admin.
@@ -66,7 +71,18 @@ export const TransitionModal: React.FC<TransitionModalProps> = ({ isOpen, onClos
         </div>
 
         <div style={{ padding: '0 24px 20px 24px' }}>
-          {isBlocked ? (
+          {hasEvalError ? (
+            <div style={{ background: '#fffae6', border: '1px solid #ffe380', borderRadius: 6, padding: '14px 16px' }}>
+              <div style={{ fontWeight: 700, fontSize: 13, color: '#7f5f00', marginBottom: 6 }}>
+                No Verdict Rendered:
+              </div>
+              <div style={{ fontSize: 12, color: '#42526e', whiteSpace: 'pre-line', lineHeight: '18px' }}>
+                {result.evalError}
+                <br />
+                The validator handler could not be reached, so no blocked/approved outcome is displayed. Retry once the backend is reachable.
+              </div>
+            </div>
+          ) : isBlocked ? (
             <div style={{ background: '#fff5f5', border: '1px solid #ffbdad', borderRadius: 6, padding: '14px 16px' }}>
               <div style={{ fontWeight: 700, fontSize: 13, color: '#bf2600', marginBottom: 6 }}>
                 MedTrace IEC 62304 Safety Gate Lockout:
