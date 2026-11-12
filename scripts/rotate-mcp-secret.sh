@@ -25,6 +25,11 @@
 
 set -euo pipefail
 
+if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
+  sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'
+  exit 0
+fi
+
 CI=true
 FORGE_DISABLE_ANALYTICS=true
 export CI FORGE_DISABLE_ANALYTICS
@@ -33,9 +38,13 @@ export CI FORGE_DISABLE_ANALYTICS
 #   export FORGE_EMAIL="you@example.com"
 #   export FORGE_API_TOKEN="<forge-cli-scoped token>"
 FORGE_ENV_FILE="${FORGE_ENV_FILE:-$HOME/.forge-env}"
-[ -f "$FORGE_ENV_FILE" ] && . "$FORGE_ENV_FILE"
+if [ -f "$FORGE_ENV_FILE" ]; then
+  # shellcheck source=/dev/null
+  . "$FORGE_ENV_FILE"
+fi
 
 ENVIRONMENT="${ENVIRONMENT:-development}"
+ENVIRONMENTS="${ENVIRONMENTS:-production development}"
 FORGE_BIN="${FORGE_BIN:-forge}"
 ENV_FILE=".env"
 
@@ -45,14 +54,14 @@ if [ -z "${FORGE_API_TOKEN:-}" ]; then
     echo "❌ No credentials. Either run:  forge login   (needs libsecret/keychain)"
     echo "   or create ~/.forge-env (chmod 600) containing:"
     echo "      export FORGE_EMAIL=\"you@example.com\""
-      echo "      export FORGE_API_TOKEN=\"<token from go.atlassian.com/forge-cli-api-token>\""
+    echo "      export FORGE_API_TOKEN=\"<token from go.atlassian.com/forge-cli-api-token>\""
     exit 1
   }
 fi
 openssl rand -hex 1 >/dev/null 2>&1 || { echo "❌ openssl not found"; exit 1; }
 
 echo "== 1/6 Linting manifest =="
-"$FORGE_BIN" lint
+"$FORGE_BIN" lint --approve MAJOR_VERSION_RULE
 
 echo "== 2/6 Generating new 256-bit secret =="
 NEW_SECRET="$(openssl rand -hex 32)"
@@ -65,14 +74,12 @@ OLD_SECRET="${LEAKED_SECRET:-}"
 if [ "${SKIP_ROTATE:-0}" != "1" ]; then
   # Rotate + deploy every environment that serves the webtrigger. Variables are snapshotted
   # at deploy time (a variables set alone does not affect running deployments).
-  for ENV in ${ENVIRONMENTS:-production development}; do
-    if [ "${SKIP_ROTATE:-0}" != "1" ]; then
-      echo "== 3/6 Setting MEDTRACE_MCP_SECRET in environment: $ENV =="
-      "$FORGE_BIN" variables set MEDTRACE_MCP_SECRET "$NEW_SECRET" --environment "$ENV" --encrypt
-    fi
+  for ENV in $ENVIRONMENTS; do
+    echo "== 3/6 Setting MEDTRACE_MCP_SECRET in environment: $ENV =="
+    "$FORGE_BIN" variables set MEDTRACE_MCP_SECRET "$NEW_SECRET" --environment "$ENV" --encrypt
     if [ "${SKIP_DEPLOY:-0}" != "1" ]; then
       echo "== 4/6 Deploying manifest to $ENV =="
-      "$FORGE_BIN" deploy --environment "$ENV" --non-interactive
+      "$FORGE_BIN" deploy --environment "$ENV" --non-interactive --approve MAJOR_VERSION_RULE
     fi
   done
 else
@@ -81,7 +88,8 @@ else
 fi
 
 echo "== 5/6 Syncing local .env (if present) =="
-for ENV in production development; do
+WEBTRIGGER_URL=""
+for ENV in $ENVIRONMENTS; do
   WEBTRIGGER_URL="$("$FORGE_BIN" webtrigger list -f mcp-sync-webtrigger --environment "$ENV" -s "${FORGE_SITE:-one-atlas-feur.atlassian.net}" -p jira 2>/dev/null | grep -o 'https://[^ ]*' | head -1 || true)"
   [ -n "$WEBTRIGGER_URL" ] && break
 done
@@ -131,7 +139,7 @@ CODE_B="$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 -H "x-medtrace-ti
 echo "$CODE_B"; [ "$CODE_B" = "200" ] || { echo "      ❌ new secret rejected (did deploy finish?)"; FAIL=1; }
 
 echo "   c. 4-step replay proof  -> expect 200 / 409 / 409 / 200:"
-BODY='{"action":"validate","issueKey":"MED-42"}'
+BODY='{"action":"simulate_transition","issueKey":"MED-42"}'
 for STEP in 1 2 3 4; do
   if [ "$STEP" = "3" ]; then
     TS="$(date +%s%3N)"   # attacker refreshes timestamp, keeps consumed nonce

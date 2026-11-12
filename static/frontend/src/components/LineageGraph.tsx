@@ -1,4 +1,4 @@
-import React, { useMemo } from 'react';
+import React, { useMemo, useState } from 'react';
 import {
   ReactFlow,
   Background,
@@ -8,17 +8,19 @@ import {
   Edge,
   NodeTypes,
   MarkerType,
+  useViewport,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
-import { HazardNode, SpecNode, WorkNode, TestNode, SignatureNode } from './CustomNodes';
+import { HazardNode, SpecNode, WorkNode, TestNode, SignatureNode, FlowLinkRef, FlowNodePayload } from './CustomNodes';
 import { ComplianceSummary } from '../types';
 
 interface LineageGraphProps {
   summary: ComplianceSummary;
+  compact?: boolean;
   onSelectTraceLink: (linkId: string) => void;
 }
 
-const nodeTypes = {
+const nodeTypes: NodeTypes = {
   hazard: HazardNode,
   spec: SpecNode,
   work: WorkNode,
@@ -26,9 +28,65 @@ const nodeTypes = {
   signature: SignatureNode,
 };
 
-export const LineageGraph: React.FC<LineageGraphProps> = ({ summary, onSelectTraceLink }) => {
+const STAGE_COLUMNS = [
+  { key: 'hazard', label: '1. ISO 14971 HAZARD', x: 40, width: 220 },
+  { key: 'spec', label: '2. CONFLUENCE SRS SPEC', x: 340, width: 220 },
+  { key: 'work', label: '3. JIRA WORK & PR', x: 640, width: 210 },
+  { key: 'test', label: '4. IEC 62304 VERIFICATION', x: 920, width: 220 },
+  { key: 'signature', label: '5. 21 CFR PART 11 SIGN-OFF', x: 1210, width: 220 },
+] as const;
+
+const StageHeaderOverlay: React.FC = () => {
+  const { x, zoom } = useViewport();
+
+  return (
+    <div
+      style={{
+        position: 'absolute',
+        top: 10,
+        left: 0,
+        right: 0,
+        height: 32,
+        overflow: 'hidden',
+        zIndex: 10,
+        pointerEvents: 'none',
+      }}
+    >
+      {STAGE_COLUMNS.map((col) => (
+        <div
+          key={col.key}
+          style={{
+            position: 'absolute',
+            top: 0,
+            left: x + col.x * zoom,
+            width: Math.max(110, col.width * zoom),
+            fontSize: 10,
+            fontWeight: 800,
+            letterSpacing: '0.6px',
+            color: '#42526e',
+            background: 'rgba(255, 255, 255, 0.94)',
+            padding: '4px 8px',
+            borderRadius: 4,
+            boxShadow: '0 1px 3px rgba(9, 30, 66, 0.08)',
+            border: '1px solid #dfe1e6',
+            textAlign: 'center',
+            whiteSpace: 'nowrap',
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+          }}
+        >
+          {col.label}
+        </div>
+      ))}
+    </div>
+  );
+};
+
+export const LineageGraph: React.FC<LineageGraphProps> = ({ summary, compact = false, onSelectTraceLink }) => {
+  const [ambiguousRefs, setAmbiguousRefs] = useState<FlowLinkRef[] | null>(null);
+
   const { nodes, edges } = useMemo(() => {
-    const calculatedNodes: Node[] = [];
+    const nodeMap = new Map<string, Node<FlowNodePayload<unknown>>>();
     const calculatedEdges: Edge[] = [];
 
     const colX = {
@@ -39,163 +97,174 @@ export const LineageGraph: React.FC<LineageGraphProps> = ({ summary, onSelectTra
       signature: 1210,
     };
 
+    const upsertNode = (
+      id: string,
+      type: 'hazard' | 'spec' | 'work' | 'test' | 'signature',
+      position: { x: number; y: number },
+      item: unknown,
+      linkRef: FlowLinkRef
+    ) => {
+      const existing = nodeMap.get(id);
+      if (existing) {
+        if (!existing.data.linkRefs.some((r) => r.id === linkRef.id)) {
+          existing.data.linkRefs.push(linkRef);
+        }
+        return;
+      }
+      nodeMap.set(id, {
+        id,
+        type,
+        position,
+        data: { item, linkRefs: [linkRef] },
+      });
+    };
+
     summary.traceLinks.forEach((link, idx) => {
-      const yPos = 80 + idx * 160;
+      const yPos = 72 + idx * 160;
       const isBroken = link.complianceState !== 'VERIFIED';
       const edgeColor = isBroken ? '#de350b' : '#00875a';
+      const linkRef: FlowLinkRef = {
+        id: link.id,
+        hazardKey: link.hazard.key,
+        workKey: link.work.key,
+      };
 
-      // 1. Hazard Node
-      calculatedNodes.push({
-        id: `node-${link.hazard.id}`,
-        type: 'hazard',
-        position: { x: colX.hazard, y: yPos },
-        data: link.hazard as unknown as Record<string, unknown>,
-      });
+      const hazNodeId = `node-haz-${link.hazard.id}`;
+      const specNodeId = `node-spec-${link.spec.id}`;
+      const workNodeId = `node-work-${link.work.id}`;
+      const testNodeId = `node-test-${link.test.id}`;
+      const sigNodeId = `node-sig-${link.signature.id}`;
 
-      // 2. Confluence Spec Node
-      calculatedNodes.push({
-        id: `node-${link.spec.id}`,
-        type: 'spec',
-        position: { x: colX.spec, y: yPos },
-        data: link.spec as unknown as Record<string, unknown>,
-      });
+      upsertNode(hazNodeId, 'hazard', { x: colX.hazard, y: yPos }, link.hazard, linkRef);
+      upsertNode(specNodeId, 'spec', { x: colX.spec, y: yPos }, link.spec, linkRef);
+      upsertNode(workNodeId, 'work', { x: colX.work, y: yPos }, link.work, linkRef);
+      upsertNode(testNodeId, 'test', { x: colX.test, y: yPos }, link.test, linkRef);
+      upsertNode(sigNodeId, 'signature', { x: colX.signature, y: yPos }, link.signature, linkRef);
 
-      // 3. Jira Work Item Node
-      calculatedNodes.push({
-        id: `node-${link.work.id}`,
-        type: 'work',
-        position: { x: colX.work, y: yPos },
-        data: link.work as unknown as Record<string, unknown>,
-      });
-
-      // 4. Verification Test Node
-      calculatedNodes.push({
-        id: `node-${link.test.id}`,
-        type: 'test',
-        position: { x: colX.test, y: yPos },
-        data: link.test as unknown as Record<string, unknown>,
-      });
-
-      // 5. 21 CFR Part 11 Signature Node
-      calculatedNodes.push({
-        id: `node-${link.signature.id}`,
-        type: 'signature',
-        position: { x: colX.signature, y: yPos },
-        data: link.signature as unknown as Record<string, unknown>,
-      });
-
-      // Edges connecting the 5 stages
-      // Hazard -> Spec
-      calculatedEdges.push({
-        id: `e-haz-spec-${link.id}`,
-        source: `node-${link.hazard.id}`,
-        target: `node-${link.spec.id}`,
+      const baseEdge = {
         animated: isBroken,
-        style: { stroke: edgeColor, strokeWidth: 2 },
+        style: { stroke: edgeColor, strokeWidth: isBroken ? 2.5 : 2, cursor: 'pointer' },
         markerEnd: { type: MarkerType.ArrowClosed, color: edgeColor },
-      });
+        data: { linkId: link.id },
+      };
 
-      // Spec -> Work
-      calculatedEdges.push({
-        id: `e-spec-work-${link.id}`,
-        source: `node-${link.spec.id}`,
-        target: `node-${link.work.id}`,
-        animated: isBroken,
-        style: { stroke: edgeColor, strokeWidth: 2 },
-        markerEnd: { type: MarkerType.ArrowClosed, color: edgeColor },
-      });
-
-      // Work -> Test
-      calculatedEdges.push({
-        id: `e-work-test-${link.id}`,
-        source: `node-${link.work.id}`,
-        target: `node-${link.test.id}`,
-        animated: isBroken,
-        style: { stroke: edgeColor, strokeWidth: isBroken ? 2.5 : 2 },
-        markerEnd: { type: MarkerType.ArrowClosed, color: edgeColor },
-      });
-
-      // Test -> Signature
-      calculatedEdges.push({
-        id: `e-test-sig-${link.id}`,
-        source: `node-${link.test.id}`,
-        target: `node-${link.signature.id}`,
-        animated: isBroken,
-        style: { stroke: edgeColor, strokeWidth: 2 },
-        markerEnd: { type: MarkerType.ArrowClosed, color: edgeColor },
-      });
+      calculatedEdges.push(
+        { id: `e-haz-spec-${link.id}`, source: hazNodeId, target: specNodeId, ...baseEdge },
+        { id: `e-spec-work-${link.id}`, source: specNodeId, target: workNodeId, ...baseEdge },
+        { id: `e-work-test-${link.id}`, source: workNodeId, target: testNodeId, ...baseEdge },
+        { id: `e-test-sig-${link.id}`, source: testNodeId, target: sigNodeId, ...baseEdge }
+      );
     });
 
-    const dedupedNodes = calculatedNodes.filter((n, i, arr) => arr.findIndex((x) => x.id === n.id) === i);
-    return { nodes: dedupedNodes, edges: calculatedEdges };
+    return { nodes: Array.from(nodeMap.values()), edges: calculatedEdges };
   }, [summary]);
 
   return (
-    <div style={{ height: 'calc(100vh - 220px)', minHeight: '580px', width: '100%', position: 'relative', background: '#fafbfc', borderRadius: 8, border: '1px solid #ebecf0' }}>
-      {/* Column Stage Headers */}
-      <div
-        style={{
-          position: 'absolute',
-          top: 12,
-          left: 0,
-          right: 0,
-          display: 'flex',
-          justifyContent: 'space-between',
-          padding: '0 60px 0 50px',
-          zIndex: 10,
-          pointerEvents: 'none',
-        }}
-      >
-        <div style={headerStyle}>1. ISO 14971 HAZARD ANALYSIS</div>
-        <div style={headerStyle}>2. CONFLUENCE SRS SPEC</div>
-        <div style={headerStyle}>3. JIRA WORK & PR</div>
-        <div style={headerStyle}>4. IEC 62304 VERIFICATION</div>
-        <div style={headerStyle}>5. 21 CFR PART 11 SIGN-OFF</div>
-      </div>
+    <div
+      style={{
+        height: compact ? '380px' : 'calc(100vh - 230px)',
+        minHeight: compact ? '340px' : '540px',
+        width: '100%',
+        position: 'relative',
+        background: '#fafbfc',
+        borderRadius: 8,
+        border: '1px solid #ebecf0',
+      }}
+    >
+      {ambiguousRefs && ambiguousRefs.length > 1 && (
+        <div
+          role="dialog"
+          aria-label="Select trace link for shared node"
+          style={{
+            position: 'absolute',
+            top: 52,
+            left: '50%',
+            transform: 'translateX(-50%)',
+            zIndex: 30,
+            background: '#ffffff',
+            border: '1px solid #dfe1e6',
+            borderRadius: 8,
+            padding: '10px 12px',
+            boxShadow: '0 4px 16px rgba(9, 30, 66, 0.2)',
+            display: 'flex',
+            alignItems: 'center',
+            gap: 8,
+            flexWrap: 'wrap',
+          }}
+        >
+          <span style={{ fontSize: 11, fontWeight: 700, color: '#172b4d' }}>
+            Shared node — choose lineage to inspect:
+          </span>
+          {ambiguousRefs.map((ref) => (
+            <button
+              key={ref.id}
+              type="button"
+              className="mt-btn"
+              onClick={() => {
+                setAmbiguousRefs(null);
+                onSelectTraceLink(ref.id);
+              }}
+              style={{
+                padding: '4px 10px',
+                border: '1px solid #0052cc',
+                background: '#deebff',
+                color: '#0052cc',
+              }}
+            >
+              {ref.hazardKey} ({ref.workKey})
+            </button>
+          ))}
+          <button
+            type="button"
+            className="mt-icon-btn"
+            aria-label="Dismiss link selector"
+            onClick={() => setAmbiguousRefs(null)}
+            style={{ fontSize: 12, fontWeight: 700 }}
+          >
+            ✕
+          </button>
+        </div>
+      )}
 
       <ReactFlow
         nodes={nodes}
         edges={edges}
-        nodeTypes={nodeTypes as NodeTypes}
+        nodeTypes={nodeTypes}
+        nodesDraggable={false}
+        nodesConnectable={false}
         fitView
         onNodeClick={(_, node) => {
-          const rawId = node.id.replace('node-', '');
-          const match = summary.traceLinks.find(
-            (l) =>
-              l.hazard.id === rawId ||
-              l.spec.id === rawId ||
-              l.work.id === rawId ||
-              l.test.id === rawId ||
-              l.signature.id === rawId
-          );
-          if (match) {
-            onSelectTraceLink(match.id);
+          const payload = node.data as FlowNodePayload<unknown> | undefined;
+          const refs = payload?.linkRefs || [];
+          if (refs.length === 1) {
+            setAmbiguousRefs(null);
+            onSelectTraceLink(refs[0].id);
+          } else if (refs.length > 1) {
+            setAmbiguousRefs(refs);
+          }
+        }}
+        onEdgeClick={(_, edge) => {
+          const linkId = (edge.data as { linkId?: string } | undefined)?.linkId;
+          if (linkId) {
+            setAmbiguousRefs(null);
+            onSelectTraceLink(linkId);
           }
         }}
       >
+        <StageHeaderOverlay />
         <Background color="#dfe1e6" gap={20} size={1} />
         <Controls />
-        <MiniMap
-          nodeColor={(n) => {
-            if (n.type === 'hazard') return '#de350b';
-            if (n.type === 'test') return '#ff8b00';
-            return '#0052cc';
-          }}
-          style={{ height: 100, width: 140 }}
-        />
+        {!compact && (
+          <MiniMap
+            nodeColor={(n) => {
+              if (n.type === 'hazard') return '#de350b';
+              if (n.type === 'test') return '#ff8b00';
+              return '#0052cc';
+            }}
+            style={{ height: 100, width: 140 }}
+          />
+        )}
       </ReactFlow>
     </div>
   );
-};
-
-const headerStyle: React.CSSProperties = {
-  fontSize: 11,
-  fontWeight: 800,
-  letterSpacing: '0.8px',
-  color: '#5e6c84',
-  background: 'rgba(255, 255, 255, 0.9)',
-  padding: '4px 10px',
-  borderRadius: 4,
-  boxShadow: '0 1px 3px rgba(9, 30, 66, 0.08)',
-  border: '1px solid #dfe1e6',
 };

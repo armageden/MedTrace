@@ -1,17 +1,66 @@
 import api, { route } from '@forge/api';
 import { kvs } from '@forge/kvs';
 import crypto from 'node:crypto';
+import { AuditLogService } from './audit-log';
 import { ComplianceEngine } from './compliance-engine';
-import { IsoHazard, ConfluenceSpec, JiraWorkItem, VerificationTest, Part11Signature, ComplianceSummary, GraphMetadata } from './types';
+import { isForgeRuntime } from './runtime';
+import {
+  AuditAuthMethod,
+  ComplianceSummary,
+  ConfluenceSpec,
+  GraphMetadata,
+  IsoHazard,
+  JiraWorkItem,
+  Part11Attestation,
+  Part11Signature,
+  TraceLink,
+  VerificationTest,
+} from './types';
+
+interface ShardedSuiteMeta {
+  projectName: string;
+  datasetMode: 'DEMO' | 'LIVE';
+  standards: string[];
+  totalHazards: number;
+  classCCount: number;
+  classBCount: number;
+  classACount: number;
+  verifiedPercentage: number;
+  releaseBlocked: boolean;
+  blockingReasons: string[];
+  signatureDriftCount: number;
+  lastAuditTimestamp: string;
+  linkKeys: string[];
+  storageFormat: 'SHARDED_V2';
+  version: number;
+}
+
+export interface SignedSpecBaseline {
+  specId: string;
+  pageId?: string;
+  sha256Hash: string;
+  signedBy: string;
+  signedAt: string;
+  role: string;
+  meaning: string;
+  authMethod: string;
+}
+
+const SUITE_META_KEY = 'medtrace:compliance:suite_meta';
+const LINK_KEY_PREFIX = 'medtrace:compliance:link:';
+const SIGNED_SPEC_PREFIX = 'medtrace:compliance:signed_spec:';
+const LEGACY_STORAGE_KEY = 'medtrace:compliance:active_suite';
+const BATCH_CHUNK_SIZE = 25;
 
 export class SeederService {
-  private static STORAGE_KEY = 'medtrace:compliance:active_suite';
   private static inMemorySuite: ComplianceSummary | null = null;
+  private static inMemorySignedSpecs = new Map<string, SignedSpecBaseline>();
 
   /**
-   * Preflight check to determine if Confluence Cloud is installed and accessible
+   * Preflight check to determine if Confluence Cloud is installed and accessible.
    */
   private static async checkConfluenceAvailable(): Promise<boolean> {
+    if (!isForgeRuntime()) return false;
     try {
       const resp = await api.asApp().requestConfluence(route`/wiki/api/v2/spaces?limit=1`);
       return resp.status === 200;
@@ -20,19 +69,155 @@ export class SeederService {
     }
   }
 
+  public static async getSignedSpecBaseline(specOrPageId: string): Promise<SignedSpecBaseline | undefined> {
+    const cleanId = (specOrPageId || '').trim();
+    if (!cleanId) return undefined;
+    if (!isForgeRuntime()) {
+      return this.inMemorySignedSpecs.get(cleanId);
+    }
+    return (await kvs.get(`${SIGNED_SPEC_PREFIX}${cleanId}`)) as SignedSpecBaseline | undefined;
+  }
+
+  public static async setSignedSpecBaseline(baseline: SignedSpecBaseline): Promise<void> {
+    if (!isForgeRuntime()) {
+      this.inMemorySignedSpecs.set(baseline.specId, baseline);
+      if (baseline.pageId) {
+        this.inMemorySignedSpecs.set(baseline.pageId, baseline);
+      }
+      return;
+    }
+    await kvs.set(`${SIGNED_SPEC_PREFIX}${baseline.specId}`, baseline);
+    if (baseline.pageId && baseline.pageId !== baseline.specId) {
+      await kvs.set(`${SIGNED_SPEC_PREFIX}${baseline.pageId}`, baseline);
+    }
+  }
+
   /**
-   * 1-Click Bulletproof Seeder execution
+   * Persists the compliance suite sharded across KVS keys (`suite_meta` + per-link keys)
+   * so large suites cannot breach the 240 KiB per-key KVS ceiling.
+   * Outside Forge runtime, stores in volatile memory; inside Forge runtime, KVS errors propagate loudly.
    */
-  public static async seedEnterpriseDemoSuite(): Promise<{
+  public static async saveComplianceSuite(summary: ComplianceSummary, expectedVersion?: number): Promise<ComplianceSummary> {
+    const auditHead = await AuditLogService.getHead();
+    const enrichedSummary: ComplianceSummary = {
+      ...summary,
+      storageFormat: 'SHARDED_V2',
+      auditEntryCount: auditHead.lastSeq,
+      auditHeadHash: auditHead.headHash,
+    };
+
+    if (!isForgeRuntime()) {
+      this.inMemorySuite = enrichedSummary;
+      return enrichedSummary;
+    }
+
+    const existingMeta = (await kvs.get(SUITE_META_KEY)) as ShardedSuiteMeta | undefined;
+    if (typeof expectedVersion === 'number' && existingMeta && existingMeta.version !== expectedVersion) {
+      throw new Error(
+        `Concurrent modification detected on compliance suite (expected version ${expectedVersion}, found ${existingMeta.version}). Please retry.`
+      );
+    }
+
+    const linkItems = enrichedSummary.traceLinks.map((link) => ({
+      key: `${LINK_KEY_PREFIX}${link.id}`,
+      value: link,
+    }));
+
+    for (let i = 0; i < linkItems.length; i += BATCH_CHUNK_SIZE) {
+      const chunk = linkItems.slice(i, i + BATCH_CHUNK_SIZE);
+      const batchResult = await kvs.batchSet(chunk);
+      if (batchResult.failedKeys && batchResult.failedKeys.length > 0) {
+        throw new Error(
+          `Failed to persist compliance trace links to Forge KVS: ${batchResult.failedKeys.map((f) => `${f.key}:${f.error.code}`).join(', ')}`
+        );
+      }
+    }
+
+    const nextVersion = (existingMeta?.version ?? 0) + 1;
+    const meta: ShardedSuiteMeta = {
+      projectName: enrichedSummary.projectName,
+      datasetMode: enrichedSummary.datasetMode,
+      standards: enrichedSummary.standards,
+      totalHazards: enrichedSummary.totalHazards,
+      classCCount: enrichedSummary.classCCount,
+      classBCount: enrichedSummary.classBCount,
+      classACount: enrichedSummary.classACount,
+      verifiedPercentage: enrichedSummary.verifiedPercentage,
+      releaseBlocked: enrichedSummary.releaseBlocked,
+      blockingReasons: enrichedSummary.blockingReasons,
+      signatureDriftCount: enrichedSummary.signatureDriftCount,
+      lastAuditTimestamp: enrichedSummary.lastAuditTimestamp,
+      linkKeys: linkItems.map((item) => item.key),
+      storageFormat: 'SHARDED_V2',
+      version: nextVersion,
+    };
+
+    await kvs.set(SUITE_META_KEY, meta);
+    return enrichedSummary;
+  }
+
+  private static async loadShardedSuiteFromKvs(): Promise<{ summary: ComplianceSummary; version: number } | undefined> {
+    const meta = (await kvs.get(SUITE_META_KEY)) as ShardedSuiteMeta | undefined;
+    if (!meta || !Array.isArray(meta.linkKeys)) {
+      return undefined;
+    }
+
+    const linkMap = new Map<string, TraceLink>();
+    for (let i = 0; i < meta.linkKeys.length; i += BATCH_CHUNK_SIZE) {
+      const chunkKeys = meta.linkKeys.slice(i, i + BATCH_CHUNK_SIZE).map((key) => ({ key }));
+      if (chunkKeys.length === 0) continue;
+      const batchRes = await kvs.batchGet(chunkKeys);
+      for (const item of batchRes.successfulKeys || []) {
+        linkMap.set(item.key, item.value as TraceLink);
+      }
+    }
+
+    const traceLinks: TraceLink[] = [];
+    for (const key of meta.linkKeys) {
+      const link = linkMap.get(key);
+      if (link) traceLinks.push(link);
+    }
+
+    const auditHead = await AuditLogService.getHead();
+
+    return {
+      version: meta.version ?? 0,
+      summary: {
+        projectName: meta.projectName,
+        datasetMode: meta.datasetMode ?? 'DEMO',
+        standards: meta.standards,
+        totalHazards: meta.totalHazards,
+        classCCount: meta.classCCount,
+        classBCount: meta.classBCount,
+        classACount: meta.classACount,
+        verifiedPercentage: meta.verifiedPercentage,
+        releaseBlocked: meta.releaseBlocked,
+        blockingReasons: meta.blockingReasons,
+        signatureDriftCount: meta.signatureDriftCount,
+        traceLinks,
+        lastAuditTimestamp: meta.lastAuditTimestamp,
+        storageFormat: 'SHARDED_V2',
+        auditEntryCount: auditHead.lastSeq,
+        auditHeadHash: auditHead.headHash,
+      },
+    };
+  }
+
+  /**
+   * 1-Click Demo Dataset Seeder (explicitly labeled DEMO mode).
+   */
+  public static async seedEnterpriseDemoSuite(
+    actorAccountId: string = 'system:demo-seeder',
+    authMethod: AuditAuthMethod | string = 'SYSTEM_INIT'
+  ): Promise<{
     success: boolean;
     confluenceEnabled: boolean;
     summary: ComplianceSummary;
     message: string;
   }> {
     const confluenceEnabled = await this.checkConfluenceAvailable();
-    console.log(`[MedTrace Seeder] Confluence availability: ${confluenceEnabled}`);
+    console.log(`[MedTrace Seeder] Seeding DEMO suite (Confluence available: ${confluenceEnabled})`);
 
-    // Realistic ISO 14971 Hazards (Insulin Smart Infusion Pump v2.1)
     const hazards: IsoHazard[] = [
       {
         id: 'haz-101',
@@ -79,8 +264,6 @@ export class SeederService {
     const srs105Hash = computeSha256(srs105Snippet);
     const srs106Hash = computeSha256(srs106Snippet);
 
-    // Confluence Software Requirements Specification (SRS) nodes
-    // HAZ-101 has deliberate signature drift (v3 hash vs v2 approved signature)
     const specs: ConfluenceSpec[] = [
       {
         id: 'srs-104',
@@ -114,7 +297,6 @@ export class SeederService {
       },
     ];
 
-    // Jira Implementation Work Items
     const workItems: JiraWorkItem[] = [
       {
         id: 'med-42',
@@ -145,16 +327,13 @@ export class SeederService {
       },
     ];
 
-    // Verification Tests (IEC 62304 Clause 5.7)
-    // HAZ-101 has TEST-88 in UNTESTED state (Crucial demonstration trigger)
-    // Verification tests: in the modeled demo fixture, evidence URLs model private lab HIL runs
     const tests: VerificationTest[] = [
       {
         id: 'test-88',
         testKey: 'TEST-88',
         title: 'Hardware-in-the-Loop Occlusion & Over-Infusion Motor Stress Test',
         testType: 'Automated HIL (Hardware-in-Loop)',
-        status: 'UNTESTED', // Triggers IEC 62304 Class C Violation!
+        status: 'UNTESTED',
         executionDate: 'Pending HIL Bench Run',
         evidenceUrl: 'https://ci.medical-devices.internal/test-runs/hil-88',
       },
@@ -178,7 +357,6 @@ export class SeederService {
       },
     ];
 
-    // FDA 21 CFR Part 11 Cryptographic Electronic Signatures
     const signatures: Part11Signature[] = [
       {
         id: 'sig-001',
@@ -186,7 +364,7 @@ export class SeederService {
         signedAt: '2026-10-15T11:30:00Z',
         role: 'Clinical Safety Authority',
         meaning: 'Approval of ISO 14971 Risk Assessment & Mitigation Architecture',
-        artifactSha256: srs104ApprovedHash, // Matches v2, NOT modified v3!
+        artifactSha256: srs104ApprovedHash,
         isValid: false,
         invalidationReason: 'AUTOMATIC REVOCATION: Confluence spec modified at version 3 without clinical re-signature.',
       },
@@ -210,12 +388,6 @@ export class SeederService {
       },
     ];
 
-    // Demo work items stay synthetic: grafting real tenant issue keys onto modeled hazards would
-    // bind the judge's own issues to the safety gate with fabricated violations (see ADR 001).
-
-    // Modeled Teamwork Graph (TWG) node ARIs & edge relationships. These are demo lineage records —
-    // live AGG traversal happens in queryGraphContext; Forge cannot write custom entities to the
-    // Teamwork Graph, so the status string below must never claim a real gateway traversal.
     const graphMetadatas: GraphMetadata[] = [
       {
         entityAri: 'ari:cloud:jira:5cbf2ff9-658a-44d8-9004-dbe8a96e952b:issue/10042',
@@ -240,112 +412,141 @@ export class SeederService {
       },
     ];
 
-
-    // Evaluate trace links using Compliance Engine
     const traceLinks = hazards.map((hazard, index) =>
-      ComplianceEngine.evaluateTraceLink(hazard, specs[index], workItems[index], tests[index], signatures[index], graphMetadatas[index])
+      ComplianceEngine.evaluateTraceLink(
+        hazard,
+        specs[index],
+        workItems[index],
+        tests[index],
+        signatures[index],
+        graphMetadatas[index]
+      )
     );
 
-    const summary = ComplianceEngine.generateComplianceReport(traceLinks, 'DEMO', 'Smart Infusion Pump Firmware v2.1');
+    await AuditLogService.append({
+      actorAccountId,
+      action: 'SEED_DEMO',
+      targetKey: 'DEMO_SUITE',
+      details: {
+        hazardCount: traceLinks.length,
+        confluenceEnabled,
+      },
+      authMethod,
+    });
 
-    // Save to persistent Forge storage (with in-memory fallback outside Forge runtime)
-    try {
-      await kvs.set(this.STORAGE_KEY, summary);
-    } catch {
-      this.inMemorySuite = summary;
-    }
+    const summary = ComplianceEngine.generateComplianceReport(
+      traceLinks,
+      'DEMO',
+      'Smart Infusion Pump Firmware v2.1'
+    );
+    const saved = await this.saveComplianceSuite(summary);
 
     return {
       success: true,
       confluenceEnabled,
-      summary,
-      message: 'Successfully populated IEC 62304 Smart Infusion Pump Firmware dataset with Teamwork Graph ARIs (3 Hazards, 3 SRS Specs, 3 Work Items, 3 Tests, 3 Signatures).',
+      summary: saved,
+      message:
+        'Successfully populated IEC 62304 Smart Infusion Pump Firmware DEMO dataset (3 Hazards, 3 SRS Specs, 3 Work Items, 3 Tests, 3 Signatures).',
     };
   }
 
   /**
-   * Bind a real Jira issue key into a hazard's trace link work item
-   */
-  public static async bindIssueToHazard(hazardKey: string, issueKey: string): Promise<ComplianceSummary> {
-    const current = await this.getActiveComplianceSuite();
-    const targetLink = current.traceLinks.find((l) => l.hazard.key.toLowerCase() === hazardKey.toLowerCase());
-    if (!targetLink) {
-      throw new Error(`Hazard ${hazardKey} not found in the active compliance suite.`);
-    }
-    targetLink.work.key = issueKey;
-    targetLink.work.id = issueKey.toLowerCase();
-    const updatedSummary = ComplianceEngine.generateComplianceReport(
-      current.traceLinks,
-      current.datasetMode ?? 'DEMO',
-      current.projectName
-    );
-    try {
-      await kvs.set(this.STORAGE_KEY, updatedSummary);
-    } catch {
-      this.inMemorySuite = updatedSummary;
-    }
-    return updatedSummary;
-  }
-
-  /**
-   * Retrieves active compliance state from Forge storage
+   * Retrieves the active compliance suite from sharded Forge KVS (or volatile memory outside Forge).
    */
   public static async getActiveComplianceSuite(): Promise<ComplianceSummary> {
-    try {
-      const data = await kvs.get(this.STORAGE_KEY) as (ComplianceSummary & { datasetMode?: 'DEMO' | 'LIVE' }) | undefined;
-      if (data && data.traceLinks && data.traceLinks.length > 0) {
-        // Backfill datasetMode for suites stored by pre-badge versions
-        return { ...data, datasetMode: data.datasetMode ?? 'DEMO' };
-      }
-    } catch {
+    if (!isForgeRuntime()) {
       if (this.inMemorySuite && this.inMemorySuite.traceLinks && this.inMemorySuite.traceLinks.length > 0) {
-        return this.inMemorySuite;
+        const head = await AuditLogService.getHead();
+        return {
+          ...this.inMemorySuite,
+          auditEntryCount: head.lastSeq,
+          auditHeadHash: head.headHash,
+        };
       }
+      const init = await this.seedEnterpriseDemoSuite('system:auto-init', 'SYSTEM_INIT');
+      return init.summary;
     }
-    // Auto-seed on initial empty load so judge never encounters a blank screen
-    const init = await this.seedEnterpriseDemoSuite();
+
+    const sharded = await this.loadShardedSuiteFromKvs();
+    if (sharded && sharded.summary.traceLinks.length > 0) {
+      return sharded.summary;
+    }
+
+    // Legacy single-key migration fallback
+    const legacy = (await kvs.get(LEGACY_STORAGE_KEY)) as
+      | (ComplianceSummary & { datasetMode?: 'DEMO' | 'LIVE' })
+      | undefined;
+    if (legacy && legacy.traceLinks && legacy.traceLinks.length > 0) {
+      return await this.saveComplianceSuite({ ...legacy, datasetMode: legacy.datasetMode ?? 'DEMO' });
+    }
+
+    const init = await this.seedEnterpriseDemoSuite('system:auto-init', 'SYSTEM_INIT');
     return init.summary;
   }
 
+  private static async getSuiteWithVersion(): Promise<{ summary: ComplianceSummary; version?: number }> {
+    if (!isForgeRuntime()) {
+      return { summary: await this.getActiveComplianceSuite() };
+    }
+    const sharded = await this.loadShardedSuiteFromKvs();
+    if (sharded && sharded.summary.traceLinks.length > 0) {
+      return sharded;
+    }
+    return { summary: await this.getActiveComplianceSuite() };
+  }
+
   /**
-   * Simulates resolving the Class C gap and re-signing the Part 11 artifact
+   * Binds a Jira issue key into a hazard's trace link work item.
+   * In Forge runtime, validates the issue against Jira REST API and hydrates summary/status/assignee.
    */
-  public static async remediateClassCGap(targetHazardKey: string = 'HAZ-101', accountId?: string): Promise<ComplianceSummary> {
-    const current = await this.getActiveComplianceSuite();
-    const targetLink = current.traceLinks.find(
-      (l) => l.hazard.key.toLowerCase() === targetHazardKey.toLowerCase()
+  public static async bindIssueToHazard(
+    hazardKey: string,
+    issueKey: string,
+    actorAccountId: string = 'system',
+    authMethod: AuditAuthMethod | string = 'FORGE_USER_SESSION'
+  ): Promise<ComplianceSummary> {
+    const cleanIssueKey = (issueKey || '').trim().toUpperCase();
+    if (!/^[A-Z][A-Z0-9_]+-\d+$/.test(cleanIssueKey)) {
+      throw new Error(`Invalid Jira issue key format: "${issueKey}". Expected format like MED-42.`);
+    }
+
+    const { summary: current, version } = await this.getSuiteWithVersion();
+    const idx = current.traceLinks.findIndex(
+      (l) => l.hazard.key.toLowerCase() === (hazardKey || '').trim().toLowerCase()
     );
-
-    if (!targetLink) {
-      // Fail loudly: returning the unchanged suite here would let callers report a
-      // successful remediation that never happened.
-      throw new Error(`Hazard ${targetHazardKey} not found in the active compliance suite — nothing was remediated.`);
+    if (idx < 0) {
+      throw new Error(`Hazard ${hazardKey} not found in the active compliance suite.`);
     }
 
-    // 1. Mark test as PASSED
-    targetLink.test.status = 'PASSED';
-    targetLink.test.executionDate = 'Just now (Simulated Automated HIL Run: 120/120 Passed)';
+    const targetLink = current.traceLinks[idx];
+    const previousIssueKey = targetLink.work.key;
 
-    // 2. Re-sign 21 CFR Part 11 signature with current hash (simulated; identity recorded, not authenticated)
-    targetLink.signature.artifactSha256 = targetLink.spec.sha256Hash;
-    targetLink.signature.isValid = true;
-    targetLink.signature.signedAt = new Date().toISOString();
-    targetLink.signature.invalidationReason = undefined;
-    if (accountId) {
-      targetLink.signature.signedBy = `accountId:${accountId}`;
+    if (isForgeRuntime()) {
+      const resp = await api
+        .asApp()
+        .requestJira(route`/rest/api/3/issue/${cleanIssueKey}?fields=summary,status,assignee`);
+      if (resp.status !== 200) {
+        throw new Error(`Jira issue ${cleanIssueKey} could not be verified (HTTP ${resp.status}).`);
+      }
+      const issueData = await resp.json();
+      targetLink.work.id = String(issueData?.id || cleanIssueKey.toLowerCase());
+      targetLink.work.key = String(issueData?.key || cleanIssueKey);
+      if (issueData?.fields?.summary) {
+        targetLink.work.title = issueData.fields.summary;
+      }
+      const statusName = issueData?.fields?.status?.name;
+      if (statusName === 'Done' || statusName === 'In Progress' || statusName === 'Under Review' || statusName === 'To Do') {
+        targetLink.work.status = statusName;
+      }
+      if (issueData?.fields?.assignee?.displayName) {
+        targetLink.work.assignee = issueData.fields.assignee.displayName;
+      }
     } else {
-      targetLink.signature.signedBy = targetLink.signature.signedBy.replace(/ \(Re-certified\)$/, '') + ' (Re-certified)';
+      targetLink.work.key = cleanIssueKey;
+      targetLink.work.id = cleanIssueKey.toLowerCase();
     }
-    if (!targetLink.signature.meaning.includes('(SIMULATED)')) {
-      targetLink.signature.meaning = `${targetLink.signature.meaning} (SIMULATED)`;
-    }
-    targetLink.spec.lastSignedHash = targetLink.spec.sha256Hash;
-    targetLink.spec.isSignatureInvalidated = false;
-    targetLink.hazard.status = 'MITIGATED';
 
-    // 3. Re-evaluate via the rule engine (not by hand)
-    const idx = current.traceLinks.indexOf(targetLink);
-    const reevaluated = ComplianceEngine.evaluateTraceLink(
+    current.traceLinks[idx] = ComplianceEngine.evaluateTraceLink(
       targetLink.hazard,
       targetLink.spec,
       targetLink.work,
@@ -353,18 +554,279 @@ export class SeederService {
       targetLink.signature,
       targetLink.graphMetadata
     );
-    if (idx >= 0) current.traceLinks[idx] = reevaluated;
+
+    await AuditLogService.append({
+      actorAccountId,
+      action: 'BIND_ISSUE',
+      targetKey: targetLink.hazard.key,
+      details: { previousIssueKey, newIssueKey: targetLink.work.key },
+      authMethod,
+    });
+
+    const updated = ComplianceEngine.generateComplianceReport(
+      current.traceLinks,
+      current.datasetMode ?? 'DEMO',
+      current.projectName
+    );
+    return await this.saveComplianceSuite(updated, version);
+  }
+
+  /**
+   * Records an explicit verification test execution result (real test evidence, separate from Part 11 sign-off).
+   */
+  public static async recordTestResult(params: {
+    hazardKey?: string;
+    testKey?: string;
+    status: VerificationTest['status'];
+    evidenceUrl?: string;
+    executionDate?: string;
+    notes?: string;
+    actorAccountId: string;
+    authMethod?: AuditAuthMethod | string;
+  }): Promise<ComplianceSummary> {
+    const allowedStatuses: VerificationTest['status'][] = ['PASSED', 'FAILED', 'UNTESTED', 'IN_PROGRESS'];
+    if (!allowedStatuses.includes(params.status)) {
+      throw new Error(`Invalid test status: ${params.status}`);
+    }
+    if (!params.actorAccountId || params.actorAccountId.trim() === '') {
+      throw new Error('actorAccountId is required to record verification test results.');
+    }
+
+    const { summary: current, version } = await this.getSuiteWithVersion();
+    const idx = current.traceLinks.findIndex(
+      (l) =>
+        (params.hazardKey && l.hazard.key.toLowerCase() === params.hazardKey.trim().toLowerCase()) ||
+        (params.testKey && l.test.testKey.toLowerCase() === params.testKey.trim().toLowerCase())
+    );
+    if (idx < 0) {
+      throw new Error(`Target trace link not found (${params.hazardKey || params.testKey || 'unspecified'}).`);
+    }
+
+    const targetLink = current.traceLinks[idx];
+    const previousStatus = targetLink.test.status;
+    targetLink.test.status = params.status;
+    targetLink.test.executionDate = params.executionDate?.trim() || new Date().toISOString();
+    if (params.evidenceUrl?.trim()) {
+      targetLink.test.evidenceUrl = params.evidenceUrl.trim();
+    }
+    targetLink.test.recordedBy = params.actorAccountId;
+    if (params.notes?.trim()) {
+      targetLink.test.notes = params.notes.trim();
+    }
+
+    current.traceLinks[idx] = ComplianceEngine.evaluateTraceLink(
+      targetLink.hazard,
+      targetLink.spec,
+      targetLink.work,
+      targetLink.test,
+      targetLink.signature,
+      targetLink.graphMetadata
+    );
+    current.traceLinks[idx].hazard.status =
+      current.traceLinks[idx].complianceState === 'VERIFIED' ? 'MITIGATED' : 'UNVERIFIED_RISK';
+
+    await AuditLogService.append({
+      actorAccountId: params.actorAccountId,
+      action: 'RECORD_TEST_RESULT',
+      targetKey: targetLink.test.testKey,
+      details: {
+        hazardKey: targetLink.hazard.key,
+        previousStatus,
+        newStatus: params.status,
+        evidenceUrl: targetLink.test.evidenceUrl || null,
+        notes: params.notes || null,
+      },
+      authMethod: params.authMethod || 'FORGE_USER_SESSION',
+    });
+
+    const updated = ComplianceEngine.generateComplianceReport(
+      current.traceLinks,
+      current.datasetMode ?? 'DEMO',
+      current.projectName
+    );
+    return await this.saveComplianceSuite(updated, version);
+  }
+
+  /**
+   * Executes a 21 CFR Part 11 electronic signature sign-off on a specification artifact.
+   * Requires explicit attestation confirmation, non-empty signature meaning, and authenticated actor identity.
+   */
+  public static async signOffPart11(params: {
+    hazardKey: string;
+    attestation: Part11Attestation;
+    actorAccountId: string;
+    authMethod?: AuditAuthMethod | string;
+  }): Promise<ComplianceSummary> {
+    if (!params.actorAccountId || params.actorAccountId.trim() === '') {
+      throw new Error('Authenticated actorAccountId is required for 21 CFR Part 11 sign-off.');
+    }
+    if (!params.attestation?.attestationConfirmed) {
+      throw new Error('21 CFR Part 11 Violation: Explicit attestation confirmation (attestationConfirmed: true) is required.');
+    }
+    if (!params.attestation.meaning || params.attestation.meaning.trim().length < 5) {
+      throw new Error('21 CFR Part 11 §11.50 Violation: A non-empty signature meaning (>= 5 chars) is required.');
+    }
+
+    const { summary: current, version } = await this.getSuiteWithVersion();
+    const idx = current.traceLinks.findIndex(
+      (l) => l.hazard.key.toLowerCase() === (params.hazardKey || '').trim().toLowerCase()
+    );
+    if (idx < 0) {
+      throw new Error(`Hazard ${params.hazardKey} not found in the active compliance suite.`);
+    }
+
+    const targetLink = current.traceLinks[idx];
+    const signedAt = new Date().toISOString();
+    const signedBy = params.attestation.signedBy?.trim() || `accountId:${params.actorAccountId}`;
+    const role = params.attestation.role?.trim() || targetLink.signature.role || 'Authorized Signatory';
+    const meaning = params.attestation.meaning.trim();
+    const authMethod = params.authMethod || 'PART11_ATTESTATION';
+
+    targetLink.signature.artifactSha256 = targetLink.spec.sha256Hash;
+    targetLink.signature.isValid = true;
+    targetLink.signature.signedAt = signedAt;
+    targetLink.signature.signedBy = signedBy;
+    targetLink.signature.role = role;
+    targetLink.signature.meaning = meaning;
+    targetLink.signature.authMethod = authMethod;
+    targetLink.signature.invalidationReason = undefined;
+    targetLink.spec.lastSignedHash = targetLink.spec.sha256Hash;
+    targetLink.spec.isSignatureInvalidated = false;
+
+    await this.setSignedSpecBaseline({
+      specId: targetLink.spec.id,
+      pageId: targetLink.spec.pageId,
+      sha256Hash: targetLink.spec.sha256Hash,
+      signedBy,
+      signedAt,
+      role,
+      meaning,
+      authMethod,
+    });
+
+    current.traceLinks[idx] = ComplianceEngine.evaluateTraceLink(
+      targetLink.hazard,
+      targetLink.spec,
+      targetLink.work,
+      targetLink.test,
+      targetLink.signature,
+      targetLink.graphMetadata
+    );
+    current.traceLinks[idx].hazard.status =
+      current.traceLinks[idx].complianceState === 'VERIFIED' ? 'MITIGATED' : 'UNVERIFIED_RISK';
+
+    await AuditLogService.append({
+      actorAccountId: params.actorAccountId,
+      action: 'PART11_SIGNOFF',
+      targetKey: targetLink.hazard.key,
+      details: {
+        specId: targetLink.spec.id,
+        artifactSha256: targetLink.spec.sha256Hash,
+        signedBy,
+        role,
+        meaning,
+      },
+      authMethod,
+    });
+
+    const updated = ComplianceEngine.generateComplianceReport(
+      current.traceLinks,
+      current.datasetMode ?? 'DEMO',
+      current.projectName
+    );
+    return await this.saveComplianceSuite(updated, version);
+  }
+
+  /**
+   * Demo-only combined remediation flow. Disallowed in LIVE mode; in DEMO mode requires
+   * explicit `simulate: true` and `attestationConfirmed: true` and logs `DEMO_SIMULATION` to the audit chain.
+   */
+  public static async remediateClassCGap(
+    targetHazardKey: string = 'HAZ-101',
+    accountId?: string,
+    options?: {
+      simulate?: boolean;
+      attestationConfirmed?: boolean;
+      meaning?: string;
+      authMethod?: AuditAuthMethod | string;
+    }
+  ): Promise<ComplianceSummary> {
+    const { summary: current, version } = await this.getSuiteWithVersion();
+    const idx = current.traceLinks.findIndex(
+      (l) => l.hazard.key.toLowerCase() === targetHazardKey.toLowerCase()
+    );
+
+    if (idx < 0) {
+      throw new Error(`Hazard ${targetHazardKey} not found in the active compliance suite — nothing was remediated.`);
+    }
+
+    if (current.datasetMode === 'LIVE') {
+      throw new Error(
+        `Demo quick-remediate is disabled in LIVE dataset mode. Use recordTestResult and signOffPart11 for ${targetHazardKey}.`
+      );
+    }
+
+    if (!options?.simulate || !options?.attestationConfirmed) {
+      throw new Error(
+        'Explicit simulation consent (simulate: true) and Part 11 attestation confirmation (attestationConfirmed: true) are required.'
+      );
+    }
+
+    const actor = accountId?.trim();
+    if (!actor) {
+      throw new Error('Authenticated actor identity is required to remediate and attest compliance gaps.');
+    }
+
+    const targetLink = current.traceLinks[idx];
+    const nowIso = new Date().toISOString();
+    const authMethod = options.authMethod || 'PART11_ATTESTATION';
+
+    targetLink.test.status = 'PASSED';
+    targetLink.test.executionDate = nowIso;
+    targetLink.test.recordedBy = actor;
+    targetLink.test.notes = 'DEMO_SIMULATION: Operator-confirmed simulated verification run.';
+
+    const baseMeaning = options.meaning?.trim() || targetLink.signature.meaning;
+    const meaning = baseMeaning.includes('(DEMO_SIMULATION)') ? baseMeaning : `${baseMeaning} (DEMO_SIMULATION)`;
+
+    targetLink.signature.artifactSha256 = targetLink.spec.sha256Hash;
+    targetLink.signature.isValid = true;
+    targetLink.signature.signedAt = nowIso;
+    targetLink.signature.signedBy = actor.startsWith('service:') ? actor : `accountId:${actor}`;
+    targetLink.signature.meaning = meaning;
+    targetLink.signature.authMethod = authMethod;
+    targetLink.signature.invalidationReason = undefined;
+    targetLink.spec.lastSignedHash = targetLink.spec.sha256Hash;
+    targetLink.spec.isSignatureInvalidated = false;
+    targetLink.hazard.status = 'MITIGATED';
+
+    current.traceLinks[idx] = ComplianceEngine.evaluateTraceLink(
+      targetLink.hazard,
+      targetLink.spec,
+      targetLink.work,
+      targetLink.test,
+      targetLink.signature,
+      targetLink.graphMetadata
+    );
+
+    await AuditLogService.append({
+      actorAccountId: actor,
+      action: 'DEMO_SIMULATION',
+      targetKey: targetLink.hazard.key,
+      details: {
+        simulatedTestKey: targetLink.test.testKey,
+        specId: targetLink.spec.id,
+        artifactSha256: targetLink.spec.sha256Hash,
+        meaning,
+      },
+      authMethod,
+    });
 
     const updatedSummary = ComplianceEngine.generateComplianceReport(
       current.traceLinks,
       current.datasetMode ?? 'DEMO',
       current.projectName
     );
-    try {
-      await kvs.set(this.STORAGE_KEY, updatedSummary);
-    } catch {
-      this.inMemorySuite = updatedSummary;
-    }
-    return updatedSummary;
+    return await this.saveComplianceSuite(updatedSummary, version);
   }
 }

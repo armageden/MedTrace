@@ -17,6 +17,25 @@ modules:
       name: MedTrace IEC 62304 Safety Gate
       description: Validates full bidirectional verification and 21 CFR Part 11 signatures before transitioning Jira issues to Done.
       function: workflow-validator-fn
+  confluence:contentBylineItem:
+    - key: medtrace-confluence-byline
+      title: MedTrace Part 11 Status
+      icon: https://developer.atlassian.com/platform/forge/images/icons/issue-panel-icon.svg
+      resource: main
+      resolver:
+        function: resolver-fn
+  confluence:globalPage:
+    - key: medtrace-confluence-page
+      title: MedTrace IEC 62304
+      route: medtrace-compliance
+      resource: main
+      resolver:
+        function: resolver-fn
+  trigger:
+    - key: medtrace-confluence-page-updated
+      events:
+        - avi:confluence:updated:page
+      function: confluence-trigger-fn
   rovo:agent:
     - key: medtrace-regulatory-auditor
       name: MedTrace Auditor
@@ -67,7 +86,7 @@ modules:
           title: Component Name
           type: string
           required: false
-          description: Optional component or subsystem name (e.g. bolus clamp motor, droplet sensor, OLED power rail).
+          description: Optional component or subsystem name.
   rovo:mcp:
     - key: medtrace-mcp-server
       name: MedTrace MCP Server
@@ -86,6 +105,8 @@ modules:
       handler: index.rovoActionHandler
     - key: mcp-webtrigger-fn
       handler: index.mcpWebtriggerHandler
+    - key: confluence-trigger-fn
+      handler: index.confluencePageUpdatedTrigger
 resources:
   - key: main
     path: static/frontend/dist
@@ -95,6 +116,8 @@ permissions:
     - read:jira-user
     - read:page:confluence
     - read:space:confluence
+    - read:user:confluence
+    - read:content.metadata:confluence
     - storage:app
   content:
     styles:

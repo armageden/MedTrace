@@ -1,44 +1,154 @@
+import api, { route } from '@forge/api';
 import Resolver from '@forge/resolver';
 import crypto from 'node:crypto';
+import { AuditLogService } from './audit-log';
+import { ComplianceEngine } from './compliance-engine';
+import { LiveIngestionService } from './ingestion';
+import { rovoActionHandler, McpToolService } from './mcp-server';
+import {
+  NonceStore,
+  getNonceStore,
+  setNonceStore,
+  createInMemoryNonceStore,
+  NonceClaimResult,
+} from './nonce-store';
+import { isForgeRuntime } from './runtime';
 import { SeederService } from './seeder';
 import { TeamworkGraphService } from './teamwork-graph';
 import { workflowValidatorHandler } from './workflow-validator';
-import { rovoActionHandler, McpToolService } from './mcp-server';
-import { ComplianceEngine } from './compliance-engine';
 
 const resolver = new Resolver();
+
+/**
+ * Enforces authenticated user identity and Jira/Confluence edit/admin permissions
+ * on mutating Forge UI resolvers.
+ */
+async function assertAuthorizedOperator(req: any): Promise<string> {
+  const accountId: string | undefined = req?.context?.accountId;
+  if (!accountId || typeof accountId !== 'string' || accountId.trim() === '') {
+    throw new Error('Unauthorized: Authenticated Atlassian accountId is required.');
+  }
+
+  if (!isForgeRuntime()) {
+    return accountId;
+  }
+
+  const extType: string = req?.context?.extension?.type || '';
+  if (extType.startsWith('confluence')) {
+    const confResp = await api.asUser().requestConfluence(route`/wiki/api/v2/spaces?limit=1`);
+    if (confResp.status !== 200) {
+      throw new Error(`Forbidden: Confluence user session lacks access (HTTP ${confResp.status}).`);
+    }
+    return accountId;
+  }
+
+  const projectKey: string | undefined = req?.context?.extension?.project?.key;
+  const permRoute = projectKey
+    ? route`/rest/api/3/mypermissions?permissions=ADMINISTER_PROJECTS,EDIT_ISSUES&projectKey=${projectKey}`
+    : route`/rest/api/3/mypermissions?permissions=ADMINISTER_PROJECTS,EDIT_ISSUES`;
+
+  const permResp = await api.asUser().requestJira(permRoute);
+  if (permResp.status !== 200) {
+    throw new Error(`Forbidden: Unable to verify Jira permissions (HTTP ${permResp.status}).`);
+  }
+  const permData = await permResp.json();
+  const canEdit = Boolean(permData?.permissions?.EDIT_ISSUES?.havePermission);
+  const canAdmin = Boolean(permData?.permissions?.ADMINISTER_PROJECTS?.havePermission);
+  if (!canEdit && !canAdmin) {
+    throw new Error('Forbidden: Requires Jira EDIT_ISSUES or ADMINISTER_PROJECTS permission.');
+  }
+
+  return accountId;
+}
 
 // 1. Fetch current compliance state
 resolver.define('getComplianceSuite', async () => {
   return await SeederService.getActiveComplianceSuite();
 });
 
-// 2. 1-Click Bulletproof Enterprise Seeder
-resolver.define('seedDemoSuite', async () => {
-  return await SeederService.seedEnterpriseDemoSuite();
+// 2. Demo Dataset Seeder (RBAC-protected)
+resolver.define('seedDemoSuite', async (req) => {
+  const accountId = await assertAuthorizedOperator(req);
+  return await SeederService.seedEnterpriseDemoSuite(accountId, 'FORGE_USER_SESSION');
 });
 
-// 3. Remediate Class C Gap (Hero demo fix simulation)
+// 2b. Live Jira + Confluence Ingestion Sync (RBAC-protected)
+resolver.define('syncLiveSuite', async (req) => {
+  const accountId = await assertAuthorizedOperator(req);
+  return await LiveIngestionService.syncFromAtlassian(
+    {
+      projectKey: req?.payload?.projectKey || req?.context?.extension?.project?.key,
+      spaceId: req?.payload?.spaceId,
+      jql: req?.payload?.jql,
+    },
+    accountId
+  );
+});
+
+// 3. Explicit Demo Remediation (disallowed in LIVE mode; requires simulate + attestationConfirmed)
 resolver.define('remediateGap', async (req) => {
+  const accountId = await assertAuthorizedOperator(req);
   const hazardKey = req.payload?.hazardKey || 'HAZ-101';
-  const accountId = req.context?.accountId;
-  return await SeederService.remediateClassCGap(hazardKey, accountId);
+  return await SeederService.remediateClassCGap(hazardKey, accountId, {
+    simulate: Boolean(req.payload?.simulate),
+    attestationConfirmed: Boolean(req.payload?.attestationConfirmed),
+    meaning: typeof req.payload?.meaning === 'string' ? req.payload.meaning : undefined,
+    authMethod: 'PART11_ATTESTATION',
+  });
 });
 
-// 4. Teamwork Graph GraphQL Context Query
+// 3b. Record explicit verification test execution result (RBAC-protected)
+resolver.define('recordTestResult', async (req) => {
+  const accountId = await assertAuthorizedOperator(req);
+  return await SeederService.recordTestResult({
+    hazardKey: req.payload?.hazardKey,
+    testKey: req.payload?.testKey,
+    status: req.payload?.status,
+    evidenceUrl: req.payload?.evidenceUrl,
+    executionDate: req.payload?.executionDate,
+    notes: req.payload?.notes,
+    actorAccountId: accountId,
+    authMethod: 'FORGE_USER_SESSION',
+  });
+});
+
+// 3c. Explicit 21 CFR Part 11 Electronic Signature Sign-Off (RBAC-protected)
+resolver.define('signOffPart11', async (req) => {
+  const accountId = await assertAuthorizedOperator(req);
+  const hazardKey = req.payload?.hazardKey;
+  if (!hazardKey) {
+    throw new Error('hazardKey is required for 21 CFR Part 11 sign-off.');
+  }
+  return await SeederService.signOffPart11({
+    hazardKey,
+    attestation: {
+      meaning: req.payload?.meaning || '',
+      attestationConfirmed: Boolean(req.payload?.attestationConfirmed),
+      passwordConfirmed: Boolean(req.payload?.passwordConfirmed),
+      attestationPhrase: req.payload?.attestationPhrase,
+      signedBy: req.payload?.signedBy,
+      role: req.payload?.role,
+    },
+    actorAccountId: accountId,
+    authMethod: 'PART11_ATTESTATION',
+  });
+});
+
+// 4. Teamwork Graph & Jira/Confluence Context Query
 resolver.define('queryGraphContext', async (req) => {
-  const issueKey = req.payload?.issueKey || 'MED-42';
+  const issueKey = req.payload?.issueKey || req.context?.extension?.issue?.key || 'MED-42';
   return await TeamworkGraphService.queryIssueGraphContext(issueKey);
 });
 
-// 4b. Bind a Jira issue to a hazard trace link (makes the safety gate real)
+// 4b. Bind a Jira issue to a hazard trace link (RBAC-protected)
 resolver.define('bindIssueToHazard', async (req) => {
+  const accountId = await assertAuthorizedOperator(req);
   const hazardKey = req.payload?.hazardKey;
-  const issueKey = req.context?.extension?.issue?.key || req.payload?.issueKey;
+  const issueKey = req.payload?.issueKey || req.context?.extension?.issue?.key;
   if (!hazardKey) return { success: false, error: 'hazardKey required' };
   if (!issueKey) return { success: false, error: 'no issue context' };
   try {
-    const summary = await SeederService.bindIssueToHazard(hazardKey, issueKey);
+    const summary = await SeederService.bindIssueToHazard(hazardKey, issueKey, accountId, 'FORGE_USER_SESSION');
     return { success: true, summary };
   } catch (err: any) {
     return { success: false, error: err?.message || 'bind failed' };
@@ -47,7 +157,7 @@ resolver.define('bindIssueToHazard', async (req) => {
 
 // 5. Simulate Jira Release Transition (Human-Initiated Transition Gate)
 resolver.define('simulateTransition', async (req) => {
-  const issueKey = req?.payload?.issueKey || 'MED-42';
+  const issueKey = req?.payload?.issueKey || req?.context?.extension?.issue?.key || 'MED-42';
   return await workflowValidatorHandler({ issue: { key: issueKey }, transition: { name: 'Done' } });
 });
 
@@ -58,30 +168,52 @@ resolver.define('analyzeBlastRadius', async (req) => {
   return ComplianceEngine.computeBlastRadius(triggerKey, suite);
 });
 
-import { NonceStore, getNonceStore, setNonceStore, createInMemoryNonceStore } from './nonce-store';
+// 7. Hash-chained Immutable Audit Log Retrieval & Verification
+resolver.define('getAuditLog', async (req) => {
+  const limit = typeof req?.payload?.limit === 'number' ? req.payload.limit : 50;
+  return await AuditLogService.getAuditLog(limit);
+});
+
+resolver.define('verifyAuditChain', async () => {
+  return await AuditLogService.verifyAuditChain();
+});
 
 const getMcpSecret = (): string => process.env.MEDTRACE_MCP_SECRET || '';
 
 /**
- * Claims a unique event nonce using the injected NonceStore (default: Forge KVS in production).
- * Ephemeral serverless invocations persist state in Forge storage:app to reject replay attacks across instances.
- * Implements lazy pruning on access: expired records are pruned via store.delete() upon lookup.
+ * Claims a unique event nonce using the injected NonceStore.
  */
 export async function claimNonce(
   nonce: string,
   store: NonceStore = getNonceStore(),
   ttlMs: number = 300_000
 ): Promise<boolean> {
+  const outcome = await claimNonceDetailed(nonce, store, ttlMs);
+  if (outcome === 'STORAGE_ERROR') {
+    throw new Error('Nonce storage backend failure.');
+  }
+  return outcome === 'CLAIMED';
+}
+
+export async function claimNonceDetailed(
+  nonce: string,
+  store: NonceStore = getNonceStore(),
+  ttlMs: number = 300_000
+): Promise<NonceClaimResult> {
   const nonceKey = `nonce:${nonce.length > 64 ? crypto.createHash('sha256').update(nonce).digest('hex') : nonce}`;
   const now = Date.now();
 
-  return await store.claim(nonceKey, { consumedAt: now }, ttlMs);
+  if (store.claimDetailed) {
+    return await store.claimDetailed(nonceKey, { consumedAt: now }, ttlMs);
+  }
+  const ok = await store.claim(nonceKey, { consumedAt: now }, ttlMs);
+  return ok ? 'CLAIMED' : 'REPLAY';
 }
 
 export { NonceStore, getNonceStore, setNonceStore, createInMemoryNonceStore };
 
 /**
- * Validates HMAC-SHA256 signature binding timestamp, payload, and optional nonce against replay/tampering
+ * Validates HMAC-SHA256 signature binding timestamp, payload, and optional nonce against replay/tampering.
  */
 export function verifyHmacSignature(
   rawBody: string,
@@ -114,10 +246,11 @@ function extractHeader(headers: any, name: string): string | undefined {
   return undefined;
 }
 
+const JSON_HEADERS = { 'Content-Type': ['application/json'] };
+
 /**
- * Webtrigger for real-time 2-way sync with local MCP Server (Cursor / Claude Desktop)
- * Enforces cryptographic HMAC-SHA256 signature verification, 5-minute replay window,
- * and unique event nonce idempotency to prevent replay attacks inside the window.
+ * Webtrigger for real-time 2-way sync with local MCP Server and CI/CD pipelines.
+ * Enforces fail-closed HMAC-SHA256 verification, 300s timestamp window, and atomic KVS nonce replay defense.
  */
 export async function mcpWebtriggerHandler(request: any): Promise<any> {
   console.log('[MedTrace MCP Webtrigger] Handling external MCP sync request:', request?.method);
@@ -127,14 +260,14 @@ export async function mcpWebtriggerHandler(request: any): Promise<any> {
     if (!secret) {
       console.error('[MedTrace MCP Webtrigger] Fail-closed: MEDTRACE_MCP_SECRET is not configured.');
       return {
-        body: JSON.stringify({ error: 'Server misconfiguration: MEDTRACE_MCP_SECRET must be configured in Forge environment (fail-closed).' }),
-        headers: { 'Content-Type': ['application/json'], 'Access-Control-Allow-Origin': ['*'] },
+        body: JSON.stringify({
+          error: 'Server misconfiguration: MEDTRACE_MCP_SECRET must be configured in Forge environment (fail-closed).',
+        }),
+        headers: JSON_HEADERS,
         statusCode: 500,
       };
     }
 
-    // HMAC-SHA256 required on every request (GET and POST). The shared secret itself is
-    // never transmitted: only its signature over (timestamp.nonce.body) is.
     const timestampHeader = extractHeader(request?.headers, 'x-medtrace-timestamp');
     const signatureHeader = extractHeader(request?.headers, 'x-medtrace-signature');
     const nonceHeader =
@@ -144,16 +277,24 @@ export async function mcpWebtriggerHandler(request: any): Promise<any> {
     if (!timestampHeader) {
       return {
         body: JSON.stringify({ error: 'Unauthorized: Missing x-medtrace-timestamp header.' }),
-        headers: { 'Content-Type': ['application/json'], 'Access-Control-Allow-Origin': ['*'] },
+        headers: JSON_HEADERS,
         statusCode: 401,
       };
     }
 
-    const reqTime = parseInt(timestampHeader, 10);
-    if (isNaN(reqTime) || Math.abs(Date.now() - reqTime) > 300_000) {
+    if (!/^\d+$/.test(timestampHeader.trim())) {
+      return {
+        body: JSON.stringify({ error: 'Unauthorized: Invalid x-medtrace-timestamp format.' }),
+        headers: JSON_HEADERS,
+        statusCode: 401,
+      };
+    }
+
+    const reqTime = Number(timestampHeader.trim());
+    if (!Number.isFinite(reqTime) || Math.abs(Date.now() - reqTime) > 300_000) {
       return {
         body: JSON.stringify({ error: 'Unauthorized: Request timestamp expired (>300s replay window).' }),
-        headers: { 'Content-Type': ['application/json'], 'Access-Control-Allow-Origin': ['*'] },
+        headers: JSON_HEADERS,
         statusCode: 401,
       };
     }
@@ -161,7 +302,7 @@ export async function mcpWebtriggerHandler(request: any): Promise<any> {
     if (!signatureHeader) {
       return {
         body: JSON.stringify({ error: 'Unauthorized: Missing x-medtrace-signature header.' }),
-        headers: { 'Content-Type': ['application/json'], 'Access-Control-Allow-Origin': ['*'] },
+        headers: JSON_HEADERS,
         statusCode: 401,
       };
     }
@@ -169,135 +310,148 @@ export async function mcpWebtriggerHandler(request: any): Promise<any> {
     if (!nonceHeader) {
       return {
         body: JSON.stringify({ error: 'Unauthorized: Missing x-medtrace-nonce header.' }),
-        headers: { 'Content-Type': ['application/json'], 'Access-Control-Allow-Origin': ['*'] },
+        headers: JSON_HEADERS,
         statusCode: 401,
       };
     }
 
-    const rawBody = typeof request.body === 'string' ? request.body : (request.body ? JSON.stringify(request.body) : '');
+    const rawBody =
+      typeof request.body === 'string'
+        ? request.body
+        : request.body
+          ? JSON.stringify(request.body)
+          : '';
     const isValidSig = verifyHmacSignature(rawBody, timestampHeader, signatureHeader, secret, nonceHeader);
     if (!isValidSig) {
       return {
-        body: JSON.stringify({ error: 'Unauthorized: Cryptographic HMAC-SHA256 signature mismatch (tamper/replay protection).' }),
-        headers: { 'Content-Type': ['application/json'], 'Access-Control-Allow-Origin': ['*'] },
+        body: JSON.stringify({
+          error: 'Unauthorized: Cryptographic HMAC-SHA256 signature mismatch (tamper/replay protection).',
+        }),
+        headers: JSON_HEADERS,
         statusCode: 401,
       };
     }
 
-    const isClaimed = await claimNonce(nonceHeader);
-    if (!isClaimed) {
+    const nonceOutcome = await claimNonceDetailed(nonceHeader);
+    if (nonceOutcome === 'REPLAY') {
       return {
-        body: JSON.stringify({ error: 'Unauthorized: Replay attack detected (nonce/eventId already consumed within validity window).' }),
-        headers: { 'Content-Type': ['application/json'], 'Access-Control-Allow-Origin': ['*'] },
+        body: JSON.stringify({
+          error: 'Unauthorized: Replay attack detected (nonce/eventId already consumed within validity window).',
+        }),
+        headers: JSON_HEADERS,
         statusCode: 409,
       };
     }
-
-    // Body parsing (for POST actions). GET requests fall through with an empty body.
-    let body: any = {};
-    if (request?.method === 'POST') {
-      try {
-        body = JSON.parse(request.body || '{}');
-      } catch {}
+    if (nonceOutcome === 'STORAGE_ERROR') {
+      return {
+        body: JSON.stringify({
+          error: 'Internal Server Error: Replay protection store unavailable.',
+        }),
+        headers: JSON_HEADERS,
+        statusCode: 500,
+      };
     }
 
-      if (body.action === 'seed') {
-        const seeded = await SeederService.seedEnterpriseDemoSuite();
-        return {
-          body: JSON.stringify({ success: true, summary: seeded.summary }),
-          headers: {
-            'Content-Type': ['application/json'],
-            'Access-Control-Allow-Origin': ['*'],
-          },
-          statusCode: 200,
-        };
-      }
-
-      if (body.action === 'remediate') {
-        const hazardKey = body.hazardKey || 'HAZ-101';
-        const accountId = request?.context?.accountId || body.accountId;
-        const updated = await SeederService.remediateClassCGap(hazardKey, accountId);
-        return {
-          body: JSON.stringify({ success: true, summary: updated }),
-          headers: {
-            'Content-Type': ['application/json'],
-            'Access-Control-Allow-Origin': ['*'],
-          },
-          statusCode: 200,
-        };
-      }
-
-      if (body.action === 'verify') {
-        const result = await McpToolService.verifyIecCompliance({
-          prDiff: body.prDiff,
-          componentName: body.componentName,
-          issueKey: body.issueKey,
-        });
-        return {
-          body: JSON.stringify(result),
-          headers: { 'Content-Type': ['application/json'], 'Access-Control-Allow-Origin': ['*'] },
-          statusCode: 200,
-        };
-      }
-
-      if (body.action === 'verify-release-gate') {
-        const issueKey = typeof body.issueKey === 'string' && body.issueKey.trim() !== '' ? body.issueKey.trim() : undefined;
-        if (issueKey) {
-          const suite = await SeederService.getActiveComplianceSuite();
-          const matchedLink = suite.traceLinks.find(
-            (l: any) => (l.work?.key || '').toUpperCase() === issueKey.toUpperCase() || (l.hazard?.key || '').toUpperCase() === issueKey.toUpperCase()
-          );
-          if (!matchedLink) {
-            // Unlinked issue: not a safety hazard. Approve unless the whole suite is globally blocked.
-            const result = !suite.releaseBlocked;
-            return {
-              body: JSON.stringify({ result, errorMessage: result ? `Issue ${issueKey} is not linked to any safety hazard; release gate approved.` : suite.blockingReasons[0] }),
-              headers: { 'Content-Type': ['application/json'], 'Access-Control-Allow-Origin': ['*'] },
-              statusCode: result ? 200 : 403,
-            };
-          }
+    let body: any = {};
+    if (String(request?.method || '').toUpperCase() === 'POST') {
+      if (typeof request.body === 'string' && request.body.trim() !== '') {
+        try {
+          body = JSON.parse(request.body);
+        } catch {
+          return {
+            body: JSON.stringify({ error: 'Bad Request: Malformed JSON payload.' }),
+            headers: JSON_HEADERS,
+            statusCode: 400,
+          };
         }
-        const outcome = await workflowValidatorHandler(issueKey ? { issue: { key: issueKey } } : {});
-        return {
-          body: JSON.stringify(outcome),
-          headers: { 'Content-Type': ['application/json'], 'Access-Control-Allow-Origin': ['*'] },
-          statusCode: outcome.result ? 200 : 403,
-        };
+      } else if (request.body && typeof request.body === 'object') {
+        body = request.body;
       }
+    }
 
-      if (body.action === 'validate' || body.action === 'simulate_transition') {
-        const issueKey = body.issueKey || 'MED-42';
-        const result = await workflowValidatorHandler({ issue: { key: issueKey }, transition: { name: 'Done' } });
-        return {
-          body: JSON.stringify(result),
-          headers: {
-            'Content-Type': ['application/json'],
-            'Access-Control-Allow-Origin': ['*'],
-          },
-          statusCode: 200,
-        };
-      }
+    if (body.action === 'seed') {
+      const seeded = await SeederService.seedEnterpriseDemoSuite('service:mcp-webtrigger', 'HMAC_WEBTRIGGER');
+      return {
+        body: JSON.stringify({ success: true, summary: seeded.summary }),
+        headers: JSON_HEADERS,
+        statusCode: 200,
+      };
+    }
 
-    // Default GET: return live compliance suite
+    if (body.action === 'remediate') {
+      const hazardKey = body.hazardKey || 'HAZ-101';
+      // Never accept caller-supplied Jira accountId spoofing over webtrigger; attribute to authenticated service principal.
+      const serviceActor = 'service:mcp-webtrigger';
+      const updated = await SeederService.remediateClassCGap(hazardKey, serviceActor, {
+        simulate: Boolean(body.simulate),
+        attestationConfirmed: Boolean(body.attestationConfirmed),
+        meaning: typeof body.meaning === 'string' ? body.meaning : undefined,
+        authMethod: 'HMAC_WEBTRIGGER',
+      });
+      return {
+        body: JSON.stringify({ success: true, summary: updated }),
+        headers: JSON_HEADERS,
+        statusCode: 200,
+      };
+    }
+
+    if (body.action === 'verify') {
+      const result = await McpToolService.verifyIecCompliance({
+        prDiff: body.prDiff,
+        componentName: body.componentName,
+        issueKey: body.issueKey,
+      });
+      return {
+        body: JSON.stringify(result),
+        headers: JSON_HEADERS,
+        statusCode: 200,
+      };
+    }
+
+    if (body.action === 'verify-release-gate') {
+      const issueKey =
+        typeof body.issueKey === 'string' && body.issueKey.trim() !== '' ? body.issueKey.trim() : undefined;
+      const suite = await SeederService.getActiveComplianceSuite();
+      const outcome = ComplianceEngine.evaluateIssueReleaseGate(issueKey, suite);
+      return {
+        body: JSON.stringify(outcome),
+        headers: JSON_HEADERS,
+        statusCode: outcome.result ? 200 : 403,
+      };
+    }
+
+    if (body.action === 'validate' || body.action === 'simulate_transition') {
+      const issueKey = body.issueKey || 'MED-42';
+      const result = await workflowValidatorHandler({ issue: { key: issueKey }, transition: { name: 'Done' } });
+      return {
+        body: JSON.stringify(result),
+        headers: JSON_HEADERS,
+        statusCode: 200,
+      };
+    }
+
     const suite = await SeederService.getActiveComplianceSuite();
     return {
       body: JSON.stringify(suite),
-      headers: {
-        'Content-Type': ['application/json'],
-        'Access-Control-Allow-Origin': ['*'],
-      },
+      headers: JSON_HEADERS,
       statusCode: 200,
     };
   } catch (err: any) {
     return {
-      body: JSON.stringify({ error: err?.message || 'Failed to fetch MCP state' }),
-      headers: {
-        'Content-Type': ['application/json'],
-        'Access-Control-Allow-Origin': ['*'],
-      },
+      body: JSON.stringify({ error: err?.message || 'Failed to process MCP request' }),
+      headers: JSON_HEADERS,
       statusCode: 500,
     };
   }
+}
+
+/**
+ * Forge product event trigger (`avi:confluence:updated:page`).
+ * Detects Confluence SRS modifications and invalidates drifted Part 11 signatures in KVS.
+ */
+export async function confluencePageUpdatedTrigger(event: any): Promise<any> {
+  console.log('[MedTrace ConfluenceTrigger] Page updated event:', event?.content?.id || event?.page?.id || 'unknown');
+  return await LiveIngestionService.handleConfluencePageUpdated(event);
 }
 
 // Export handlers matching manifest.yml functions

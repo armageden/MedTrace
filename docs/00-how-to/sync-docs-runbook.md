@@ -1,50 +1,43 @@
-**Back:** [00-overview](./00-overview.md)
+[<- How-To Overview](./00-overview.md)
 
 # Docs Sync Runbook
 
-This runbook defines the mandatory post-task documentation synchronization procedure. Whenever code, configuration, or scripts change, follow these 6 steps in order.
+Run this checklist after **any** change to source code, manifest, workflows, or scripts.
 
-## Source-to-Docs Mapping Table
+## 1. Source-to-Docs Mapping
 
-| Modified Source Path | Mapped Reference Doc Folder |
+| Changed File | Doc(s) to Check / Update |
 |---|---|
-| `manifest.yml` | `docs/01-architecture/` |
-| `src/index.ts` | `docs/01-architecture/` |
-| `src/types.ts` | `docs/02-compliance-engine/` |
-| `src/compliance-engine.ts` | `docs/02-compliance-engine/` |
-| `src/seeder.ts` | `docs/02-compliance-engine/` |
-| `src/workflow-validator.ts` | `docs/01-architecture/` |
-| `src/teamwork-graph.ts` | `docs/99-design-decisions/` |
-| `src/mcp-server.ts` | `docs/03-mcp-integration/` |
-| `src/nonce-store.ts` | `docs/03-mcp-integration/` |
-| `mcp-server/index.mjs` | `docs/03-mcp-integration/` |
-| `static/frontend/src/` | `docs/01-architecture/` |
+| [manifest.yml](../../manifest.yml) | [docs/01-architecture/forge-modules.md](../01-architecture/forge-modules.md), [README.md](../../README.md) |
+| [src/index.ts](../../src/index.ts) | [docs/01-architecture/forge-modules.md](../01-architecture/forge-modules.md), [docs/03-mcp-integration/live-sync.md](../03-mcp-integration/live-sync.md) |
+| [src/runtime.ts](../../src/runtime.ts) | [docs/01-architecture/forge-modules.md](../01-architecture/forge-modules.md) |
+| [src/compliance-engine.ts](../../src/compliance-engine.ts), [src/types.ts](../../src/types.ts) | [docs/02-compliance-engine/evaluation-rules.md](../02-compliance-engine/evaluation-rules.md), [docs/99-design-decisions/004-artifact-node-bfs-blast-radius.md](../99-design-decisions/004-artifact-node-bfs-blast-radius.md) |
+| [src/seeder.ts](../../src/seeder.ts) | [docs/02-compliance-engine/evaluation-rules.md](../02-compliance-engine/evaluation-rules.md), [docs/99-design-decisions/001-twg-and-kvs-hybrid.md](../99-design-decisions/001-twg-and-kvs-hybrid.md), [docs/99-design-decisions/005-hash-chained-audit-log-and-sharded-kvs.md](../99-design-decisions/005-hash-chained-audit-log-and-sharded-kvs.md) |
+| [src/ingestion.ts](../../src/ingestion.ts) | [docs/02-compliance-engine/evaluation-rules.md](../02-compliance-engine/evaluation-rules.md), [docs/01-architecture/forge-modules.md](../01-architecture/forge-modules.md), [docs/99-design-decisions/005-hash-chained-audit-log-and-sharded-kvs.md](../99-design-decisions/005-hash-chained-audit-log-and-sharded-kvs.md) |
+| [src/audit-log.ts](../../src/audit-log.ts) | [docs/02-compliance-engine/evaluation-rules.md](../02-compliance-engine/evaluation-rules.md), [docs/99-design-decisions/005-hash-chained-audit-log-and-sharded-kvs.md](../99-design-decisions/005-hash-chained-audit-log-and-sharded-kvs.md) |
+| [src/teamwork-graph.ts](../../src/teamwork-graph.ts) | [docs/99-design-decisions/003-twg-dual-engine-fallback.md](../99-design-decisions/003-twg-dual-engine-fallback.md) |
+| [src/workflow-validator.ts](../../src/workflow-validator.ts) | [docs/02-compliance-engine/evaluation-rules.md](../02-compliance-engine/evaluation-rules.md) |
+| [src/mcp-server.ts](../../src/mcp-server.ts), [src/nonce-store.ts](../../src/nonce-store.ts), [mcp-server/index.mjs](../../mcp-server/index.mjs) | [docs/03-mcp-integration/live-sync.md](../03-mcp-integration/live-sync.md), [mcp-server/README.md](../../mcp-server/README.md), [docs/99-design-decisions/002-webtrigger-hmac-authentication.md](../99-design-decisions/002-webtrigger-hmac-authentication.md) |
+| [static/frontend/src/App.tsx](../../static/frontend/src/App.tsx), [static/frontend/src/bridge.ts](../../static/frontend/src/bridge.ts), [static/frontend/src/components/AuditLogModal.tsx](../../static/frontend/src/components/AuditLogModal.tsx), [static/frontend/src/components/FdaExportModal.tsx](../../static/frontend/src/components/FdaExportModal.tsx) | [docs/01-architecture/forge-modules.md](../01-architecture/forge-modules.md), [README.md](../../README.md) |
+| [scripts/rotate-mcp-secret.sh](../../scripts/rotate-mcp-secret.sh), `.github/workflows/*.yml` | [docs/00-how-to/03-deploy-production.md](./03-deploy-production.md), [SECURITY.md](../../SECURITY.md) |
+| [tests/compliance-engine.test.cjs](../../tests/compliance-engine.test.cjs) | [docs/02-compliance-engine/evaluation-rules.md](../02-compliance-engine/evaluation-rules.md), [README.md](../../README.md) |
 
-## Six-Step Execution Procedure
+## 2. Verification Commands
 
-1. **Inspect Working Tree (Read-only):**
-   ```bash
-   git status
-   git diff
-   ```
-2. **Identify Impacted Docs:** Match each changed file against the mapping table above.
-3. **Update Affected Reference Docs:** Update paths, symbols, functions, and behavioral contracts.
-4. **Reverse Coverage Check:** Ensure any new entry point, tool, or module is cited in at least one doc.
-5. **ADR-lite Check:** If an architectural change occurred, record an ADR entry under `docs/99-design-decisions/`.
-6. **Run Mechanical Validator:**
-   ```bash
-   node scripts/docs-check.mjs
-   ```
-   Must exit with status `0`.
+Run the mechanical doc verifier after updates:
 
-## Key Files
+```bash
+npm run docs:check
+```
 
-| Path | Role |
-|---|---|
-| `scripts/docs-check.mjs` | Zero-dependency documentation validator enforcing links, backticks, and coverage. |
-| `AGENTS.md` | Top-level agent router directing LLMs to relevant doc domains. |
+Then confirm full build, typechecks, and test health:
 
-## Related
+```bash
+npm run build && cd static/frontend && npm run build && cd ../..
+npm test
+```
 
-- [Repository Root Overview](../../README.md)
-- [How-To: Deploy Production](./03-deploy-production.md)
+## 3. Output Format
+
+Always conclude any coding or docs task with:
+`Docs checked/updated: <files or "none required (reason)">`

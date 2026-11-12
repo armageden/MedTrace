@@ -1,14 +1,7 @@
-**Back:** [Repository Root](../../README.md)
+# Compliance Engine
 
-# Compliance Engine Overview
+Evaluates IEC 62304, ISO 14971, and 21 CFR Part 11 traceability across the 5-stage graph (`HAZARD ↔ SPEC ↔ WORK ↔ TEST ↔ SIGNATURE`), computes deterministic blast radius, manages sharded KVS persistence, ingests live Atlassian artifacts, and maintains a SHA-256 hash-chained audit ledger.
 
-**Covers:** `src/compliance-engine.ts`, `src/seeder.ts`, `src/types.ts`  
-**Read this when:** reviewing IEC 62304 software safety classification, ISO 14971 hazard mapping, FDA 21 CFR Part 11 cryptographic signature validation, or demo seeding.
+## Files
 
-The compliance engine provides pure in-memory regulatory evaluation functions (`src/compliance-engine.ts`) operating over the 5-stage `TraceLink` data model (`src/types.ts`). Evaluated summaries are persisted in `@forge/kvs` and seeded by `SeederService` (`src/seeder.ts`), enabling fast-path Jira workflow gating (<80ms) without runtime GraphQL dependencies.
-
-## Contents
-
-| File | Description |
-|---|---|
-| [evaluation-rules.md](./evaluation-rules.md) | Evaluation logic, safety classification rules, signature verification, and SeederService contracts. |
+- [evaluation-rules.md](./evaluation-rules.md) — Deterministic 5-stage status checks, `evaluateIssueReleaseGate`, `computeBlastRadius` BFS, sharded KVS (`SHARDED_V2`), `LiveIngestionService`, `AuditLogService`, RBAC/Part 11 mutations, and test suite coverage (`tests/compliance-engine.test.cjs`).

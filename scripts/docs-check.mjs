@@ -25,13 +25,24 @@ const CONFIG = {
     ".next",
     "target",
     ".wrangler",
-    "static",
   ]),
+  extraDocs: [
+    "README.md",
+    "SECURITY.md",
+    "mcp-server/README.md",
+  ],
+  extraDocDirs: [
+    "marketplace",
+  ],
   entryGlobs: [
     "src/*.ts",
     "mcp-server/index.mjs",
     "scripts/*.mjs",
     "tests/*.test.cjs",
+    "static/frontend/src/App.tsx",
+    "static/frontend/src/bridge.ts",
+    "static/frontend/src/components/AuditLogModal.tsx",
+    "static/frontend/src/components/FdaExportModal.tsx",
   ],
   pathExts: new Set([
     ".py", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".md", ".json",
@@ -89,7 +100,7 @@ function checkLinks(file, text) {
 // ----------------------------------------------------- rule 1: backtick paths
 const TOKEN_RE = /`([^`\n]+)`/g;
 const EXT = (tok) => path.extname(tok).toLowerCase();
-const NON_PATH_PREFIX = /^(@|https?:\/\/|mailto:|#|\$|-|git |npm |pnpm |yarn |uv |pip |python3? |cargo |go |make |docker |pytest )/;
+const NON_PATH_PREFIX = /^(@|ari:|https?:\/\/|mailto:|#|\$|-|git |npm |pnpm |yarn |uv |pip |python3? |cargo |go |make |docker |pytest )/;
 
 function looksLikePath(tok) {
   if (!tok || tok.length > 200) return false;
@@ -189,10 +200,15 @@ function main() {
     return 1;
   }
   const docFiles = walk(DOCS, ".md");
-  const sources = [...docFiles, ...(fs.existsSync(ROUTER) ? [ROUTER] : [])];
+  const extraDocFiles = [
+    ...CONFIG.extraDocs.map((f) => path.join(ROOT, f)).filter((f) => fs.existsSync(f)),
+    ...CONFIG.extraDocDirs.flatMap((d) => walk(path.join(ROOT, d), ".md")),
+  ];
+  const checkedDocs = [...docFiles, ...extraDocFiles];
+  const sources = [...checkedDocs, ...(fs.existsSync(ROUTER) ? [ROUTER] : [])];
   const texts = new Map();
   for (const f of sources) { const t = read(f); texts.set(f, t); checkLinks(f, t); }
-  for (const f of docFiles) checkPaths(f, texts.get(f));
+  for (const f of checkedDocs) checkPaths(f, texts.get(f));
   if (fs.existsSync(ROUTER)) checkPaths(ROUTER, texts.get(ROUTER));
   else warn("router", ROUTER, "router file missing");
 
@@ -210,7 +226,7 @@ function main() {
 
   for (const w of warnings) console.error(`warning: ${w}`);
   for (const e of errors) console.error(`error: ${e}`);
-  console.log(`docs-check: ${docFiles.length} doc files, ${folders.length} subjects, ` +
+  console.log(`docs-check: ${checkedDocs.length} doc files (${docFiles.length} in docs/, ${extraDocFiles.length} top-level/marketplace), ${folders.length} subjects, ` +
     `${errors.length} errors, ${warnings.length} warnings`);
   return errors.length ? 1 : 0;
 }

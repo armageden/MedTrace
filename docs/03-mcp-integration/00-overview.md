@@ -1,16 +1,8 @@
-**Back:** [Repository Root](../../README.md)
+# MCP Integration & Rovo Tools
 
-# Model Context Protocol (MCP) Integration Overview
+Bridges local AI engineering assistants (via Model Context Protocol over `stdio`), Rovo Studio (`rovo:mcp`), and CI release pipelines directly to the Forge compliance engine without storing compliance data outside Atlassian Cloud.
 
-**Covers:** `mcp-server/index.mjs`, `src/mcp-server.ts`, `manifest.yml`  
-**Read this when:** configuring or testing the Model Context Protocol tools for Cursor, Claude Desktop, or Atlassian Rovo.
+## Files
 
-MedTrace provides dual Model Context Protocol (MCP) integration:
-1. **Local Developer Stdio MCP Server (`mcp-server/index.mjs`):** A standalone, zero-dependency Node.js JSON-RPC server enabling AI coding assistants (Cursor, Claude Desktop) to audit code changes and trigger remediation right from the IDE.
-2. **Cloud-Native Atlassian Rovo MCP (`rovo:mcp`):** Manifest-declared tool modules enabling Rovo Chat agents within Jira and Confluence to inspect regulatory lineage and verify IEC 62304 compliance.
-
-## Contents
-
-| File | Description |
-|---|---|
-| [live-sync.md](./live-sync.md) | Tool schemas, JSON-RPC stdio protocol, HMAC-SHA256 cloud synchronization, and offline fallback. |
+- [live-sync.md](./live-sync.md) — MCP stdio server (`mcp-server/index.mjs` v1.1.0), Rovo actions (`src/mcp-server.ts`), HMAC-SHA256 webtrigger transport, SHA-256 nonce replay store (`src/nonce-store.ts`), tool input/error contracts, and IDE client setup.
+- [mcp-server/README.md](../../mcp-server/README.md) — Standalone quickstart for running the local MCP stdio bridge.

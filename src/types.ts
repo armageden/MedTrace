@@ -41,6 +41,8 @@ export interface VerificationTest {
   status: 'PASSED' | 'FAILED' | 'UNTESTED' | 'IN_PROGRESS';
   executionDate?: string;
   evidenceUrl?: string;
+  recordedBy?: string;
+  notes?: string;
 }
 
 export interface Part11Signature {
@@ -52,6 +54,7 @@ export interface Part11Signature {
   artifactSha256: string;
   isValid: boolean;
   invalidationReason?: string;
+  authMethod?: string;
 }
 
 export interface GraphMetadata {
@@ -76,8 +79,6 @@ export interface TraceLink {
 
 export interface ComplianceSummary {
   projectName: string;
-  // All records are modeled demo data (Confluence availability is preflight-checked; demo SRS hashes are computed from seeded spec text).
-  // The UI must badge this so judges never mistake synthetic records for tenant evidence.
   datasetMode: 'DEMO' | 'LIVE';
   standards: string[]; // ["IEC 62304:2006+A1:2015", "ISO 14971:2019", "FDA 21 CFR Part 11"]
   totalHazards: number;
@@ -90,6 +91,9 @@ export interface ComplianceSummary {
   signatureDriftCount: number;
   traceLinks: TraceLink[];
   lastAuditTimestamp: string;
+  storageFormat?: 'SHARDED_V2' | 'SINGLE_KEY_V1';
+  auditEntryCount?: number;
+  auditHeadHash?: string;
 }
 
 export type GraphNodeType = 'HAZARD' | 'SPEC' | 'WORK' | 'TEST' | 'SIGNATURE';
@@ -124,4 +128,64 @@ export interface BlastRadiusReport {
   }[];
   transitiveActionPlan: string[];
   executionTimeMs: number;
+}
+
+export type AuditActionType =
+  | 'SEED_DEMO'
+  | 'SYNC_LIVE'
+  | 'BIND_ISSUE'
+  | 'RECORD_TEST_RESULT'
+  | 'PART11_SIGNOFF'
+  | 'DEMO_SIMULATION'
+  | 'CONFLUENCE_PAGE_DRIFT'
+  | 'WORKFLOW_GATE_BLOCKED'
+  | 'WORKFLOW_GATE_APPROVED';
+
+export type AuditAuthMethod =
+  | 'FORGE_USER_SESSION'
+  | 'PART11_ATTESTATION'
+  | 'HMAC_WEBTRIGGER'
+  | 'CONFLUENCE_EVENT_TRIGGER'
+  | 'ROVO_AGENT'
+  | 'SYSTEM_INIT';
+
+export interface AuditLogEntry {
+  seq: number;
+  timestamp: string;
+  actorAccountId: string;
+  action: AuditActionType | string;
+  targetKey: string;
+  details: Record<string, unknown>;
+  prevHash: string;
+  entryHash: string;
+  authMethod: AuditAuthMethod | string;
+}
+
+export interface AuditChainVerification {
+  valid: boolean;
+  totalEntries: number;
+  headHash: string;
+  brokenAtSeq?: number;
+  reason?: string;
+}
+
+export interface Part11Attestation {
+  meaning: string;
+  attestationConfirmed: boolean;
+  attestationPhrase?: string;
+  passwordConfirmed?: boolean;
+  signedBy?: string;
+  signedAt?: string;
+  role?: string;
+}
+
+export interface LiveSyncResult {
+  success: boolean;
+  datasetMode: 'LIVE' | 'DEMO';
+  jiraIssuesScanned: number;
+  confluencePagesScanned: number;
+  linkedPairsFound: number;
+  driftDetectedCount: number;
+  warnings: string[];
+  summary: ComplianceSummary;
 }
