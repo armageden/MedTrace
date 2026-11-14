@@ -2,39 +2,77 @@
 
 # Docs Sync Runbook
 
-Run this checklist after **any** change to source code, manifest, workflows, or scripts.
+Run this checklist after **any** change to source code, manifest, workflows, tests, or operational scripts. Every tracked entry point matched by `CONFIG.entryGlobs` in `scripts/docs-check.mjs` must remain documented and cross-linked.
 
-## 1. Source-to-Docs Mapping
+## 1. Tracked File Inventory & Source-to-Docs Mapping
 
-| Changed File | Doc(s) to Check / Update |
+### Root Configuration, CI, MCP Server & Scripts
+
+| Changed File(s) | Doc(s) to Check / Update |
 |---|---|
-| [manifest.yml](../../manifest.yml) | [docs/01-architecture/forge-modules.md](../01-architecture/forge-modules.md), [README.md](../../README.md) |
-| [src/index.ts](../../src/index.ts) | [docs/01-architecture/forge-modules.md](../01-architecture/forge-modules.md), [docs/03-mcp-integration/live-sync.md](../03-mcp-integration/live-sync.md) |
-| [src/runtime.ts](../../src/runtime.ts) | [docs/01-architecture/forge-modules.md](../01-architecture/forge-modules.md) |
-| [src/compliance-engine.ts](../../src/compliance-engine.ts), [src/types.ts](../../src/types.ts) | [docs/02-compliance-engine/evaluation-rules.md](../02-compliance-engine/evaluation-rules.md), [docs/99-design-decisions/004-artifact-node-bfs-blast-radius.md](../99-design-decisions/004-artifact-node-bfs-blast-radius.md) |
-| [src/seeder.ts](../../src/seeder.ts) | [docs/02-compliance-engine/evaluation-rules.md](../02-compliance-engine/evaluation-rules.md), [docs/99-design-decisions/001-twg-and-kvs-hybrid.md](../99-design-decisions/001-twg-and-kvs-hybrid.md), [docs/99-design-decisions/005-hash-chained-audit-log-and-sharded-kvs.md](../99-design-decisions/005-hash-chained-audit-log-and-sharded-kvs.md) |
-| [src/ingestion.ts](../../src/ingestion.ts) | [docs/02-compliance-engine/evaluation-rules.md](../02-compliance-engine/evaluation-rules.md), [docs/01-architecture/forge-modules.md](../01-architecture/forge-modules.md), [docs/99-design-decisions/005-hash-chained-audit-log-and-sharded-kvs.md](../99-design-decisions/005-hash-chained-audit-log-and-sharded-kvs.md) |
-| [src/audit-log.ts](../../src/audit-log.ts) | [docs/02-compliance-engine/evaluation-rules.md](../02-compliance-engine/evaluation-rules.md), [docs/99-design-decisions/005-hash-chained-audit-log-and-sharded-kvs.md](../99-design-decisions/005-hash-chained-audit-log-and-sharded-kvs.md) |
-| [src/teamwork-graph.ts](../../src/teamwork-graph.ts) | [docs/99-design-decisions/003-twg-dual-engine-fallback.md](../99-design-decisions/003-twg-dual-engine-fallback.md) |
-| [src/workflow-validator.ts](../../src/workflow-validator.ts) | [docs/02-compliance-engine/evaluation-rules.md](../02-compliance-engine/evaluation-rules.md) |
-| [src/mcp-server.ts](../../src/mcp-server.ts), [src/nonce-store.ts](../../src/nonce-store.ts), [mcp-server/index.mjs](../../mcp-server/index.mjs) | [docs/03-mcp-integration/live-sync.md](../03-mcp-integration/live-sync.md), [mcp-server/README.md](../../mcp-server/README.md), [docs/99-design-decisions/002-webtrigger-hmac-authentication.md](../99-design-decisions/002-webtrigger-hmac-authentication.md) |
-| [static/frontend/src/App.tsx](../../static/frontend/src/App.tsx), [static/frontend/src/bridge.ts](../../static/frontend/src/bridge.ts), [static/frontend/src/components/AuditLogModal.tsx](../../static/frontend/src/components/AuditLogModal.tsx), [static/frontend/src/components/FdaExportModal.tsx](../../static/frontend/src/components/FdaExportModal.tsx) | [docs/01-architecture/forge-modules.md](../01-architecture/forge-modules.md), [README.md](../../README.md) |
-| [scripts/rotate-mcp-secret.sh](../../scripts/rotate-mcp-secret.sh), `.github/workflows/*.yml` | [docs/00-how-to/03-deploy-production.md](./03-deploy-production.md), [SECURITY.md](../../SECURITY.md) |
-| [tests/compliance-engine.test.cjs](../../tests/compliance-engine.test.cjs) | [docs/02-compliance-engine/evaluation-rules.md](../02-compliance-engine/evaluation-rules.md), [README.md](../../README.md) |
+| `manifest.yml` | [docs/01-architecture/forge-modules.md](../01-architecture/forge-modules.md), [README.md](../../README.md) |
+| `package.json`, `static/frontend/package.json`, `static/frontend/vite.config.ts`, `static/frontend/vitest.config.ts` | [docs/00-how-to/00-overview.md](./00-overview.md), [README.md](../../README.md) |
+| `.github/workflows/ci.yml`, `.github/workflows/medtrace-release-gate.yml` | [docs/00-how-to/03-deploy-production.md](./03-deploy-production.md), [SECURITY.md](../../SECURITY.md) |
+| `scripts/validate-manifest.mjs`, `scripts/docs-check.mjs`, `scripts/rotate-mcp-secret.sh` | [docs/00-how-to/03-deploy-production.md](./03-deploy-production.md), [SECURITY.md](../../SECURITY.md) |
+| `mcp-server/index.mjs` | [docs/03-mcp-integration/live-sync.md](../03-mcp-integration/live-sync.md), [docs/00-how-to/02-add-mcp-tool.md](./02-add-mcp-tool.md), [mcp-server/README.md](../../mcp-server/README.md) |
+
+### Backend Forge Runtime (`src/*.ts`)
+
+| Changed File(s) | Doc(s) to Check / Update |
+|---|---|
+| `src/index.ts` | [docs/01-architecture/forge-modules.md](../01-architecture/forge-modules.md), [docs/03-mcp-integration/live-sync.md](../03-mcp-integration/live-sync.md) |
+| `src/runtime.ts` | [docs/01-architecture/forge-modules.md](../01-architecture/forge-modules.md) |
+| `src/compliance-engine.ts`, `src/types.ts` | [docs/02-compliance-engine/evaluation-rules.md](../02-compliance-engine/evaluation-rules.md), [docs/99-design-decisions/004-artifact-node-bfs-blast-radius.md](../99-design-decisions/004-artifact-node-bfs-blast-radius.md) |
+| `src/seeder.ts` | [docs/02-compliance-engine/evaluation-rules.md](../02-compliance-engine/evaluation-rules.md), [docs/99-design-decisions/001-twg-and-kvs-hybrid.md](../99-design-decisions/001-twg-and-kvs-hybrid.md), [docs/99-design-decisions/005-hash-chained-audit-log-and-sharded-kvs.md](../99-design-decisions/005-hash-chained-audit-log-and-sharded-kvs.md) |
+| `src/ingestion.ts` | [docs/02-compliance-engine/evaluation-rules.md](../02-compliance-engine/evaluation-rules.md), [docs/01-architecture/forge-modules.md](../01-architecture/forge-modules.md), [docs/99-design-decisions/005-hash-chained-audit-log-and-sharded-kvs.md](../99-design-decisions/005-hash-chained-audit-log-and-sharded-kvs.md) |
+| `src/audit-log.ts`, `src/crypto-utils.ts` | [docs/02-compliance-engine/evaluation-rules.md](../02-compliance-engine/evaluation-rules.md), [docs/99-design-decisions/005-hash-chained-audit-log-and-sharded-kvs.md](../99-design-decisions/005-hash-chained-audit-log-and-sharded-kvs.md), [SECURITY.md](../../SECURITY.md) |
+| `src/teamwork-graph.ts` | [docs/99-design-decisions/003-twg-dual-engine-fallback.md](../99-design-decisions/003-twg-dual-engine-fallback.md) |
+| `src/workflow-validator.ts` | [docs/02-compliance-engine/evaluation-rules.md](../02-compliance-engine/evaluation-rules.md), [docs/00-how-to/03-deploy-production.md](./03-deploy-production.md) |
+| `src/mcp-server.ts`, `src/nonce-store.ts` | [docs/03-mcp-integration/live-sync.md](../03-mcp-integration/live-sync.md), [docs/00-how-to/02-add-mcp-tool.md](./02-add-mcp-tool.md), [docs/99-design-decisions/002-webtrigger-hmac-authentication.md](../99-design-decisions/002-webtrigger-hmac-authentication.md) |
+
+### Custom UI Frontend & Frontend Tests (`static/frontend/src/**/*.ts*`)
+
+| Changed File(s) | Doc(s) to Check / Update |
+|---|---|
+| `static/frontend/src/main.tsx`, `static/frontend/src/App.tsx`, `static/frontend/src/bridge.ts`, `static/frontend/src/auditVerify.ts`, `static/frontend/src/types.ts`, `static/frontend/src/hooks/useDialogA11y.ts` | [docs/01-architecture/forge-modules.md](../01-architecture/forge-modules.md), [README.md](../../README.md) |
+| `static/frontend/src/components/AuditHeader.tsx`, `static/frontend/src/components/AuditLogModal.tsx`, `static/frontend/src/components/ConfirmSeedModal.tsx`, `static/frontend/src/components/CustomNodes.tsx`, `static/frontend/src/components/FdaExportModal.tsx` | [docs/01-architecture/forge-modules.md](../01-architecture/forge-modules.md), [README.md](../../README.md) |
+| `static/frontend/src/components/InspectionDrawer.tsx`, `static/frontend/src/components/LineageGraph.tsx`, `static/frontend/src/components/TraceMatrixTable.tsx`, `static/frontend/src/components/TransitionModal.tsx` | [docs/01-architecture/forge-modules.md](../01-architecture/forge-modules.md), [README.md](../../README.md) |
+| `static/frontend/src/test/setup.ts`, `static/frontend/src/__tests__/App.races.test.tsx`, `static/frontend/src/__tests__/AuditLogModal.test.tsx`, `static/frontend/src/__tests__/FdaExportModal.test.tsx` | [docs/01-architecture/forge-modules.md](../01-architecture/forge-modules.md), [docs/00-how-to/00-overview.md](./00-overview.md) |
+| `static/frontend/src/__tests__/InspectionDrawer.test.tsx`, `static/frontend/src/__tests__/TransitionModal.test.tsx`, `static/frontend/src/__tests__/a11yAndGraph.test.tsx`, `static/frontend/src/__tests__/bridge.test.ts` | [docs/01-architecture/forge-modules.md](../01-architecture/forge-modules.md), [docs/00-how-to/00-overview.md](./00-overview.md) |
+
+### Backend, MCP & Script Test Suites (`tests/*.test.*`)
+
+| Changed File(s) | Doc(s) to Check / Update |
+|---|---|
+| `tests/audit-log.test.cjs`, `tests/seeder-storage.test.cjs` | [docs/02-compliance-engine/evaluation-rules.md](../02-compliance-engine/evaluation-rules.md), [docs/99-design-decisions/005-hash-chained-audit-log-and-sharded-kvs.md](../99-design-decisions/005-hash-chained-audit-log-and-sharded-kvs.md) |
+| `tests/compliance-engine.test.cjs` | [docs/02-compliance-engine/evaluation-rules.md](../02-compliance-engine/evaluation-rules.md), [docs/00-how-to/01-add-iso-hazard.md](./01-add-iso-hazard.md) |
+| `tests/index-rbac-webtrigger.test.cjs`, `tests/nonce-store.test.cjs` | [docs/01-architecture/forge-modules.md](../01-architecture/forge-modules.md), [docs/03-mcp-integration/live-sync.md](../03-mcp-integration/live-sync.md), [docs/99-design-decisions/002-webtrigger-hmac-authentication.md](../99-design-decisions/002-webtrigger-hmac-authentication.md) |
+| `tests/ingestion.test.cjs` | [docs/01-architecture/forge-modules.md](../01-architecture/forge-modules.md), [docs/02-compliance-engine/evaluation-rules.md](../02-compliance-engine/evaluation-rules.md) |
+| `tests/mcp-server.test.mjs`, `tests/workflow-validator-and-mcp.test.cjs` | [docs/03-mcp-integration/live-sync.md](../03-mcp-integration/live-sync.md), [docs/00-how-to/02-add-mcp-tool.md](./02-add-mcp-tool.md) |
+| `npm run test:scripts` (`scripts/*.mjs` and `scripts/*.sh` tests) | [docs/00-how-to/00-overview.md](./00-overview.md), [docs/00-how-to/03-deploy-production.md](./03-deploy-production.md) |
 
 ## 2. Verification Commands
 
-Run the mechanical doc verifier after updates:
+Run the mechanical doc verifier after updates (validates relative links, `#anchor` heading slugs, backticked disk paths, folder `00-overview.md` links, backlinks, and `reverse-coverage`):
 
 ```bash
 npm run docs:check
 ```
 
-Then confirm full build, typechecks, and test health:
+Before Atlassian Marketplace submission, also verify zero unconfigured listing placeholders remain across `SECURITY.md` and `marketplace/` markdown files:
 
 ```bash
-npm run build && cd static/frontend && npm run build && cd ../..
-npm test
+node scripts/docs-check.mjs --strict-listing
+```
+
+Then confirm typechecks, builds, tests, script syntax, and offline manifest validation:
+
+```bash
+npm run typecheck
+npm run build:all
+npm run test:all
+npm run lint:manifest
+node --check mcp-server/index.mjs && node --check scripts/validate-manifest.mjs && node --check scripts/docs-check.mjs && bash -n scripts/rotate-mcp-secret.sh
 ```
 
 ## 3. Output Format

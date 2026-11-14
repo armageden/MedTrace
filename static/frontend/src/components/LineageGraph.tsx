@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ReactFlow,
   Background,
@@ -13,6 +13,7 @@ import {
 import '@xyflow/react/dist/style.css';
 import { HazardNode, SpecNode, WorkNode, TestNode, SignatureNode, FlowLinkRef, FlowNodePayload } from './CustomNodes';
 import { ComplianceSummary } from '../types';
+import { useDialogA11y } from '../hooks/useDialogA11y';
 
 interface LineageGraphProps {
   summary: ComplianceSummary;
@@ -36,6 +37,47 @@ const STAGE_COLUMNS = [
   { key: 'signature', label: '5. 21 CFR PART 11 SIGN-OFF', x: 1210, width: 220 },
 ] as const;
 
+function minimapNodeColor(node: Node): string {
+  if (node.type === 'hazard') return '#de350b';
+  if (node.type === 'test') return '#ff8b00';
+  return '#0052cc';
+}
+
+function getPrefersReducedMotion(): boolean {
+  if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') {
+    return false;
+  }
+  return window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+}
+
+function usePrefersReducedMotion(): boolean {
+  const [prefersReducedMotion, setPrefersReducedMotion] = useState<boolean>(getPrefersReducedMotion);
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') {
+      return;
+    }
+    const mediaQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
+    setPrefersReducedMotion(mediaQuery.matches);
+
+    const handleChange = (event: MediaQueryListEvent) => {
+      setPrefersReducedMotion(event.matches);
+    };
+
+    if (typeof mediaQuery.addEventListener === 'function') {
+      mediaQuery.addEventListener('change', handleChange);
+      return () => mediaQuery.removeEventListener('change', handleChange);
+    }
+    if (typeof mediaQuery.addListener === 'function') {
+      mediaQuery.addListener(handleChange);
+      return () => mediaQuery.removeListener(handleChange);
+    }
+    return undefined;
+  }, []);
+
+  return prefersReducedMotion;
+}
+
 const StageHeaderOverlay: React.FC = () => {
   const { x, zoom } = useViewport();
 
@@ -52,38 +94,91 @@ const StageHeaderOverlay: React.FC = () => {
         pointerEvents: 'none',
       }}
     >
-      {STAGE_COLUMNS.map((col) => (
-        <div
-          key={col.key}
-          style={{
-            position: 'absolute',
-            top: 0,
-            left: x + col.x * zoom,
-            width: Math.max(110, col.width * zoom),
-            fontSize: 10,
-            fontWeight: 800,
-            letterSpacing: '0.6px',
-            color: '#42526e',
-            background: 'rgba(255, 255, 255, 0.94)',
-            padding: '4px 8px',
-            borderRadius: 4,
-            boxShadow: '0 1px 3px rgba(9, 30, 66, 0.08)',
-            border: '1px solid #dfe1e6',
-            textAlign: 'center',
-            whiteSpace: 'nowrap',
-            overflow: 'hidden',
-            textOverflow: 'ellipsis',
-          }}
-        >
-          {col.label}
-        </div>
-      ))}
+      {STAGE_COLUMNS.map((col, idx) => {
+        const nextCol = STAGE_COLUMNS[idx + 1];
+        const maxNonOverlappingWidth = nextCol ? (nextCol.x - col.x) * zoom - 6 : col.width * zoom;
+        const scaledWidth = Math.min(col.width * zoom, maxNonOverlappingWidth);
+        const headerWidth =
+          maxNonOverlappingWidth >= 40 ? Math.max(40, scaledWidth) : Math.max(0, maxNonOverlappingWidth);
+
+        return (
+          <div
+            key={col.key}
+            title={col.label}
+            style={{
+              position: 'absolute',
+              top: 0,
+              left: x + col.x * zoom,
+              width: headerWidth,
+              fontSize: 10,
+              fontWeight: 800,
+              letterSpacing: '0.6px',
+              color: 'var(--mt-text-secondary, #42526e)',
+              background: 'var(--mt-bg-overlay, rgba(255, 255, 255, 0.94))',
+              padding: '4px 8px',
+              borderRadius: 4,
+              boxShadow: '0 1px 3px rgba(9, 30, 66, 0.08)',
+              border: '1px solid var(--mt-border, #dfe1e6)',
+              textAlign: 'center',
+              whiteSpace: 'nowrap',
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+            }}
+          >
+            {col.label}
+          </div>
+        );
+      })}
     </div>
   );
 };
 
 export const LineageGraph: React.FC<LineageGraphProps> = ({ summary, compact = false, onSelectTraceLink }) => {
   const [ambiguousRefs, setAmbiguousRefs] = useState<FlowLinkRef[] | null>(null);
+  const popoverRef = useRef<HTMLDivElement | null>(null);
+  const prefersReducedMotion = usePrefersReducedMotion();
+
+  const isPopoverOpen = Boolean(ambiguousRefs && ambiguousRefs.length > 1);
+  const closePopover = useCallback(() => {
+    setAmbiguousRefs(null);
+  }, []);
+
+  useDialogA11y({
+    isOpen: isPopoverOpen,
+    onClose: closePopover,
+    containerRef: popoverRef,
+  });
+
+  const handleActivateRefs = useCallback(
+    (refs: FlowLinkRef[]) => {
+      if (refs.length === 1) {
+        setAmbiguousRefs(null);
+        onSelectTraceLink(refs[0].id);
+      } else if (refs.length > 1) {
+        setAmbiguousRefs(refs);
+      }
+    },
+    [onSelectTraceLink]
+  );
+
+  const handleNodeClick = useCallback(
+    (_event: React.MouseEvent, node: Node) => {
+      const payload = node.data as FlowNodePayload<unknown> | undefined;
+      handleActivateRefs(payload?.linkRefs || []);
+    },
+    [handleActivateRefs]
+  );
+
+  const handleEdgeClick = useCallback(
+    (_event: React.MouseEvent, edge: Edge) => {
+      const linkId = (edge.data as { linkId?: string } | undefined)?.linkId;
+      if (linkId) {
+        setAmbiguousRefs(null);
+        onSelectTraceLink(linkId);
+      }
+    },
+    [onSelectTraceLink]
+  );
 
   const { nodes, edges } = useMemo(() => {
     const nodeMap = new Map<string, Node<FlowNodePayload<unknown>>>();
@@ -115,7 +210,7 @@ export const LineageGraph: React.FC<LineageGraphProps> = ({ summary, compact = f
         id,
         type,
         position,
-        data: { item, linkRefs: [linkRef] },
+        data: { item, linkRefs: [linkRef], onActivate: handleActivateRefs },
       });
     };
 
@@ -129,11 +224,15 @@ export const LineageGraph: React.FC<LineageGraphProps> = ({ summary, compact = f
         workKey: link.work.key,
       };
 
-      const hazNodeId = `node-haz-${link.hazard.id}`;
-      const specNodeId = `node-spec-${link.spec.id}`;
-      const workNodeId = `node-work-${link.work.id}`;
-      const testNodeId = `node-test-${link.test.id}`;
-      const sigNodeId = `node-sig-${link.signature.id}`;
+      const hazNodeId = link.hazard.id ? `node-haz-${link.hazard.id}` : `node-haz-unbound-${link.id}`;
+      const specNodeId =
+        link.spec.id && !link.spec.isMissingSentinel
+          ? `node-spec-${link.spec.id}`
+          : `node-spec-unbound-${link.id}`;
+      const workNodeId =
+        link.work.id && link.work.key ? `node-work-${link.work.id}` : `node-work-unbound-${link.id}`;
+      const testNodeId = link.test.id ? `node-test-${link.test.id}` : `node-test-unbound-${link.id}`;
+      const sigNodeId = link.signature.id ? `node-sig-${link.signature.id}` : `node-sig-unbound-${link.id}`;
 
       upsertNode(hazNodeId, 'hazard', { x: colX.hazard, y: yPos }, link.hazard, linkRef);
       upsertNode(specNodeId, 'spec', { x: colX.spec, y: yPos }, link.spec, linkRef);
@@ -142,7 +241,8 @@ export const LineageGraph: React.FC<LineageGraphProps> = ({ summary, compact = f
       upsertNode(sigNodeId, 'signature', { x: colX.signature, y: yPos }, link.signature, linkRef);
 
       const baseEdge = {
-        animated: isBroken,
+        type: 'smoothstep' as const,
+        animated: isBroken && !prefersReducedMotion,
         style: { stroke: edgeColor, strokeWidth: isBroken ? 2.5 : 2, cursor: 'pointer' },
         markerEnd: { type: MarkerType.ArrowClosed, color: edgeColor },
         data: { linkId: link.id },
@@ -157,7 +257,7 @@ export const LineageGraph: React.FC<LineageGraphProps> = ({ summary, compact = f
     });
 
     return { nodes: Array.from(nodeMap.values()), edges: calculatedEdges };
-  }, [summary]);
+  }, [summary, handleActivateRefs, prefersReducedMotion]);
 
   return (
     <div
@@ -166,14 +266,16 @@ export const LineageGraph: React.FC<LineageGraphProps> = ({ summary, compact = f
         minHeight: compact ? '340px' : '540px',
         width: '100%',
         position: 'relative',
-        background: '#fafbfc',
+        background: 'var(--mt-bg-surface-subtle, #fafbfc)',
         borderRadius: 8,
-        border: '1px solid #ebecf0',
+        border: '1px solid var(--mt-border-subtle, #ebecf0)',
       }}
     >
-      {ambiguousRefs && ambiguousRefs.length > 1 && (
+      {isPopoverOpen && ambiguousRefs && (
         <div
+          ref={popoverRef}
           role="dialog"
+          aria-modal="true"
           aria-label="Select trace link for shared node"
           style={{
             position: 'absolute',
@@ -181,8 +283,8 @@ export const LineageGraph: React.FC<LineageGraphProps> = ({ summary, compact = f
             left: '50%',
             transform: 'translateX(-50%)',
             zIndex: 30,
-            background: '#ffffff',
-            border: '1px solid #dfe1e6',
+            background: 'var(--mt-bg-overlay, #ffffff)',
+            border: '1px solid var(--mt-border, #dfe1e6)',
             borderRadius: 8,
             padding: '10px 12px',
             boxShadow: '0 4px 16px rgba(9, 30, 66, 0.2)',
@@ -192,7 +294,7 @@ export const LineageGraph: React.FC<LineageGraphProps> = ({ summary, compact = f
             flexWrap: 'wrap',
           }}
         >
-          <span style={{ fontSize: 11, fontWeight: 700, color: '#172b4d' }}>
+          <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--mt-text-primary, #172b4d)' }}>
             Shared node — choose lineage to inspect:
           </span>
           {ambiguousRefs.map((ref) => (
@@ -206,19 +308,19 @@ export const LineageGraph: React.FC<LineageGraphProps> = ({ summary, compact = f
               }}
               style={{
                 padding: '4px 10px',
-                border: '1px solid #0052cc',
-                background: '#deebff',
-                color: '#0052cc',
+                border: '1px solid var(--mt-brand-bg, #0052cc)',
+                background: 'var(--mt-brand-subtle-bg, #deebff)',
+                color: 'var(--mt-brand-text, #0052cc)',
               }}
             >
-              {ref.hazardKey} ({ref.workKey})
+              {ref.hazardKey} ({ref.workKey || 'Unbound'})
             </button>
           ))}
           <button
             type="button"
             className="mt-icon-btn"
             aria-label="Dismiss link selector"
-            onClick={() => setAmbiguousRefs(null)}
+            onClick={closePopover}
             style={{ fontSize: 12, fontWeight: 700 }}
           >
             ✕
@@ -233,37 +335,13 @@ export const LineageGraph: React.FC<LineageGraphProps> = ({ summary, compact = f
         nodesDraggable={false}
         nodesConnectable={false}
         fitView
-        onNodeClick={(_, node) => {
-          const payload = node.data as FlowNodePayload<unknown> | undefined;
-          const refs = payload?.linkRefs || [];
-          if (refs.length === 1) {
-            setAmbiguousRefs(null);
-            onSelectTraceLink(refs[0].id);
-          } else if (refs.length > 1) {
-            setAmbiguousRefs(refs);
-          }
-        }}
-        onEdgeClick={(_, edge) => {
-          const linkId = (edge.data as { linkId?: string } | undefined)?.linkId;
-          if (linkId) {
-            setAmbiguousRefs(null);
-            onSelectTraceLink(linkId);
-          }
-        }}
+        onNodeClick={handleNodeClick}
+        onEdgeClick={handleEdgeClick}
       >
         <StageHeaderOverlay />
         <Background color="#dfe1e6" gap={20} size={1} />
         <Controls />
-        {!compact && (
-          <MiniMap
-            nodeColor={(n) => {
-              if (n.type === 'hazard') return '#de350b';
-              if (n.type === 'test') return '#ff8b00';
-              return '#0052cc';
-            }}
-            style={{ height: 100, width: 140 }}
-          />
-        )}
+        {!compact && <MiniMap nodeColor={minimapNodeColor} style={{ height: 100, width: 140 }} />}
       </ReactFlow>
     </div>
   );

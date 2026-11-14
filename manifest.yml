@@ -8,7 +8,7 @@ modules:
   jira:issuePanel:
     - key: medtrace-issue-panel
       title: MedTrace Regulatory & Safety
-      icon: https://developer.atlassian.com/platform/forge/images/icons/issue-panel-icon.svg
+      icon: resource:icons;medtrace-icon.svg
       resource: main
       resolver:
         function: resolver-fn
@@ -20,7 +20,7 @@ modules:
   confluence:contentBylineItem:
     - key: medtrace-confluence-byline
       title: MedTrace Part 11 Status
-      icon: https://developer.atlassian.com/platform/forge/images/icons/issue-panel-icon.svg
+      icon: resource:icons;medtrace-icon.svg
       resource: main
       resolver:
         function: resolver-fn
@@ -110,10 +110,14 @@ modules:
 resources:
   - key: main
     path: static/frontend/dist
+  - key: icons
+    path: static/icons
 permissions:
   scopes:
+    # Jira & AGG read scopes (TeamworkGraphService queries AGG jira.issue and Jira REST remotelinks under read:jira-work; no Teamwork Graph scopes declared)
     - read:jira-work
     - read:jira-user
+    # Granular Confluence REST v2 + current-user + avi:confluence:updated:page trigger scopes (required for /wiki/api/v2/pages, /spaces, /*/operations, and /wiki/rest/api/user/current)
     - read:page:confluence
     - read:space:confluence
     - read:user:confluence
@@ -121,6 +125,7 @@ permissions:
     - storage:app
   content:
     styles:
+      # Required by @xyflow/react runtime transform inline styles on graph nodes/edges; scripts remain locked down without unsafe-inline or external egress
       - 'unsafe-inline'
 app:
   runtime:

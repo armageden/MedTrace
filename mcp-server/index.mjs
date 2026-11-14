@@ -6,71 +6,250 @@
  * Exposes IEC 62304 & ISO 14971 Compliance Tools to Cursor, Claude Desktop, and AI coding agents.
  */
 
-import readline from 'readline';
+import readline from 'node:readline';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
-// Load local .env from cwd or repo root relative to this module
-try {
-  const moduleDir = path.dirname(fileURLToPath(import.meta.url));
-  const candidateEnvPaths = [
-    path.resolve(process.cwd(), '.env'),
-    path.resolve(moduleDir, '..', '.env'),
-  ];
-  for (const envPath of candidateEnvPaths) {
-    if (fs.existsSync(envPath)) {
-      const lines = fs.readFileSync(envPath, 'utf8').split('\n');
-      for (const line of lines) {
-        const match = line.match(/^\s*([\w.-]+)\s*=\s*(.*)?\s*$/);
-        if (match && !process.env[match[1]]) {
-          process.env[match[1]] = (match[2] || '').trim().replace(/^['"]|['"]$/g, '');
+export const SERVER_NAME = 'medtrace-mcp-server';
+export const SERVER_VERSION = '1.1.0';
+export const DEFAULT_REQUEST_TIMEOUT_MS = 15_000;
+export const MIN_REQUEST_TIMEOUT_MS = 1_000;
+export const MAX_REQUEST_TIMEOUT_MS = 60_000;
+
+const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '::1', '[::1]']);
+// eslint-disable-next-line no-control-regex
+const CONTROL_CHAR_RE = /[\u0000-\u001f\u007f]/;
+
+function isPlainObject(value) {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+/**
+ * Parses `.env` content supporting full-line `#` comments, optional `export ` prefix,
+ * quoted values containing `#` (with `\"` / `\'` / `\\` unescaping and trailing `#` comments),
+ * and unquoted values with trailing ` # comment`. Never overrides pre-existing keys in `env`.
+ */
+export function parseEnvContent(content, env = {}) {
+  if (typeof content !== 'string') return env;
+
+  const preExistingKeys = new Set(
+    Object.keys(env).filter((key) => env[key] !== undefined)
+  );
+
+  for (const rawLine of content.split(/\r?\n/)) {
+    let line = rawLine.trim();
+    if (!line || line.startsWith('#')) continue;
+
+    line = line.replace(/^export\s+/, '');
+    const match = line.match(/^([\w.-]+)\s*=\s*(.*)$/);
+    if (!match) continue;
+
+    const key = match[1];
+    const rawRest = match[2].trimStart();
+    let parsedValue = '';
+
+    if (rawRest.startsWith('"') || rawRest.startsWith("'")) {
+      const quote = rawRest[0];
+      let out = '';
+      let closed = false;
+      for (let i = 1; i < rawRest.length; i += 1) {
+        const ch = rawRest[i];
+        if (ch === '\\' && i + 1 < rawRest.length) {
+          const next = rawRest[i + 1];
+          if (next === quote || next === '\\') {
+            out += next;
+            i += 1;
+            continue;
+          }
         }
+        if (ch === quote) {
+          closed = true;
+          break;
+        }
+        out += ch;
       }
-      break;
+      parsedValue = closed ? out : out.replace(/\s+#.*$/, '').trim();
+    } else if (rawRest.startsWith('#') || rawRest === '') {
+      parsedValue = '';
+    } else {
+      parsedValue = rawRest.replace(/\s+#.*$/, '').trim();
+    }
+
+    if (!preExistingKeys.has(key)) {
+      env[key] = parsedValue;
     }
   }
-} catch {}
 
-const rl = readline.createInterface({
-  input: process.stdin,
-  output: process.stdout,
-  terminal: false,
-});
-
-const SERVER_NAME = 'medtrace-mcp-server';
-const SERVER_VERSION = '1.1.0';
-const MCP_SECRET = process.env.MEDTRACE_MCP_SECRET;
-
-if (!MCP_SECRET) {
-  console.error('[MedTrace MCP Server] Fatal Security Error: MEDTRACE_MCP_SECRET is not configured.');
-  console.error('[MedTrace MCP Server] Fail-closed: Refusing to start with insecure default secret.');
-  console.error('[MedTrace MCP Server] Please export MEDTRACE_MCP_SECRET="<secret>" before starting this server.');
-  process.exit(1);
+  return env;
 }
 
-const FORGE_WEBTRIGGER_URL = process.env.MEDTRACE_WEBTRIGGER_URL;
-if (!FORGE_WEBTRIGGER_URL) {
-  console.error('[MedTrace MCP Server] Warning: MEDTRACE_WEBTRIGGER_URL is not configured.');
-  console.error('[MedTrace MCP Server] Export MEDTRACE_WEBTRIGGER_URL="<url>" to connect to your live Forge webtrigger.');
+/**
+ * Loads `.env` from `cwd` first, then the repository root relative to this module.
+ */
+export function loadLocalEnv(targetEnv = process.env, cwd = process.cwd()) {
+  try {
+    const moduleDir = path.dirname(fileURLToPath(import.meta.url));
+    const candidateEnvPaths = [
+      path.resolve(cwd, '.env'),
+      path.resolve(moduleDir, '..', '.env'),
+    ];
+    for (const envPath of candidateEnvPaths) {
+      if (fs.existsSync(envPath)) {
+        const content = fs.readFileSync(envPath, 'utf8');
+        parseEnvContent(content, targetEnv);
+        return envPath;
+      }
+    }
+  } catch {}
+  return null;
 }
 
-async function signedCloudRequest(method, payloadObj) {
-  if (!FORGE_WEBTRIGGER_URL) {
+/**
+ * Validates `MEDTRACE_WEBTRIGGER_URL`, enforcing `https://` without embedded credentials
+ * unless `allowInsecureLocalhost === true` for explicit local loopback development/testing.
+ */
+export function validateWebtriggerUrl(
+  rawUrl,
+  allowInsecureLocalhost = process.env.MEDTRACE_ALLOW_INSECURE_LOCALHOST === 'true'
+) {
+  if (typeof rawUrl !== 'string' || rawUrl.trim() === '') {
+    return { ok: false, error: 'MEDTRACE_WEBTRIGGER_URL is not configured.' };
+  }
+
+  const trimmed = rawUrl.trim();
+  if (CONTROL_CHAR_RE.test(trimmed)) {
+    return { ok: false, error: 'MEDTRACE_WEBTRIGGER_URL contains invalid control characters.' };
+  }
+
+  let parsed;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    return { ok: false, error: 'MEDTRACE_WEBTRIGGER_URL is not a valid URL.' };
+  }
+
+  if (parsed.username !== '' || parsed.password !== '') {
+    return { ok: false, error: 'MEDTRACE_WEBTRIGGER_URL must not contain embedded credentials.' };
+  }
+
+  const hostname = parsed.hostname.toLowerCase();
+  if (!hostname) {
+    return { ok: false, error: 'MEDTRACE_WEBTRIGGER_URL is missing a hostname.' };
+  }
+
+  if (parsed.protocol === 'https:') {
+    return { ok: true, url: parsed.toString() };
+  }
+
+  const isLoopback = LOOPBACK_HOSTS.has(hostname);
+  if (parsed.protocol === 'http:' && isLoopback) {
+    if (allowInsecureLocalhost === true) {
+      return { ok: true, url: parsed.toString() };
+    }
+    return {
+      ok: false,
+      error:
+        'Insecure http:// loopback MEDTRACE_WEBTRIGGER_URL rejected; set MEDTRACE_ALLOW_INSECURE_LOCALHOST=true for local development/testing only.',
+    };
+  }
+
+  return {
+    ok: false,
+    error: `Unsafe MEDTRACE_WEBTRIGGER_URL (${parsed.protocol}//${hostname}): https:// is required.`,
+  };
+}
+
+/**
+ * Resolves `MEDTRACE_REQUEST_TIMEOUT_MS` (default 15000ms, clamped to 1000..60000ms).
+ */
+export function resolveRequestTimeoutMs(raw = process.env.MEDTRACE_REQUEST_TIMEOUT_MS) {
+  if (typeof raw !== 'string' && typeof raw !== 'number') {
+    return DEFAULT_REQUEST_TIMEOUT_MS;
+  }
+  const str = String(raw).trim();
+  if (!str) return DEFAULT_REQUEST_TIMEOUT_MS;
+  const parsed = Number(str);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return DEFAULT_REQUEST_TIMEOUT_MS;
+  }
+  return Math.min(MAX_REQUEST_TIMEOUT_MS, Math.max(MIN_REQUEST_TIMEOUT_MS, Math.floor(parsed)));
+}
+
+/**
+ * Formats truthful source labels aligned with the active Forge KVS dataset mode.
+ */
+export function formatSourceLabel(datasetMode) {
+  if (datasetMode === 'LIVE') return 'Atlassian Cloud (Forge KVS - LIVE)';
+  if (datasetMode === 'DEMO') return 'Atlassian Forge KVS (DEMO Dataset)';
+  return 'Atlassian Forge KVS (UNSPECIFIED)';
+}
+
+function collectCanonicalLinkKeys(link) {
+  return [
+    link?.hazard?.key,
+    link?.hazard?.id,
+    link?.work?.key,
+    link?.work?.id,
+    link?.test?.testKey,
+    link?.test?.id,
+    link?.spec?.id,
+    link?.spec?.pageId,
+    link?.signature?.id,
+  ]
+    .filter((val) => typeof val === 'string' && val.trim() !== '')
+    .map((val) => val.trim().toLowerCase());
+}
+
+/**
+ * Sends an HMAC-SHA256 signed, nonce-protected request to the configured Forge webtrigger.
+ */
+export async function signedCloudRequest(method, payloadObj, configOverride = undefined) {
+  const rawSecret =
+    configOverride && typeof configOverride.secret === 'string'
+      ? configOverride.secret
+      : process.env.MEDTRACE_MCP_SECRET;
+  if (typeof rawSecret !== 'string' || rawSecret.trim() === '') {
     return {
       ok: false,
       status: 0,
-      error: 'MEDTRACE_WEBTRIGGER_URL is not configured.',
+      errorType: 'CONFIG_ERROR',
+      error: 'MEDTRACE_MCP_SECRET is not configured.',
     };
   }
+
+  const rawUrl =
+    configOverride && typeof configOverride.webtriggerUrl === 'string'
+      ? configOverride.webtriggerUrl
+      : process.env.MEDTRACE_WEBTRIGGER_URL;
+  const allowInsecureLocalhost =
+    configOverride && typeof configOverride.allowInsecureLocalhost === 'boolean'
+      ? configOverride.allowInsecureLocalhost
+      : process.env.MEDTRACE_ALLOW_INSECURE_LOCALHOST === 'true';
+
+  const urlCheck = validateWebtriggerUrl(rawUrl, allowInsecureLocalhost);
+  if (!urlCheck.ok) {
+    return {
+      ok: false,
+      status: 0,
+      errorType: 'CONFIG_ERROR',
+      error: urlCheck.error,
+    };
+  }
+
+  const timeoutMs = resolveRequestTimeoutMs(
+    configOverride && configOverride.timeoutMs !== undefined
+      ? configOverride.timeoutMs
+      : process.env.MEDTRACE_REQUEST_TIMEOUT_MS
+  );
 
   try {
     const timestamp = Date.now().toString();
     const nonce = crypto.randomUUID();
     const payload = method === 'POST' ? JSON.stringify(payloadObj || {}) : '';
     const signature = crypto
-      .createHmac('sha256', MCP_SECRET)
+      .createHmac('sha256', rawSecret)
       .update(`${timestamp}.${nonce}.${payload}`)
       .digest('hex');
 
@@ -84,11 +263,11 @@ async function signedCloudRequest(method, payloadObj) {
       headers['Content-Type'] = 'application/json';
     }
 
-    const resp = await fetch(FORGE_WEBTRIGGER_URL, {
+    const resp = await fetch(urlCheck.url, {
       method,
       headers,
       ...(method === 'POST' ? { body: payload } : {}),
-      signal: AbortSignal.timeout(4000),
+      signal: AbortSignal.timeout(timeoutMs),
     });
 
     const rawText = await resp.text();
@@ -110,15 +289,24 @@ async function signedCloudRequest(method, payloadObj) {
 
     return { ok: true, status: resp.status, data: parsed };
   } catch (err) {
+    if (err?.name === 'TimeoutError' || err?.name === 'AbortError' || err?.code === 'ABORT_ERR') {
+      return {
+        ok: false,
+        status: 0,
+        errorType: 'TIMEOUT',
+        error: `Forge webtrigger request timed out after ${timeoutMs}ms (possible Forge cold start).`,
+      };
+    }
     return {
       ok: false,
       status: 0,
-      error: err?.message || 'Network/timeout error communicating with Forge webtrigger.',
+      errorType: 'NETWORK_ERROR',
+      error: err?.message || 'Network error communicating with Forge webtrigger.',
     };
   }
 }
 
-const TOOLS = [
+export const TOOLS = [
   {
     name: 'medtrace_get_hazard_lineage',
     description:
@@ -128,7 +316,8 @@ const TOOLS = [
       properties: {
         hazardKey: {
           type: 'string',
-          description: 'Optional hazard, Jira issue, spec, or test key (e.g. HAZ-101, MED-42, TEST-88). Omit to retrieve full project lineage.',
+          description:
+            'Optional hazard, Jira issue, spec, test, or signature key (e.g. HAZ-101, MED-42, TEST-88). Omit to retrieve full project lineage.',
         },
         issueKey: {
           type: 'string',
@@ -188,7 +377,51 @@ const TOOLS = [
   },
 ];
 
-function unavailableResult(id, cloudResp) {
+/**
+ * Classifies Forge webtrigger network, auth/replay, policy/validation, and upstream 5xx failures
+ * into truthful MCP tool error responses (`isError: true`).
+ */
+export function cloudErrorResult(id, cloudResp) {
+  const status = Number(cloudResp?.status ?? 0);
+  let payload;
+
+  if (status === 0) {
+    payload = {
+      source: 'UNAVAILABLE',
+      errorType: cloudResp?.errorType || 'NETWORK_ERROR',
+      httpStatus: 0,
+      error: cloudResp?.error || 'Unable to reach Forge webtrigger.',
+      hint: 'Verify MEDTRACE_WEBTRIGGER_URL connectivity and retry.',
+    };
+  } else if (status === 401 || status === 409) {
+    payload = {
+      source: 'ATLASSIAN_CLOUD_REJECTED',
+      errorType: status === 401 ? 'AUTH_FAILED' : 'REPLAY_DETECTED',
+      httpStatus: status,
+      error: cloudResp?.error || `HTTP ${status}`,
+      hint:
+        status === 401
+          ? 'Verify MEDTRACE_MCP_SECRET matches Forge environment and clock skew.'
+          : 'Duplicate nonce rejected; retry request.',
+    };
+  } else if (status >= 400 && status < 500) {
+    payload = {
+      source: 'POLICY_OR_VALIDATION_ERROR',
+      errorType: 'BACKEND_REJECTED',
+      httpStatus: status,
+      error: cloudResp?.error || `HTTP ${status}`,
+      details: cloudResp?.data,
+    };
+  } else {
+    payload = {
+      source: 'BACKEND_ERROR',
+      errorType: 'UPSTREAM_ERROR',
+      httpStatus: status,
+      error: cloudResp?.error || `HTTP ${status}`,
+      hint: 'Forge backend returned an internal error; inspect Forge logs.',
+    };
+  }
+
   return {
     jsonrpc: '2.0',
     id,
@@ -197,24 +430,63 @@ function unavailableResult(id, cloudResp) {
       content: [
         {
           type: 'text',
-          text: JSON.stringify(
-            {
-              source: 'UNAVAILABLE',
-              httpStatus: cloudResp.status,
-              error: cloudResp.error,
-              hint: 'Verify MEDTRACE_WEBTRIGGER_URL and MEDTRACE_MCP_SECRET, then retry.',
-            },
-            null,
-            2
-          ),
+          text: JSON.stringify(payload, null, 2),
         },
       ],
     },
   };
 }
 
-async function handleMessage(message) {
-  const { id, method, params } = message || {};
+function jsonRpcError(id, code, message) {
+  return {
+    jsonrpc: '2.0',
+    id,
+    error: { code, message },
+  };
+}
+
+/**
+ * Processes a parsed JSON-RPC 2.0 request or notification object.
+ */
+export async function handleMessage(message) {
+  if (Array.isArray(message)) {
+    return jsonRpcError(null, -32600, 'Invalid Request: batch requests are not supported.');
+  }
+
+  if (!isPlainObject(message)) {
+    return jsonRpcError(null, -32600, 'Invalid Request: message must be a JSON object.');
+  }
+
+  const hasId = Object.prototype.hasOwnProperty.call(message, 'id') && message.id !== undefined;
+  const rawId = message.id;
+  const isValidId =
+    !hasId ||
+    rawId === null ||
+    typeof rawId === 'string' ||
+    (typeof rawId === 'number' && Number.isFinite(rawId));
+
+  if (!isValidId) {
+    return jsonRpcError(null, -32600, 'Invalid Request: id must be a string, finite number, or null.');
+  }
+
+  const safeId = hasId ? rawId : null;
+
+  if (message.jsonrpc !== '2.0') {
+    return jsonRpcError(safeId, -32600, 'Invalid Request: jsonrpc must be "2.0".');
+  }
+
+  if (typeof message.method !== 'string' || message.method.trim() === '') {
+    return jsonRpcError(safeId, -32600, 'Invalid Request: method must be a non-empty string.');
+  }
+
+  // Notifications carry no `id` (or `id === undefined`) and must produce zero stdout output.
+  if (!hasId) {
+    return null;
+  }
+
+  const id = rawId;
+  const method = message.method.trim();
+  const params = message.params;
 
   if (method === 'initialize') {
     return {
@@ -233,8 +505,12 @@ async function handleMessage(message) {
     };
   }
 
-  if (method === 'notifications/initialized') {
-    return null;
+  if (method === 'ping') {
+    return {
+      jsonrpc: '2.0',
+      id,
+      result: {},
+    };
   }
 
   if (method === 'tools/list') {
@@ -248,28 +524,45 @@ async function handleMessage(message) {
   }
 
   if (method === 'tools/call') {
-    const { name, arguments: args = {} } = params || {};
+    if (!isPlainObject(params) || typeof params.name !== 'string' || params.name.trim() === '') {
+      return jsonRpcError(id, -32602, 'Invalid params: tool name is required.');
+    }
+
+    if (params.arguments !== undefined && !isPlainObject(params.arguments)) {
+      return jsonRpcError(id, -32602, 'Invalid params: arguments must be a JSON object.');
+    }
+
+    const name = params.name.trim();
+    const args = params.arguments ?? {};
 
     if (name === 'medtrace_get_hazard_lineage') {
       const cloudResp = await signedCloudRequest('GET');
-      if (!cloudResp.ok || !cloudResp.data?.traceLinks) {
-        return unavailableResult(id, cloudResp);
+      if (!cloudResp.ok) {
+        return cloudErrorResult(id, cloudResp);
+      }
+      if (!Array.isArray(cloudResp.data?.traceLinks)) {
+        return cloudErrorResult(id, {
+          ok: false,
+          status: 502,
+          error: 'Malformed compliance suite response from Forge webtrigger: missing traceLinks array.',
+          data: cloudResp.data,
+        });
       }
 
       const liveSuite = cloudResp.data;
-      const lookupKey = String(args?.hazardKey || args?.issueKey || '').trim();
+      const initialized = liveSuite.initialized ?? liveSuite.traceLinks.length > 0;
+      const source = formatSourceLabel(liveSuite.datasetMode);
+      const rawHazardKey = typeof args.hazardKey === 'string' ? args.hazardKey : '';
+      const rawIssueKey = typeof args.issueKey === 'string' ? args.issueKey : '';
+      const lookupKey = (rawHazardKey || rawIssueKey).trim();
 
       if (lookupKey) {
         const lower = lookupKey.toLowerCase();
-        const match = liveSuite.traceLinks.find(
-          (l) =>
-            l.hazard?.key?.toLowerCase() === lower ||
-            l.work?.key?.toLowerCase() === lower ||
-            l.test?.testKey?.toLowerCase() === lower ||
-            l.spec?.id?.toLowerCase() === lower ||
-            (l.spec?.pageId && String(l.spec.pageId).toLowerCase() === lower)
+        const matches = liveSuite.traceLinks.filter((l) =>
+          collectCanonicalLinkKeys(l).includes(lower)
         );
-        if (!match) {
+
+        if (matches.length === 0) {
           return {
             jsonrpc: '2.0',
             id,
@@ -279,10 +572,18 @@ async function handleMessage(message) {
                   type: 'text',
                   text: JSON.stringify(
                     {
-                      source: 'Atlassian Cloud (Forge Production KVS)',
+                      source,
+                      datasetMode: liveSuite.datasetMode,
+                      initialized,
                       found: false,
                       queriedKey: lookupKey,
-                      message: `No trace link found for key "${lookupKey}".`,
+                      message: `No trace link found for key "${lookupKey}" in project "${liveSuite.projectName || 'MedTrace'}".`,
+                      availableKeys: liveSuite.traceLinks.map((l) => ({
+                        hazardKey: l.hazard?.key,
+                        workKey: l.work?.key,
+                        specId: l.spec?.id,
+                        testKey: l.test?.testKey,
+                      })),
                     },
                     null,
                     2
@@ -293,6 +594,7 @@ async function handleMessage(message) {
           };
         }
 
+        const match = matches[0];
         return {
           jsonrpc: '2.0',
           id,
@@ -302,8 +604,17 @@ async function handleMessage(message) {
                 type: 'text',
                 text: JSON.stringify(
                   {
-                    source: 'Atlassian Cloud (Forge Production KVS)',
+                    source,
+                    datasetMode: liveSuite.datasetMode,
+                    initialized,
                     found: true,
+                    traceLink: match,
+                    ...(matches.length > 1 ? { matchedLinks: matches } : {}),
+                    regulatoryStatus: match.complianceState,
+                    riskClass: match.hazard?.riskClass,
+                    safetyRequirement: match.spec?.title,
+                    testStatus: match.test?.status,
+                    part11Valid: match.signature?.isValid,
                     hazard: match.hazard,
                     spec: match.spec,
                     work: match.work,
@@ -330,11 +641,12 @@ async function handleMessage(message) {
               type: 'text',
               text: JSON.stringify(
                 {
-                  source: 'Atlassian Cloud (Forge Production KVS)',
+                  source,
                   projectName: liveSuite.projectName,
                   datasetMode: liveSuite.datasetMode,
+                  initialized,
                   totalHazards: liveSuite.totalHazards,
-                  verifiedPercentage: `${liveSuite.verifiedPercentage}%`,
+                  verifiedPercentage: `${liveSuite.verifiedPercentage ?? 0}%`,
                   releaseBlocked: liveSuite.releaseBlocked,
                   traceLinks: liveSuite.traceLinks,
                 },
@@ -350,13 +662,13 @@ async function handleMessage(message) {
     if (name === 'medtrace_verify_iec_compliance') {
       const cloudResp = await signedCloudRequest('POST', {
         action: 'verify',
-        prDiff: args?.prDiff,
-        componentName: args?.componentName,
-        issueKey: args?.issueKey,
+        prDiff: typeof args.prDiff === 'string' ? args.prDiff : undefined,
+        componentName: typeof args.componentName === 'string' ? args.componentName : undefined,
+        issueKey: typeof args.issueKey === 'string' ? args.issueKey : undefined,
       });
 
       if (!cloudResp.ok) {
-        return unavailableResult(id, cloudResp);
+        return cloudErrorResult(id, cloudResp);
       }
 
       return {
@@ -369,29 +681,49 @@ async function handleMessage(message) {
     }
 
     if (name === 'medtrace_remediate_safety_gap') {
-      const hazardKey = typeof args?.hazardKey === 'string' ? args.hazardKey.trim() : '';
+      const hazardKey = typeof args.hazardKey === 'string' ? args.hazardKey.trim() : '';
       if (!hazardKey) {
-        return {
-          jsonrpc: '2.0',
+        return jsonRpcError(id, -32602, 'Invalid params: hazardKey is required.');
+      }
+      if (args.simulate !== true) {
+        return jsonRpcError(
           id,
-          error: {
-            code: -32602,
-            message: 'Invalid params: hazardKey is required.',
-          },
-        };
+          -32602,
+          'Invalid params: simulate must be boolean true to confirm demo simulation mode.'
+        );
+      }
+      if (args.attestationConfirmed !== true) {
+        return jsonRpcError(
+          id,
+          -32602,
+          'Invalid params: attestationConfirmed must be boolean true.'
+        );
+      }
+      if (args.meaning !== undefined && typeof args.meaning !== 'string') {
+        return jsonRpcError(
+          id,
+          -32602,
+          'Invalid params: meaning must be a string when provided.'
+        );
       }
 
       const cloudResp = await signedCloudRequest('POST', {
         action: 'remediate',
         hazardKey,
-        simulate: Boolean(args?.simulate),
-        attestationConfirmed: Boolean(args?.attestationConfirmed),
-        meaning: typeof args?.meaning === 'string' ? args.meaning : undefined,
+        simulate: true,
+        attestationConfirmed: true,
+        meaning:
+          typeof args.meaning === 'string' && args.meaning.trim() !== ''
+            ? args.meaning.trim()
+            : undefined,
       });
 
       if (!cloudResp.ok) {
-        return unavailableResult(id, cloudResp);
+        return cloudErrorResult(id, cloudResp);
       }
+
+      const summary = cloudResp.data?.summary;
+      const datasetMode = summary?.datasetMode ?? 'DEMO';
 
       return {
         jsonrpc: '2.0',
@@ -402,10 +734,11 @@ async function handleMessage(message) {
               type: 'text',
               text: JSON.stringify(
                 {
-                  source: 'Atlassian Cloud (Forge Production KVS)',
+                  source: formatSourceLabel(datasetMode),
+                  datasetMode,
                   remediated: true,
                   hazardKey,
-                  summary: cloudResp.data?.summary,
+                  summary,
                 },
                 null,
                 2
@@ -416,51 +749,132 @@ async function handleMessage(message) {
       };
     }
 
-    return {
-      jsonrpc: '2.0',
-      id,
-      error: {
-        code: -32601,
-        message: `Unknown tool: ${name}`,
-      },
-    };
+    return jsonRpcError(id, -32601, `Unknown tool: ${name}`);
   }
 
-  if (id === undefined) return null;
-  return {
-    jsonrpc: '2.0',
-    id,
-    error: {
-      code: -32601,
-      message: `Unsupported method: ${method}`,
-    },
-  };
+  return jsonRpcError(id, -32601, `Unsupported method: ${method}`);
 }
 
-rl.on('line', async (line) => {
-  if (!line.trim()) return;
-  let messageId = null;
-  try {
-    const message = JSON.parse(line);
-    messageId = message?.id ?? null;
-    const response = await handleMessage(message);
-    if (response) {
-      process.stdout.write(JSON.stringify(response) + '\n');
-    }
-  } catch (err) {
-    console.error('Error handling MCP JSON-RPC message:', err);
-    if (messageId != null) {
-      const isParseError = err instanceof SyntaxError;
-      process.stdout.write(
-        JSON.stringify({
-          jsonrpc: '2.0',
-          id: messageId,
-          error: {
-            code: isParseError ? -32700 : -32603,
-            message: isParseError ? 'Parse error' : `Internal error: ${err?.message || 'unexpected failure'}`,
-          },
-        }) + '\n'
-      );
-    }
+/**
+ * Creates a serialized FIFO NDJSON line processor so concurrent stdin lines never flush out of order
+ * and parse errors emit JSON-RPC `-32700` with `id: null` before inspecting message fields.
+ */
+export function createLineProcessor(options = {}) {
+  const write = options.write || ((text) => process.stdout.write(text));
+  const onError = options.onError || ((...args) => console.error(...args));
+  const handler = options.handler || handleMessage;
+  let lineQueue = Promise.resolve();
+
+  function processLine(line) {
+    lineQueue = lineQueue
+      .then(async () => {
+        if (typeof line !== 'string' || !line.trim()) return;
+
+        let message;
+        try {
+          message = JSON.parse(line);
+        } catch {
+          write(JSON.stringify(jsonRpcError(null, -32700, 'Parse error')) + '\n');
+          return;
+        }
+
+        try {
+          const response = await handler(message);
+          if (response !== null && response !== undefined) {
+            write(JSON.stringify(response) + '\n');
+          }
+        } catch (err) {
+          onError('Error handling MCP JSON-RPC message:', err);
+          if (
+            isPlainObject(message) &&
+            (!Object.prototype.hasOwnProperty.call(message, 'id') || message.id === undefined)
+          ) {
+            return;
+          }
+          const safeId =
+            isPlainObject(message) &&
+            (message.id === null ||
+              typeof message.id === 'string' ||
+              (typeof message.id === 'number' && Number.isFinite(message.id)))
+              ? message.id
+              : null;
+          write(
+            JSON.stringify(
+              jsonRpcError(safeId, -32603, `Internal error: ${err?.message || 'unexpected failure'}`)
+            ) + '\n'
+          );
+        }
+      })
+      .catch((err) => {
+        try {
+          onError('Unexpected MCP line queue error:', err);
+        } catch {}
+      });
+
+    return lineQueue;
   }
-});
+
+  processLine.waitForIdle = () => lineQueue;
+  return processLine;
+}
+
+const isMainModule =
+  process.env.MEDTRACE_MCP_NO_AUTOSTART !== '1' &&
+  process.env.MEDTRACE_MCP_NO_AUTOSTART !== 'true' &&
+  typeof process.argv[1] === 'string' &&
+  process.argv[1].length > 0 &&
+  (() => {
+    try {
+      const moduleRealUrl = (() => {
+        try {
+          return pathToFileURL(fs.realpathSync(fileURLToPath(import.meta.url))).href;
+        } catch {
+          return import.meta.url;
+        }
+      })();
+      const resolvedArgv = pathToFileURL(path.resolve(process.argv[1])).href;
+      const realArgv = fs.existsSync(process.argv[1])
+        ? pathToFileURL(fs.realpathSync(process.argv[1])).href
+        : resolvedArgv;
+      return (
+        import.meta.url === resolvedArgv ||
+        import.meta.url === realArgv ||
+        moduleRealUrl === realArgv
+      );
+    } catch {
+      return false;
+    }
+  })();
+
+if (isMainModule) {
+  loadLocalEnv();
+
+  const mcpSecret = process.env.MEDTRACE_MCP_SECRET;
+  if (typeof mcpSecret !== 'string' || mcpSecret.trim() === '') {
+    console.error('[MedTrace MCP Server] Fatal Security Error: MEDTRACE_MCP_SECRET is not configured.');
+    console.error('[MedTrace MCP Server] Fail-closed: Refusing to start with missing shared secret.');
+    console.error('[MedTrace MCP Server] Configure MEDTRACE_MCP_SECRET in your environment or .env before starting.');
+    process.exit(1);
+  }
+
+  const urlValidation = validateWebtriggerUrl(
+    process.env.MEDTRACE_WEBTRIGGER_URL,
+    process.env.MEDTRACE_ALLOW_INSECURE_LOCALHOST === 'true'
+  );
+  if (!urlValidation.ok) {
+    console.error(`[MedTrace MCP Server] Fatal Configuration Error: ${urlValidation.error}`);
+    console.error('[MedTrace MCP Server] Fail-closed: Export a valid https:// MEDTRACE_WEBTRIGGER_URL before starting.');
+    process.exit(1);
+  }
+
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+    terminal: false,
+  });
+
+  const processLine = createLineProcessor();
+  rl.on('line', (line) => {
+    void processLine(line);
+  });
+}

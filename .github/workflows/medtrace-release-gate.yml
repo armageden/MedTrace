@@ -1,15 +1,21 @@
 # MedTrace Regulatory Release Gate — reference CI workflow (ECO-624 defense-in-depth).
 #
 # Workflow validators attached in Jira can be bypassed by Jira Automation rules and direct
-# REST API calls (platform issue ECO-624). This job enforces the identical IEC 62304 safety
-# gate at the CI boundary via the authenticated MedTrace webtrigger.
+# REST API calls (platform issue ECO-624). This workflow enforces the identical IEC 62304
+# safety gate at the CI/release boundary via the authenticated MedTrace webtrigger.
 #
 # Required repository secrets:
-#   MEDTRACE_MCP_SECRET      — the shared HMAC/perimeter secret configured in Forge
-#   MEDTRACE_WEBTRIGGER_URL  — the deployed Forge webtrigger URL
+#   MEDTRACE_MCP_SECRET      — shared HMAC/perimeter secret configured in Forge
+#   MEDTRACE_WEBTRIGGER_URL  — deployed HTTPS Forge webtrigger URL
 #
-# Gate semantics: HTTP 200 = compliant (gate open); HTTP 403 = blocked by the safety gate;
-# any other status = authentication/infrastructure failure. All three non-200 outcomes fail the job.
+# Optional triggers you can add for PR or protected deployment gating:
+#   pull_request:
+#     branches: [main]
+#   and/or set `environment: production` on the `regulatory-release-gate` job.
+#
+# Gate semantics: HTTP 200 with `result: true` = compliant (gate open);
+# HTTP 403 = blocked by safety gate (including DEMO or uninitialized suites when
+# `requireLiveMode: true`); any other status or invalid JSON = failure.
 
 name: MedTrace Release Gate
 
@@ -19,48 +25,154 @@ on:
       issueKey:
         description: 'Optional Jira issue key to gate (e.g. MED-42). Omit to enforce the global release gate.'
         required: false
+        type: string
         default: ''
+      requireLiveMode:
+        description: 'Require an initialized LIVE compliance suite (true for production releases; false only for non-prod DEMO checks).'
+        required: false
+        type: boolean
+        default: true
+  workflow_call:
+    inputs:
+      issueKey:
+        description: 'Optional Jira issue key to gate (e.g. MED-42). Omit to enforce the global release gate.'
+        required: false
+        type: string
+        default: ''
+      requireLiveMode:
+        description: 'Require an initialized LIVE compliance suite (true for production release gates).'
+        required: false
+        type: boolean
+        default: true
+    secrets:
+      MEDTRACE_MCP_SECRET:
+        required: false
+      MEDTRACE_WEBTRIGGER_URL:
+        required: false
+  release:
+    types: [published]
+
+permissions:
+  contents: read
 
 jobs:
   regulatory-release-gate:
+    name: MedTrace IEC 62304 Safety Gate
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - name: MedTrace IEC 62304 Safety Gate
         env:
           MEDTRACE_SECRET: ${{ secrets.MEDTRACE_MCP_SECRET }}
           WEBTRIGGER_URL: ${{ secrets.MEDTRACE_WEBTRIGGER_URL }}
           ISSUE_KEY: ${{ inputs.issueKey }}
+          REQUIRE_LIVE_MODE: ${{ github.event_name == 'release' && 'true' || inputs.requireLiveMode }}
         run: |
           set -euo pipefail
+          GATE_TMP="$(mktemp /tmp/medtrace-gate.XXXXXX.json)"
+          trap 'rm -f "$GATE_TMP"' EXIT
+
           if [ -z "${MEDTRACE_SECRET:-}" ] || [ -z "${WEBTRIGGER_URL:-}" ]; then
             echo "❌ Fail-closed: MEDTRACE_MCP_SECRET and MEDTRACE_WEBTRIGGER_URL secrets must be configured."
             exit 1
           fi
-          TIMESTAMP=$(date +%s%3N)
-          NONCE=$(uuidgen)
-          if [ -n "$ISSUE_KEY" ] && ! echo "$ISSUE_KEY" | grep -Eq '^[A-Za-z][A-Za-z0-9_]*-[0-9]+$'; then
-            echo "❌ Invalid issueKey format: '$ISSUE_KEY' (expected e.g. MED-42)"
+
+          node - <<'NODE'
+          let parsed;
+          try {
+            parsed = new URL((process.env.WEBTRIGGER_URL || '').trim());
+          } catch (err) {
+            console.error('❌ Invalid MEDTRACE_WEBTRIGGER_URL:', err instanceof Error ? err.message : String(err));
+            process.exit(1);
+          }
+          if (parsed.protocol !== 'https:') {
+            console.error(`❌ Fail-closed: MEDTRACE_WEBTRIGGER_URL must use https:// (got ${parsed.protocol}).`);
+            process.exit(1);
+          }
+          if (parsed.username || parsed.password) {
+            console.error('❌ Fail-closed: MEDTRACE_WEBTRIGGER_URL must not contain embedded credentials.');
+            process.exit(1);
+          }
+          NODE
+
+          CLEAN_ISSUE_KEY="$(node -e 'process.stdout.write((process.env.ISSUE_KEY || "").trim())')"
+          if [ -n "$CLEAN_ISSUE_KEY" ] && ! printf '%s' "$CLEAN_ISSUE_KEY" | grep -Eq '^[A-Za-z][A-Za-z0-9_]{0,20}-[0-9]+$'; then
+            echo "❌ Invalid issueKey format: '$CLEAN_ISSUE_KEY' (expected e.g. MED-42)."
             exit 1
           fi
-          if [ -n "$ISSUE_KEY" ]; then
-            BODY=$(printf '{"action":"verify-release-gate","issueKey":"%s"}' "$ISSUE_KEY")
-          else
-            BODY='{"action":"verify-release-gate"}'
-          fi
-          SIG=$(printf '%s.%s.%s' "$TIMESTAMP" "$NONCE" "$BODY" | openssl dgst -sha256 -hmac "$MEDTRACE_SECRET" -hex | awk '{print $2}')
-          HTTP_CODE=$(curl -s -o /tmp/gate.json -w "%{http_code}" -X POST "$WEBTRIGGER_URL" \
+
+          SIGNED_OUT="$(
+            CLEAN_ISSUE_KEY="$CLEAN_ISSUE_KEY" node - <<'NODE'
+          const crypto = require('node:crypto');
+          const secret = process.env.MEDTRACE_SECRET;
+          const issueKey = (process.env.CLEAN_ISSUE_KEY || '').trim();
+          const requireLiveMode = process.env.REQUIRE_LIVE_MODE !== 'false';
+
+          const payloadObj = {
+            action: 'verify-release-gate',
+            requireLiveMode,
+          };
+          if (issueKey) {
+            payloadObj.issueKey = issueKey.toUpperCase();
+          }
+
+          const body = JSON.stringify(payloadObj);
+          const timestamp = String(Date.now());
+          const nonce = crypto.randomUUID();
+          const sig =
+            'sha256=' +
+            crypto
+              .createHmac('sha256', secret)
+              .update(`${timestamp}.${nonce}.${body}`)
+              .digest('hex');
+
+          process.stdout.write(`${timestamp}\n${nonce}\n${sig}\n${body}\n`);
+          NODE
+          )"
+
+          {
+            IFS= read -r TIMESTAMP
+            IFS= read -r NONCE
+            IFS= read -r SIG
+            IFS= read -r BODY
+          } <<< "$SIGNED_OUT"
+
+          # Single bounded request (no --retry so a transient transport issue cannot trigger a 409 nonce replay).
+          if ! HTTP_CODE="$(curl -sS --connect-timeout 10 --max-time 20 -o "$GATE_TMP" -w "%{http_code}" \
+            -X POST "$WEBTRIGGER_URL" \
             -H "x-medtrace-timestamp: $TIMESTAMP" \
             -H "x-medtrace-nonce: $NONCE" \
-            -H "x-medtrace-signature: sha256=$SIG" \
-            -H "Content-Type: application/json" -d "$BODY")
+            -H "x-medtrace-signature: $SIG" \
+            -H "Content-Type: application/json" \
+            -d "$BODY")"; then
+            echo "❌ MedTrace Safety Gate: curl request failed."
+            exit 1
+          fi
+
           echo "Gate HTTP status: $HTTP_CODE"
-          cat /tmp/gate.json
+          cat "$GATE_TMP"
+          echo ""
+
           if [ "$HTTP_CODE" -ne 200 ]; then
             echo "❌ MedTrace Safety Gate: release blocked or verification failed (HTTP $HTTP_CODE)."
             exit 1
           fi
-          if ! node -e "const fs=require('node:fs'); const d=JSON.parse(fs.readFileSync('/tmp/gate.json','utf8')); if (d.result !== true) process.exit(1);" 2>/dev/null; then
-            echo "❌ MedTrace Safety Gate: response did not confirm result:true."
-            exit 1
-          fi
+
+          node - "$GATE_TMP" <<'NODE'
+          const fs = require('node:fs');
+          const raw = fs.readFileSync(process.argv[2], 'utf8');
+          let data;
+          try {
+            data = JSON.parse(raw);
+          } catch (err) {
+            console.error('❌ MedTrace Safety Gate: invalid JSON response:', err instanceof Error ? err.message : String(err));
+            console.error('Raw body:', raw);
+            process.exit(1);
+          }
+          if (!data || data.result !== true || data.releaseBlocked === true) {
+            console.error(`❌ MedTrace Safety Gate: response did not confirm result:true (releaseBlocked=${String(data?.releaseBlocked)}).`);
+            process.exit(1);
+          }
+          NODE
+
           echo "✅ MedTrace Safety Gate open: IEC 62304 verification satisfied."
