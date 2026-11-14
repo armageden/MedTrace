@@ -9,11 +9,12 @@ Single source of truth for any AI agent working in this repository. Read this fi
 - **Environment setup:** `npm install && cd static/frontend && npm install && cd ../..`
 - **Run / dev:** `forge tunnel`
 - **Verify:**
-  - build: `npm run build && cd static/frontend && npm run build && cd ../..`
-  - test: `npm test`
-  - lint: `forge lint` (requires `forge login` or `FORGE_EMAIL` / `FORGE_API_TOKEN`; without credentials it fails with "Not logged in", so run the offline `npm run lint:manifest` and report `forge lint` as not run)
-  - typecheck: `npx tsc --noEmit && cd static/frontend && npx tsc --noEmit && cd ../..`
+  - build: `npm run build:all`
+  - test: `npm run test:all`
+  - lint: `forge lint` — requires credentials. If `forge whoami` reports "Not logged in", source the local credential file first (`set -a && . ~/.forge-env && set +a`) and re-run; never report lint as passed or failed before checking whether that file exists. The CLI is slow, so allow a generous timeout.
+  - typecheck: `npm run typecheck`
   - docs: `npm run docs:check`
+  - manifest (offline): `npm run lint:manifest`
 
 ## Knowledge Base
 
@@ -21,6 +22,7 @@ Executing a common task? Start at [docs/00-how-to/](docs/00-how-to/00-overview.m
 
 | Folder | Covers | Read when |
 |---|---|---|
+| [docs/00-how-to/](docs/00-how-to/00-overview.md) | Task recipes, deploy runbook, docs-sync checklist | executing a recurring modification or release task |
 | [docs/01-architecture/](docs/01-architecture/00-overview.md) | Forge manifest modules, endpoints, and permissions | modifying extension points or UI layout |
 | [docs/02-compliance-engine/](docs/02-compliance-engine/00-overview.md) | IEC 62304, ISO 14971, and 21 CFR Part 11 rules | updating safety rules or audit state |
 | [docs/03-mcp-integration/](docs/03-mcp-integration/00-overview.md) | Model Context Protocol stdio server and webtrigger sync | modifying MCP tools or IDE integration |

@@ -600,6 +600,37 @@ test('docs-check: fails on missing 00-overview.md, unlinked sibling doc, and mis
   }
 });
 
+test('docs-check: flags stray Markdown under docs/ (layout) and unlinked subject folders in AGENTS.md (router)', () => {
+  const fixture = createTempTree(
+    'medtrace-docs-layout-router-',
+    makeValidDocsFixtureFiles({
+      'docs/STRAY.md': '# Stray top-level doc outside any NN-* folder\n',
+      'AGENTS.md': [
+        '# Agent Router',
+        '',
+        'Start at [Overview](docs/00-guide/00-overview.md).',
+        '',
+      ].join('\n'),
+      'docs/02-unrouted/00-overview.md': '**Back:** [README](../../README.md)\n\n# Unrouted Subject\n',
+    }),
+  );
+
+  try {
+    const res = runDocsCheck({ root: fixture.dir });
+    assert.equal(res.exitCode, 1);
+    assert.ok(
+      res.errors.some((e) => e.includes('docs/STRAY.md: layout: stray Markdown outside a NN-* folder')),
+      `expected layout error, got: ${JSON.stringify(res.errors)}`,
+    );
+    assert.ok(
+      res.errors.some((e) => e.includes('AGENTS.md: router: AGENTS.md does not link subject folder -> docs/02-unrouted/00-overview.md')),
+      `expected router error, got: ${JSON.stringify(res.errors)}`,
+    );
+  } finally {
+    fixture.cleanup();
+  }
+});
+
 test('docs-check: reverse-coverage flags undocumented tracked entry files across entryGlobs', () => {
   assert.ok(CONFIG.entryGlobs.includes('tests/*.test.*'));
   assert.ok(CONFIG.entryGlobs.includes('scripts/*.sh'));

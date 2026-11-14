@@ -383,6 +383,35 @@ function checkBacklink(file, ctx) {
   if (!BACKLINK_RE.test(head)) ctx.fail("backlink", file, "missing top backlink to 00-overview.md");
 }
 
+// ------------------------------------------------------- rule 6: router integrity
+function checkRouterIntegrity(folders, routerText, routerPath, ctx) {
+  if (routerText === null) return;
+  for (const folder of folders) {
+    const name = path.basename(folder);
+    const relOverview = `${CONFIG.docsRoot}/${name}/${CONFIG.overview}`;
+    if (routerText.includes(`${CONFIG.docsRoot}/${name}/`) || routerText.includes(relOverview)) continue;
+    ctx.fail("router", routerPath, `AGENTS.md does not link subject folder -> ${relOverview}`);
+  }
+}
+
+// ------------------------------------------------------- rule 7: layout integrity
+function checkLayoutIntegrity(docsDir, ctx) {
+  let entries;
+  try {
+    entries = fs.readdirSync(docsDir, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const e of entries) {
+    if (!e.isFile() || !e.name.endsWith(".md")) continue;
+    ctx.fail(
+      "layout",
+      path.join(docsDir, e.name),
+      `stray Markdown outside a NN-* folder -> ${e.name}`,
+    );
+  }
+}
+
 // ---------------------------------------------------- rule 5: reverse coverage
 function checkReverseCoverage(allText, ctx) {
   const seen = new Set();
@@ -514,6 +543,9 @@ export function runDocsCheck(options = {}) {
     }
   }
 
+  checkLayoutIntegrity(docsDir, ctx);
+  checkRouterIntegrity(folders, texts.has(router) ? texts.get(router) : null, router, ctx);
+
   checkReverseCoverage([...texts.values()].join("\n"), ctx);
 
   const strictListingFindings = strictListing ? checkStrictListing(ctx) : [];
@@ -538,12 +570,18 @@ export function parseCliArgs(argv = process.argv.slice(2), env = process.env) {
   let root = env.DOCS_CHECK_ROOT || process.cwd();
   let strictListing = env.DOCS_CHECK_STRICT_LISTING === "1" || env.DOCS_CHECK_STRICT_LISTING === "true";
   let help = false;
+  let json = env.DOCS_CHECK_JSON === "1" || env.DOCS_CHECK_JSON === "true";
+  let warnOnly = env.DOCS_CHECK_WARN_ONLY === "1" || env.DOCS_CHECK_WARN_ONLY === "true";
   let positionalRootSet = false;
 
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     if (arg === "--strict-listing") {
       strictListing = true;
+    } else if (arg === "--json") {
+      json = true;
+    } else if (arg === "--warn-only") {
+      warnOnly = true;
     } else if (arg === "--help" || arg === "-h") {
       help = true;
     } else if (arg === "--root") {
@@ -567,7 +605,7 @@ export function parseCliArgs(argv = process.argv.slice(2), env = process.env) {
     }
   }
 
-  return { root: path.resolve(root), strictListing, help };
+  return { root: path.resolve(root), strictListing, json, warnOnly, help };
 }
 
 /**
@@ -584,8 +622,9 @@ export function main(argv = process.argv.slice(2), env = process.env) {
 
   if (parsed.help) {
     console.log(
-      "Usage: node scripts/docs-check.mjs [root] [--root <dir>] [--strict-listing] [--help]\n" +
-      "Env:   DOCS_CHECK_ROOT=<dir>  DOCS_CHECK_STRICT_LISTING=1",
+      "Usage: node scripts/docs-check.mjs [root] [--root <dir>] [--strict-listing] [--json] [--warn-only] [--help]\n" +
+      "Env:   DOCS_CHECK_ROOT=<dir>  DOCS_CHECK_STRICT_LISTING=1\n" +
+      "       DOCS_CHECK_JSON=1      DOCS_CHECK_WARN_ONLY=1",
     );
     return 0;
   }
@@ -596,6 +635,11 @@ export function main(argv = process.argv.slice(2), env = process.env) {
     return 1;
   }
 
+  if (parsed.json) {
+    console.log(JSON.stringify(result, null, 2));
+    return parsed.warnOnly ? 0 : result.exitCode;
+  }
+
   for (const w of result.warnings) console.error(`warning: ${w}`);
   for (const e of result.errors) console.error(`error: ${e}`);
   console.log(
@@ -603,7 +647,7 @@ export function main(argv = process.argv.slice(2), env = process.env) {
     `(${result.docFiles.length} in docs/, ${result.extraDocFiles.length} top-level/marketplace), ` +
     `${result.folders.length} subjects, ${result.errors.length} errors, ${result.warnings.length} warnings`,
   );
-  return result.exitCode;
+  return parsed.warnOnly ? 0 : result.exitCode;
 }
 
 function isEntrypoint() {
