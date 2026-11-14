@@ -5,17 +5,14 @@ static/frontend/node_modules/
 static/frontend/dist/
 *.log
 .DS_Store
+
+# Secrets and local environment files (keep .env.example tracked)
 .env
-.env.local
+.env.*
+!.env.example
 .forge-env
 *.forge-env
-.mimosa/
-.commandcode/
-.remember/
-*.mp4
-scripts/video_generator/
-!.env.example
+
+# Local tool state
 .commandcode/
 .mimosa/
-.v2c/
-.video_agent/

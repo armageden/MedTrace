@@ -1,25 +1,6 @@
 export * from '../../../src/types';
 
-import type { ComplianceSummary } from '../../../src/types';
-
-export interface ConfluenceRemoteLinkRef {
-  pageId?: string;
-  title: string;
-  url: string;
-  relationship?: string;
-}
-
-export interface IssueGraphContextResult {
-  source: 'AGG' | 'JIRA_REST';
-  issueKey: string;
-  issueId?: string;
-  issueAri?: string;
-  summary?: string;
-  status?: { name?: string; category?: string };
-  issuelinks: unknown[];
-  confluenceLinks: ConfluenceRemoteLinkRef[];
-  aggRaw?: unknown;
-}
+import type { TransitionResult } from '../../../src/types';
 
 export interface ForgePanelContext {
   extensionType: string;
@@ -28,25 +9,15 @@ export interface ForgePanelContext {
   issueKey?: string;
   projectKey?: string;
   contentId?: string;
-  spaceKey?: string;
 }
 
-export interface SeedDemoResponse {
-  success: boolean;
-  confluenceEnabled: boolean;
-  summary: ComplianceSummary;
+export interface UiNotice {
+  kind: 'error' | 'warning' | 'info' | 'success';
+  source?: 'load' | 'mutation' | 'sync' | 'info' | (string & {});
   message: string;
+  retryable?: boolean;
 }
 
-export interface BindIssueResponse {
-  success: boolean;
-  summary?: ComplianceSummary;
-  error?: string;
-}
-
-export interface TransitionResult {
-  result: boolean;
-  errorMessage?: string;
+export interface ClientTransitionResult extends TransitionResult {
   evalError?: string;
-  evaluatedIssueKey?: string;
 }

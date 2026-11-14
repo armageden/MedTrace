@@ -1,3 +1,5 @@
+export const PART11_ATTESTATION_PHRASE = 'I CERTIFY THIS ELECTRONIC SIGNATURE' as const;
+
 export type RiskClass = 'CLASS_A' | 'CLASS_B' | 'CLASS_C';
 
 export interface IsoHazard {
@@ -19,6 +21,7 @@ export interface ConfluenceSpec {
   sha256Hash: string;
   lastSignedHash: string;
   isSignatureInvalidated: boolean;
+  isMissingSentinel?: boolean;
   contentSnippet: string;
   lastUpdated: string;
 }
@@ -48,13 +51,21 @@ export interface VerificationTest {
 export interface Part11Signature {
   id: string;
   signedBy: string;
+  signedByAccountId?: string;
   signedAt: string;
+  invalidatedAt?: string;
   role: string;
   meaning: string;
   artifactSha256: string;
   isValid: boolean;
   invalidationReason?: string;
   authMethod?: string;
+  signatureAlgorithm?: 'HMAC-SHA256-SEAL-V1' | 'ECDSA-P256-SHA256+HMAC-SEAL-V1';
+  signatureSeal?: string;
+  sealKeyId?: string;
+  clientPublicKeySpki?: string;
+  clientSignatureBase64?: string;
+  clientKeyFingerprint?: string;
 }
 
 export interface GraphMetadata {
@@ -80,6 +91,7 @@ export interface TraceLink {
 export interface ComplianceSummary {
   projectName: string;
   datasetMode: 'DEMO' | 'LIVE';
+  initialized?: boolean;
   standards: string[]; // ["IEC 62304:2006+A1:2015", "ISO 14971:2019", "FDA 21 CFR Part 11"]
   totalHazards: number;
   classCCount: number;
@@ -98,13 +110,6 @@ export interface ComplianceSummary {
 
 export type GraphNodeType = 'HAZARD' | 'SPEC' | 'WORK' | 'TEST' | 'SIGNATURE';
 export type GraphEdgeType = 'MITIGATES' | 'IMPLEMENTS' | 'VERIFIES' | 'SIGNS';
-
-export interface GraphNodeRef {
-  id: string;
-  type: GraphNodeType;
-  key: string;
-  title: string;
-}
 
 export interface BlastRadiusReport {
   triggerArtifact: {
@@ -137,16 +142,13 @@ export type AuditActionType =
   | 'RECORD_TEST_RESULT'
   | 'PART11_SIGNOFF'
   | 'DEMO_SIMULATION'
-  | 'CONFLUENCE_PAGE_DRIFT'
-  | 'WORKFLOW_GATE_BLOCKED'
-  | 'WORKFLOW_GATE_APPROVED';
+  | 'CONFLUENCE_PAGE_DRIFT';
 
 export type AuditAuthMethod =
   | 'FORGE_USER_SESSION'
   | 'PART11_ATTESTATION'
   | 'HMAC_WEBTRIGGER'
   | 'CONFLUENCE_EVENT_TRIGGER'
-  | 'ROVO_AGENT'
   | 'SYSTEM_INIT';
 
 export interface AuditLogEntry {
@@ -161,14 +163,36 @@ export interface AuditLogEntry {
   authMethod: AuditAuthMethod | string;
 }
 
+export interface VerifyAuditChainOptions {
+  fromSeq?: number;
+  maxEntries?: number;
+  expectedPrevHash?: string;
+}
+
 export interface AuditChainVerification {
   valid: boolean;
   totalEntries: number;
   headHash: string;
   brokenAtSeq?: number;
   reason?: string;
+  verifiedFromSeq?: number;
+  verifiedToSeq?: number;
+  nextFromSeq?: number;
+  truncated?: boolean;
+  windowEntryCount?: number;
 }
 
+export type AuditChainVerificationResult = AuditChainVerification;
+
+export interface AuthorizedUserIdentity {
+  accountId: string;
+  displayName: string;
+  role: string;
+  emailAddress?: string;
+  authSource?: 'JIRA_MYSELF' | 'CONFLUENCE_CURRENT_USER' | 'LOCAL_TEST' | 'FALLBACK';
+}
+
+// Temporary backward-compatible attestation fields until Phase 1B/2 removes client spoofing.
 export interface Part11Attestation {
   meaning: string;
   attestationConfirmed: boolean;
@@ -177,6 +201,48 @@ export interface Part11Attestation {
   signedBy?: string;
   signedAt?: string;
   role?: string;
+  clientPublicKeySpki?: string;
+  clientSignatureBase64?: string;
+}
+
+export interface ConfluenceRemoteLinkRef {
+  pageId?: string;
+  title: string;
+  url: string;
+  relationship?: string;
+}
+
+export interface AggIssueLinkRef {
+  id: string;
+  type?: {
+    name?: string;
+    inward?: string;
+    outward?: string;
+  };
+}
+
+export interface IssueGraphContextResult {
+  source: 'JIRA_AGG_AND_REST' | 'JIRA_REST';
+  confluenceSource?: 'JIRA_REMOTELINK_REST';
+  issueKey: string;
+  issueId?: string;
+  issueAri?: string;
+  summary?: string;
+  status?: { name?: string; category?: string };
+  issuelinks: unknown[];
+  aggIssueLinks?: AggIssueLinkRef[];
+  confluenceLinks: ConfluenceRemoteLinkRef[];
+  aggRaw?: unknown;
+}
+
+export interface LiveSyncOptions {
+  projectKey?: string;
+  spaceId?: string;
+  jql?: string;
+  includeUntaggedIssues?: boolean;
+  callerMode?: 'USER' | 'APP';
+  resumeFromCursor?: boolean;
+  pageToken?: string;
 }
 
 export interface LiveSyncResult {
@@ -186,6 +252,111 @@ export interface LiveSyncResult {
   confluencePagesScanned: number;
   linkedPairsFound: number;
   driftDetectedCount: number;
+  truncated?: boolean;
+  nextPageToken?: string;
+  resumedFromCursor?: boolean;
+  skippedUntaggedCount?: number;
   warnings: string[];
   summary: ComplianceSummary;
+}
+
+export interface SeedDemoResponse {
+  success: boolean;
+  confluenceEnabled: boolean;
+  summary: ComplianceSummary;
+  message: string;
+}
+
+export interface BindIssueResponse {
+  success: boolean;
+  summary?: ComplianceSummary;
+  error?: string;
+}
+
+export interface TransitionResult {
+  result: boolean;
+  errorMessage?: string;
+  evaluatedIssueKey?: string;
+  evalError?: string;
+}
+
+export interface MedTraceResolverMap {
+  getComplianceSuite: {
+    payload: Record<string, never> | undefined;
+    response: ComplianceSummary;
+  };
+  seedDemoSuite: {
+    payload: { confirmOverwriteLive?: boolean } | undefined;
+    response: SeedDemoResponse;
+  };
+  syncLiveSuite: {
+    payload: Omit<LiveSyncOptions, 'callerMode'> | undefined;
+    response: LiveSyncResult;
+  };
+  remediateGap: {
+    payload: {
+      hazardKey: string;
+      simulate: boolean;
+      attestationConfirmed: boolean;
+      meaning?: string;
+    };
+    response: ComplianceSummary;
+  };
+  recordTestResult: {
+    payload: {
+      hazardKey?: string;
+      testKey?: string;
+      linkId?: string;
+      status: VerificationTest['status'];
+      evidenceUrl?: string;
+      executionDate?: string;
+      notes?: string;
+    };
+    response: ComplianceSummary;
+  };
+  signOffPart11: {
+    payload: {
+      hazardKey: string;
+      linkId?: string;
+      specId?: string;
+      meaning: string;
+      attestationConfirmed: boolean;
+      passwordConfirmed: boolean;
+      attestationPhrase: string;
+      clientPublicKeySpki?: string;
+      clientSignatureBase64?: string;
+    };
+    response: ComplianceSummary;
+  };
+  queryGraphContext: {
+    payload: { issueKey?: string } | undefined;
+    response: IssueGraphContextResult | null;
+  };
+  bindIssueToHazard: {
+    payload: {
+      hazardKey: string;
+      issueKey?: string;
+      linkId?: string;
+    };
+    response: BindIssueResponse;
+  };
+  simulateTransition: {
+    payload: {
+      issueKey?: string;
+      scope?: 'global' | 'issue';
+    } | undefined;
+    response: TransitionResult;
+  };
+  analyzeBlastRadius: {
+    payload: { triggerKey?: string } | undefined;
+    response: BlastRadiusReport;
+  };
+  getAuditLog: {
+    payload: { limit?: number; beforeSeq?: number } | undefined;
+    response: AuditLogEntry[];
+  };
+  verifyAuditChain: {
+    payload: VerifyAuditChainOptions | undefined;
+    response: AuditChainVerification;
+  };
 }

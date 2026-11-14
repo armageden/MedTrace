@@ -11,7 +11,7 @@ Single source of truth for any AI agent working in this repository. Read this fi
 - **Verify:**
   - build: `npm run build && cd static/frontend && npm run build && cd ../..`
   - test: `npm test`
-  - lint: `forge lint`
+  - lint: `forge lint` (requires `forge login` or `FORGE_EMAIL` / `FORGE_API_TOKEN`; without credentials it fails with "Not logged in", so run the offline `npm run lint:manifest` and report `forge lint` as not run)
   - typecheck: `npx tsc --noEmit && cd static/frontend && npx tsc --noEmit && cd ../..`
   - docs: `npm run docs:check`
 

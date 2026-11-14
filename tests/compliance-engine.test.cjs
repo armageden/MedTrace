@@ -179,35 +179,90 @@ test.describe('Webtrigger Cryptographic Security - HMAC-SHA256 & Replay Protecti
     assert.ok(parsed.traceLinks || parsed.projectName);
   });
 
-  test.it('rejects remediation of an unknown hazard with HTTP 500 instead of reporting success', async () => {
-    const ts = Date.now().toString();
-    const nonce = 'rem-' + crypto.randomUUID();
-    const body = JSON.stringify({ action: 'remediate', hazardKey: 'HAZ-999' });
-    const sig = crypto.createHmac('sha256', secret).update(`${ts}.${nonce}.${body}`).digest('hex');
-    const resp = await mcpWebtriggerHandler({
-      method: 'POST',
-      headers: {
-        'x-medtrace-key': secret,
-        'x-medtrace-timestamp': ts,
-        'x-medtrace-nonce': nonce,
-        'x-medtrace-signature': `sha256=${sig}`,
-      },
-      body,
-    });
-    assert.strictEqual(resp.statusCode, 500);
-    assert.match(resp.body, /not found.*nothing was remediated/i);
+  test.it('rejects remediation in LIVE mode with 403 and unknown DEMO hazard with 404 instead of reporting success', async () => {
+    const originalGet = SeederService.getActiveComplianceSuite;
+    try {
+      // 1) LIVE mode blocks webtrigger auto-remediation with 403 Forbidden
+      SeederService.getActiveComplianceSuite = async () => ({
+        projectName: 'Live Suite',
+        datasetMode: 'LIVE',
+        initialized: true,
+        standards: [],
+        totalHazards: 1,
+        classCCount: 1,
+        classBCount: 0,
+        classACount: 0,
+        verifiedPercentage: 0,
+        releaseBlocked: true,
+        blockingReasons: ['HAZ-101 gap'],
+        signatureDriftCount: 0,
+        lastAuditTimestamp: new Date().toISOString(),
+        traceLinks: [],
+      });
+      const tsLive = Date.now().toString();
+      const nonceLive = 'rem-live-' + crypto.randomUUID();
+      const bodyLive = JSON.stringify({ action: 'remediate', hazardKey: 'HAZ-999' });
+      const sigLive = crypto.createHmac('sha256', secret).update(`${tsLive}.${nonceLive}.${bodyLive}`).digest('hex');
+      const liveResp = await mcpWebtriggerHandler({
+        method: 'POST',
+        headers: {
+          'x-medtrace-key': secret,
+          'x-medtrace-timestamp': tsLive,
+          'x-medtrace-nonce': nonceLive,
+          'x-medtrace-signature': `sha256=${sigLive}`,
+        },
+        body: bodyLive,
+      });
+      assert.strictEqual(liveResp.statusCode, 403);
+
+      // 2) DEMO mode with unknown hazard returns 404 Not Found
+      SeederService.getActiveComplianceSuite = async () => ({
+        projectName: 'Demo Suite',
+        datasetMode: 'DEMO',
+        initialized: true,
+        standards: [],
+        totalHazards: 0,
+        classCCount: 0,
+        classBCount: 0,
+        classACount: 0,
+        verifiedPercentage: 100,
+        releaseBlocked: false,
+        blockingReasons: [],
+        signatureDriftCount: 0,
+        lastAuditTimestamp: new Date().toISOString(),
+        traceLinks: [],
+      });
+      const ts = Date.now().toString();
+      const nonce = 'rem-' + crypto.randomUUID();
+      const body = JSON.stringify({ action: 'remediate', hazardKey: 'HAZ-999' });
+      const sig = crypto.createHmac('sha256', secret).update(`${ts}.${nonce}.${body}`).digest('hex');
+      const resp = await mcpWebtriggerHandler({
+        method: 'POST',
+        headers: {
+          'x-medtrace-key': secret,
+          'x-medtrace-timestamp': ts,
+          'x-medtrace-nonce': nonce,
+          'x-medtrace-signature': `sha256=${sig}`,
+        },
+        body,
+      });
+      assert.strictEqual(resp.statusCode, 404);
+      assert.match(resp.body, /not found.*nothing was remediated/i);
+    } finally {
+      SeederService.getActiveComplianceSuite = originalGet;
+    }
   });
 
   test.it('rejects secrets passed in URL query parameters (header-only defense against log leakage)', async () => {
-    const resp = await mcpWebtriggerHandler({ method: 'GET', headers: {}, query: { token: 'medtrace-sec-2026' } });
+    const resp = await mcpWebtriggerHandler({ method: 'GET', headers: {}, query: { token: 'synthetic-test-fixture-secret' } });
     assert.strictEqual(resp.statusCode, 401);
   });
 
-  test.it('rejects duplicate in-window nonce replay with HTTP 409 Conflict', async () => {
-    const mcpSecret = process.env.MEDTRACE_MCP_SECRET || 'medtrace-sec-2026';
+  test.it('rejects duplicate in-window nonce replay with HTTP 409 Conflict and unknown POST action sync-status with 400', async () => {
+    const mcpSecret = process.env.MEDTRACE_MCP_SECRET || 'synthetic-test-fixture-secret';
     const testNonce = 'nonce-' + crypto.randomUUID();
     const ts = Date.now().toString();
-    const body = JSON.stringify({ action: 'sync-status' });
+    const body = JSON.stringify({ action: 'status' });
     const sig = crypto.createHmac('sha256', mcpSecret).update(`${ts}.${testNonce}.${body}`).digest('hex');
     const req = {
       method: 'POST',
@@ -219,14 +274,33 @@ test.describe('Webtrigger Cryptographic Security - HMAC-SHA256 & Replay Protecti
       },
       body,
     };
-    // First call consumes the nonce
+    // First call consumes the nonce and succeeds
     const res1 = await mcpWebtriggerHandler(req);
-    assert.notStrictEqual(res1.statusCode, 409);
+    assert.strictEqual(res1.statusCode, 200);
 
     // Replayed second call with identical nonce within window
     const res2 = await mcpWebtriggerHandler(req);
     assert.strictEqual(res2.statusCode, 409);
     assert.match(res2.body, /Replay attack detected/);
+
+    // Unknown POST action is rejected with 400 Bad Request
+    const unknownNonce = 'nonce-unk-' + crypto.randomUUID();
+    const unknownBody = JSON.stringify({ action: 'sync-status' });
+    const unknownSig = crypto
+      .createHmac('sha256', mcpSecret)
+      .update(`${ts}.${unknownNonce}.${unknownBody}`)
+      .digest('hex');
+    const resUnknown = await mcpWebtriggerHandler({
+      method: 'POST',
+      headers: {
+        'x-medtrace-key': mcpSecret,
+        'x-medtrace-timestamp': ts,
+        'x-medtrace-nonce': unknownNonce,
+        'x-medtrace-signature': `sha256=${unknownSig}`,
+      },
+      body: unknownBody,
+    });
+    assert.strictEqual(resUnknown.statusCode, 400);
   });
 
   test.it('lazily prunes expired nonces on access and allows reuse outside TTL', async () => {
@@ -277,11 +351,36 @@ test.describe('Webtrigger Cryptographic Security - HMAC-SHA256 & Replay Protecti
   test.it('CI release gate action verify-release-gate returns HTTP 403 + result:false on a blocked suite', async () => {
     const originalGet = SeederService.getActiveComplianceSuite;
     SeederService.getActiveComplianceSuite = async () => ({
-      projectName: 'CI Gate Suite', standards: [], totalHazards: 1, classCCount: 1, classBCount: 0, classACount: 0,
-      verifiedPercentage: 0, releaseBlocked: true,
+      projectName: 'CI Gate Suite',
+      datasetMode: 'LIVE',
+      initialized: true,
+      standards: [],
+      totalHazards: 1,
+      classCCount: 1,
+      classBCount: 0,
+      classACount: 0,
+      verifiedPercentage: 0,
+      releaseBlocked: true,
       blockingReasons: ['IEC 62304 Critical Gap: HAZ-101 unverified'],
-      signatureDriftCount: 0, lastAuditTimestamp: new Date().toISOString(),
-      traceLinks: [],
+      signatureDriftCount: 0,
+      lastAuditTimestamp: new Date().toISOString(),
+      traceLinks: [
+        {
+          id: 'link-ci-blocked',
+          hazard: {
+            key: 'HAZ-101',
+            title: 'Infusion Overdose',
+            severity: 'Catastrophic',
+            safetyClass: 'Class C',
+            status: 'CRITICAL_GAP',
+          },
+          spec: { id: 'srs-1', title: 'Flow Limiter', version: '1.0', approved: true },
+          work: { key: 'MED-1', summary: 'Implement limiter', status: 'In Progress' },
+          test: { testKey: 'TST-1', status: 'UNTESTED', evidenceUrl: '' },
+          complianceState: 'CRITICAL_GAP',
+          violations: ['IEC 62304 Critical Gap: HAZ-101 unverified'],
+        },
+      ],
     });
     try {
       const ts = Date.now().toString();
@@ -310,11 +409,40 @@ test.describe('Webtrigger Cryptographic Security - HMAC-SHA256 & Replay Protecti
   test.it('CI release gate action verify-release-gate returns HTTP 200 + result:true on a clean suite', async () => {
     const originalGet = SeederService.getActiveComplianceSuite;
     SeederService.getActiveComplianceSuite = async () => ({
-      projectName: 'CI Gate Suite', standards: [], totalHazards: 1, classCCount: 1, classBCount: 0, classACount: 0,
-      verifiedPercentage: 100, releaseBlocked: false,
+      projectName: 'CI Gate Suite',
+      datasetMode: 'LIVE',
+      initialized: true,
+      standards: [],
+      totalHazards: 1,
+      classCCount: 1,
+      classBCount: 0,
+      classACount: 0,
+      verifiedPercentage: 100,
+      releaseBlocked: false,
       blockingReasons: [],
-      signatureDriftCount: 0, lastAuditTimestamp: new Date().toISOString(),
-      traceLinks: [],
+      signatureDriftCount: 0,
+      lastAuditTimestamp: new Date().toISOString(),
+      traceLinks: [
+        {
+          id: 'link-ci-clean',
+          hazard: {
+            key: 'HAZ-101',
+            title: 'Infusion Overdose',
+            severity: 'Catastrophic',
+            safetyClass: 'Class C',
+            status: 'VERIFIED',
+          },
+          spec: { id: 'srs-1', title: 'Flow Limiter', version: '1.0', approved: true },
+          work: { key: 'MED-1', summary: 'Implement limiter', status: 'Done' },
+          test: {
+            testKey: 'TST-1',
+            status: 'PASSED',
+            evidenceUrl: 'https://ci.medtrace.internal/runs/1',
+          },
+          complianceState: 'VERIFIED',
+          violations: [],
+        },
+      ],
     });
     try {
       const ts = Date.now().toString();
@@ -383,6 +511,13 @@ test.describe('Webtrigger Cryptographic Security - HMAC-SHA256 & Replay Protecti
 });
 
 test.describe('Rovo Action Handler - Forge rovo:action payload contract', () => {
+  test.beforeEach(async () => {
+    resetInMemoryAuditStorage();
+    setAuditStorageAdapter(null);
+    SeederService.resetInMemoryState();
+    await SeederService.seedEnterpriseDemoSuite('acc-rovo-test', 'SYSTEM_INIT');
+  });
+
   test.it('dispatches get-hazard-lineage from context.moduleKey with inputs spread on payload', async () => {
     const payload = { issueKey: 'MED-42', context: { moduleKey: 'get-hazard-lineage-action', cloudId: 'cloud-x' } };
     const res = await rovoActionHandler(payload, { moduleKey: 'get-hazard-lineage-action' });
@@ -406,6 +541,13 @@ test.describe('Rovo Action Handler - Forge rovo:action payload contract', () => 
 });
 
 test.describe('McpToolService & Rovo Agent - Dynamic Graph Traversal', () => {
+  test.beforeEach(async () => {
+    resetInMemoryAuditStorage();
+    setAuditStorageAdapter(null);
+    SeederService.resetInMemoryState();
+    await SeederService.seedEnterpriseDemoSuite('acc-mcp-test', 'SYSTEM_INIT');
+  });
+
   test.it('extracts issue key and performs BFS blast-radius traversal on code diff', async () => {
     const res = await McpToolService.verifyIecCompliance({
       prDiff: 'diff --git a/firmware.c b/firmware.c\n+// fixes MED-42 PWM rate',
@@ -446,7 +588,7 @@ test.describe('McpToolService & Rovo Agent - Dynamic Graph Traversal', () => {
         {
           hazard: { key: 'HAZ-103', riskClass: 'CLASS_A', title: 'Display Transient Glitch' },
           spec: { id: 'srs-106', title: 'SRS-106', sha256Hash: 'abc', isSignatureInvalidated: false },
-          work: { key: 'MED-44' },
+          work: { key: 'MED-44', status: 'Done' },
           test: { testKey: 'TEST-90', status: 'PASSED' },
           signature: { id: 'sig-003', artifactSha256: 'abc', isValid: true },
           complianceState: 'VERIFIED',
@@ -468,8 +610,16 @@ test.describe('McpToolService & Rovo Agent - Dynamic Graph Traversal', () => {
 });
 
 test.describe('SeederService - Cryptographic Integrity & Dynamic Hashes', () => {
+  test.beforeEach(async () => {
+    resetInMemoryAuditStorage();
+    setAuditStorageAdapter(null);
+    SeederService.resetInMemoryState();
+    await SeederService.seedEnterpriseDemoSuite('acc-hash-test', 'SYSTEM_INIT');
+  });
+
   test.it('dynamically computes non-empty SHA-256 hashes for all specifications and signatures', async () => {
     const suite = await SeederService.getActiveComplianceSuite();
+    assert.ok(suite.traceLinks.length > 0);
     for (const link of suite.traceLinks) {
       assert.strictEqual(link.spec.sha256Hash.length, 64);
       assert.notStrictEqual(link.spec.sha256Hash, 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855');
@@ -868,7 +1018,7 @@ test.describe('Deterministic Regulatory Blast Radius & Transitive Impact Analyze
     assert.ok(report.executionTimeMs < 20, `Report internal timer ${report.executionTimeMs}ms exceeds 20ms`);
   });
 
-  test.it('defaults to the first link when the trigger is empty or whitespace', () => {
+  test.it('returns empty zero-impact BlastRadiusReport when the trigger is empty or whitespace', () => {
     const secondLink = {
       id: 'trace-second',
       complianceState: 'VERIFIED',
@@ -882,8 +1032,13 @@ test.describe('Deterministic Regulatory Blast Radius & Transitive Impact Analyze
     const twoLinks = { ...sampleSuite, traceLinks: [sampleSuite.traceLinks[0], secondLink] };
     for (const trigger of ['', '   ']) {
       const report = ComplianceEngine.computeBlastRadius(trigger, twoLinks);
-      assert.deepStrictEqual(report.blockedWorkItemKeys, ['MED-42'], `Trigger "${trigger}" must not sweep the whole suite`);
-      assert.strictEqual(report.triggerArtifact.id, 'srs-104');
+      assert.strictEqual(report.triggerArtifact.title, 'No Trigger Artifact Specified');
+      assert.strictEqual(report.impactSeverity, 'MINOR');
+      assert.deepStrictEqual(report.affectedHazardKeys, []);
+      assert.deepStrictEqual(report.blockedWorkItemKeys, []);
+      assert.deepStrictEqual(report.invalidatedTestKeys, []);
+      assert.deepStrictEqual(report.invalidatedSignatureIds, []);
+      assert.deepStrictEqual(report.traversalPath, []);
     }
   });
 
@@ -922,8 +1077,10 @@ test.describe('Deterministic Regulatory Blast Radius & Transitive Impact Analyze
     assert.deepStrictEqual(report.affectedHazardKeys, ['HAZ-101']);
     assert.deepStrictEqual(report.blockedWorkItemKeys, ['MED-42', 'MED-43']);
     assert.deepStrictEqual(report.invalidatedTestKeys, ['TEST-88', 'TEST-89']);
-    assert.strictEqual(report.traversalPath.length, 7, 'Expected 4 hops on link A + 3 newly discovered hops on sibling link B');
+    assert.deepStrictEqual(report.invalidatedSignatureIds, ['sig-001']);
+    assert.strictEqual(report.traversalPath.length, 8, 'Expected 4 hops on link A + 4 hops on sibling link B including valid SIGNS hop');
     assert.ok(report.traversalPath.some((h) => h.edge === 'MITIGATES' && h.from.includes('SRS-105')), 'Sibling spec must appear as its own MITIGATES hop');
+    assert.ok(report.traversalPath.some((h) => h.edge === 'SIGNS' && h.to.includes('R. Adams')), 'Valid sibling SIGNS hop must be included');
   });
 });
 
@@ -984,6 +1141,32 @@ function createMockForgeKvs(seed = {}) {
       }
       return { successfulKeys, failedKeys: [] };
     },
+    batchDelete: async (items) => {
+      for (const item of items) {
+        store.delete(item.key);
+      }
+      return { successfulKeys: items.map((i) => ({ key: i.key })), failedKeys: [] };
+    },
+    transact: () => {
+      const ops = [];
+      const builder = {
+        set: (key, value) => {
+          ops.push({ type: 'set', key, value });
+          return builder;
+        },
+        delete: (key) => {
+          ops.push({ type: 'delete', key });
+          return builder;
+        },
+        execute: async () => {
+          for (const op of ops) {
+            if (op.type === 'set') store.set(op.key, JSON.parse(JSON.stringify(op.value)));
+            else store.delete(op.key);
+          }
+        },
+      };
+      return builder;
+    },
   };
 }
 
@@ -995,6 +1178,8 @@ function withForgeMocks({ kvsMock, asAppImpl, asUserImpl, appContext }, fn) {
     delete: forgeKvs.kvs.delete,
     batchSet: forgeKvs.kvs.batchSet,
     batchGet: forgeKvs.kvs.batchGet,
+    batchDelete: forgeKvs.kvs.batchDelete,
+    transact: forgeKvs.kvs.transact,
   };
   const origAsApp = forgeApi.default.asApp;
   const origAsUser = forgeApi.default.asUser;
@@ -1007,6 +1192,8 @@ function withForgeMocks({ kvsMock, asAppImpl, asUserImpl, appContext }, fn) {
     forgeKvs.kvs.delete = kvsMock.delete;
     forgeKvs.kvs.batchSet = kvsMock.batchSet;
     forgeKvs.kvs.batchGet = kvsMock.batchGet;
+    if (kvsMock.batchDelete) forgeKvs.kvs.batchDelete = kvsMock.batchDelete;
+    if (kvsMock.transact) forgeKvs.kvs.transact = kvsMock.transact;
   }
   if (asAppImpl) forgeApi.default.asApp = asAppImpl;
   if (asUserImpl) forgeApi.default.asUser = asUserImpl;
@@ -1028,6 +1215,8 @@ function withForgeMocks({ kvsMock, asAppImpl, asUserImpl, appContext }, fn) {
       forgeKvs.kvs.delete = origKvs.delete;
       forgeKvs.kvs.batchSet = origKvs.batchSet;
       forgeKvs.kvs.batchGet = origKvs.batchGet;
+      forgeKvs.kvs.batchDelete = origKvs.batchDelete;
+      forgeKvs.kvs.transact = origKvs.transact;
       forgeApi.default.asApp = origAsApp;
       forgeApi.default.asUser = origAsUser;
       if (origGetAppContextDesc) {
@@ -1276,10 +1465,17 @@ test.describe('AuditLogService - Append-Only Immutability & SHA-256 Chain Verifi
   test.it('retries concurrency collision when FAIL_IF_EXISTS returns EXISTS and detects payload tampering', async () => {
     const backing = createInMemoryAuditStorageAdapter();
     let forcedCollision = true;
+    let tamperSeq1 = false;
     const collidingAdapter = {
       getHead: () => backing.getHead(),
       setHead: (h) => backing.setHead(h),
-      getEntry: (seq) => backing.getEntry(seq),
+      getEntry: async (seq) => {
+        const entry = await backing.getEntry(seq);
+        if (tamperSeq1 && seq === 1 && entry) {
+          return { ...entry, details: { tampered: true } };
+        }
+        return entry;
+      },
       createEntryImmutable: async (seq, entry) => {
         if (forcedCollision && seq === 1) {
           forcedCollision = false;
@@ -1308,9 +1504,8 @@ test.describe('AuditLogService - Append-Only Immutability & SHA-256 Chain Verifi
     assert.strictEqual(okCheck.valid, true);
     assert.strictEqual(okCheck.totalEntries, 2);
 
-    // Tamper directly with entry 1 payload
-    const entry1 = await backing.getEntry(1);
-    entry1.details = { tampered: true };
+    // Tamper with entry 1 payload on storage read
+    tamperSeq1 = true;
     const broken = await AuditLogService.verifyAuditChain();
     assert.strictEqual(broken.valid, false);
     assert.strictEqual(broken.brokenAtSeq, 1);
@@ -1319,9 +1514,20 @@ test.describe('AuditLogService - Append-Only Immutability & SHA-256 Chain Verifi
 });
 
 test.describe('SeederService - Sharded KVS Persistence, Test Recording, Part 11 Sign-off & Simulation Guard', () => {
+  const { PART11_ATTESTATION_PHRASE } = require('../dist/types');
+  const origSecret = process.env.MEDTRACE_PART11_SECRET;
+
   test.beforeEach(() => {
     resetInMemoryAuditStorage();
     setAuditStorageAdapter(null);
+    SeederService.resetInMemoryState();
+    process.env.MEDTRACE_PART11_SECRET = 'compliance-test-part11-secret';
+  });
+
+  test.afterEach(() => {
+    SeederService.resetInMemoryState();
+    if (origSecret === undefined) delete process.env.MEDTRACE_PART11_SECRET;
+    else process.env.MEDTRACE_PART11_SECRET = origSecret;
   });
 
   test.it('persists sharded KVS suite_meta + link:* keys, detects optimistic version conflicts, and propagates batchSet errors', async () => {
@@ -1330,7 +1536,7 @@ test.describe('SeederService - Sharded KVS Persistence, Test Recording, Part 11 
       const seeded = await SeederService.seedEnterpriseDemoSuite('acc-admin', 'FORGE_USER_SESSION');
       assert.strictEqual(seeded.summary.storageFormat, 'SHARDED_V2');
       assert.ok(kvsMock.store.has('medtrace:compliance:suite_meta'));
-      assert.ok(kvsMock.store.has('medtrace:compliance:link:trace-HAZ-101'));
+      assert.ok(kvsMock.store.has('medtrace:compliance:link:trace-HAZ-101--srs-104--MED-42'));
       assert.ok(kvsMock.store.has('medtrace:audit:entry:1'));
 
       const loaded = await SeederService.getActiveComplianceSuite();
@@ -1343,14 +1549,21 @@ test.describe('SeederService - Sharded KVS Persistence, Test Recording, Part 11 
         /Concurrent modification detected/
       );
 
-      // Failed batchSet keys must propagate inside Forge runtime
+      // Failed batchSet keys must propagate inside Forge runtime (> 25 op chunked path)
+      const largeLinks = Array.from({ length: 26 }, (_, i) => ({
+        ...loaded.traceLinks[0],
+        id: `trace-HAZ-${1000 + i}--srs-104--MED-${1000 + i}`,
+        hazard: { ...loaded.traceLinks[0].hazard, id: `haz-${1000 + i}`, key: `HAZ-${1000 + i}` },
+        work: { ...loaded.traceLinks[0].work, id: `med-${1000 + i}`, key: `MED-${1000 + i}` },
+      }));
+      const largeSuite = { ...loaded, traceLinks: largeLinks, totalHazards: largeLinks.length };
       forgeKvs.kvs.batchSet = async (items) => ({
         successfulKeys: [],
         failedKeys: [{ key: items[0].key, error: { code: 'QUOTA_EXCEEDED' } }],
       });
       await assert.rejects(
-        () => SeederService.saveComplianceSuite(loaded),
-        /Failed to persist compliance trace links to Forge KVS/
+        () => SeederService.saveComplianceSuite(largeSuite),
+        /Failed to persist compliance shards to Forge KVS/
       );
     });
   });
@@ -1366,6 +1579,10 @@ test.describe('SeederService - Sharded KVS Persistence, Test Recording, Part 11 
 
     const bound = await SeederService.bindIssueToHazard('HAZ-101', 'MED-101', 'acc-1');
     assert.strictEqual(bound.traceLinks.find((l) => l.hazard.key === 'HAZ-101').work.key, 'MED-101');
+
+    // Transition MED-101 to Done so test pass leaves SIGNATURE_DRIFT and Part 11 signoff produces VERIFIED
+    bound.traceLinks[0].work.status = 'Done';
+    await SeederService.saveComplianceSuite(bound, 2);
 
     // Record test execution result
     const tested = await SeederService.recordTestResult({
@@ -1385,7 +1602,12 @@ test.describe('SeederService - Sharded KVS Persistence, Test Recording, Part 11 
       () =>
         SeederService.signOffPart11({
           hazardKey: 'HAZ-101',
-          attestation: { meaning: 'Approved', attestationConfirmed: false },
+          attestation: {
+            meaning: 'Approved',
+            attestationConfirmed: false,
+            passwordConfirmed: true,
+            attestationPhrase: PART11_ATTESTATION_PHRASE,
+          },
           actorAccountId: 'cmo-1',
         }),
       /attestationConfirmed: true/
@@ -1394,26 +1616,35 @@ test.describe('SeederService - Sharded KVS Persistence, Test Recording, Part 11 
       () =>
         SeederService.signOffPart11({
           hazardKey: 'HAZ-101',
-          attestation: { meaning: 'OK', attestationConfirmed: true },
+          attestation: {
+            meaning: 'OK',
+            attestationConfirmed: true,
+            passwordConfirmed: true,
+            attestationPhrase: PART11_ATTESTATION_PHRASE,
+          },
           actorAccountId: 'cmo-1',
         }),
       /meaning/
     );
 
-    // Valid Part 11 sign-off turns HAZ-101 VERIFIED
+    // Valid Part 11 sign-off turns HAZ-101 VERIFIED and binds identity server-side
     const signed = await SeederService.signOffPart11({
       hazardKey: 'HAZ-101',
       attestation: {
         meaning: 'Clinical Safety Approval for v3 Bolus Clamp',
         attestationConfirmed: true,
-        signedBy: 'Dr. Marcus Vance',
-        role: 'Chief Medical Officer',
+        passwordConfirmed: true,
+        attestationPhrase: PART11_ATTESTATION_PHRASE,
+        signedBy: 'Spoofed Display Name',
+        role: 'Spoofed Role',
       },
       actorAccountId: 'cmo-1',
     });
     const haz101Signed = signed.traceLinks.find((l) => l.hazard.key === 'HAZ-101');
     assert.strictEqual(haz101Signed.complianceState, 'VERIFIED');
     assert.strictEqual(haz101Signed.signature.isValid, true);
+    assert.strictEqual(haz101Signed.signature.signedBy, 'accountId:cmo-1');
+    assert.strictEqual(haz101Signed.signature.signedByAccountId, 'cmo-1');
     assert.strictEqual(signed.releaseBlocked, false);
 
     // Demo quick-remediate requires explicit consent and rejects LIVE mode
@@ -1431,7 +1662,7 @@ test.describe('SeederService - Sharded KVS Persistence, Test Recording, Part 11 
     assert.ok(!String(simLink.test.executionDate || '').includes('120/120 Passed'));
 
     // Save as LIVE mode -> remediateClassCGap must reject
-    await SeederService.saveComplianceSuite({ ...simulated, datasetMode: 'LIVE' });
+    await SeederService.saveComplianceSuite({ ...simulated, datasetMode: 'LIVE', initialized: true });
     await assert.rejects(
       () =>
         SeederService.remediateClassCGap('HAZ-101', 'acc-1', {
@@ -1549,11 +1780,12 @@ test.describe('LiveIngestionService & TeamworkGraphService - Mocked Atlassian Cl
       {
         kvsMock,
         asAppImpl: mockApiClient,
+        asUserImpl: mockApiClient,
         appContext: { installation: { contexts: [{ cloudId: '11111111-2222-3333-4444-555555555555' }] } },
       },
       async () => {
         const twg = await TeamworkGraphService.queryIssueGraphContext('PUMP-10');
-        assert.strictEqual(twg.source, 'AGG');
+        assert.strictEqual(twg.source, 'JIRA_AGG_AND_REST');
         assert.strictEqual(twg.confluenceLinks[0].pageId, '55001');
 
         const syncRes = await LiveIngestionService.syncFromAtlassian({ projectKey: 'PUMP' }, 'acc-sync');
@@ -1571,29 +1803,31 @@ test.describe('LiveIngestionService & TeamworkGraphService - Mocked Atlassian Cl
 
   test.it('TeamworkGraphService falls back to JIRA_REST when AGG fails and confluencePageUpdatedTrigger revokes drifted signatures', async () => {
     const kvsMock = createMockForgeKvs();
+    const fallbackClient = () => ({
+      requestJira: async (routeObj) => {
+        const r = String(routeObj?.value || routeObj);
+        if (r.includes('/remotelink')) return makeJsonResponse(200, []);
+        return makeJsonResponse(200, {
+          id: '10042',
+          key: 'MED-42',
+          self: 'https://api.atlassian.com/ex/jira/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/rest/api/3/issue/10042',
+          fields: { summary: 'Clamp', status: { name: 'In Progress' }, issuelinks: [] },
+        });
+      },
+      requestConfluence: async () =>
+        makeJsonResponse(200, {
+          id: '98304',
+          title: 'SRS-105: Modified',
+          version: { number: 9 },
+          body: { storage: { value: '<p>Modified spec content</p>' } },
+        }),
+      requestGraph: async () => makeJsonResponse(500, { errors: [{ message: 'AGG down' }] }),
+    });
     await withForgeMocks(
       {
         kvsMock,
-        asAppImpl: () => ({
-          requestJira: async (routeObj) => {
-            const r = String(routeObj?.value || routeObj);
-            if (r.includes('/remotelink')) return makeJsonResponse(200, []);
-            return makeJsonResponse(200, {
-              id: '10042',
-              key: 'MED-42',
-              self: 'https://api.atlassian.com/ex/jira/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/rest/api/3/issue/10042',
-              fields: { summary: 'Clamp', status: { name: 'In Progress' }, issuelinks: [] },
-            });
-          },
-          requestConfluence: async () =>
-            makeJsonResponse(200, {
-              id: '98304',
-              title: 'SRS-105: Modified',
-              version: { number: 9 },
-              body: { storage: { value: '<p>Modified spec content</p>' } },
-            }),
-          requestGraph: async () => makeJsonResponse(500, { errors: [{ message: 'AGG down' }] }),
-        }),
+        asAppImpl: fallbackClient,
+        asUserImpl: fallbackClient,
         appContext: { installation: { contexts: [{ cloudId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' }] } },
       },
       async () => {
@@ -1675,57 +1909,73 @@ test.describe('resolverHandler & RBAC Enforcement', () => {
   });
 
   test.it('executes authorized resolvers end-to-end (seedDemoSuite, bindIssueToHazard, recordTestResult, signOffPart11, audit log & blast radius)', async () => {
-    const seeded = await resolverHandler(
-      { call: { functionKey: 'seedDemoSuite', payload: {} }, context: {} },
-      { principal: { accountId: 'operator-1' } }
-    );
-    assert.strictEqual(seeded.success, true);
+    const { PART11_ATTESTATION_PHRASE } = require('../dist/types');
+    const origSecret = process.env.MEDTRACE_PART11_SECRET;
+    process.env.MEDTRACE_PART11_SECRET = 'resolver-e2e-part11-secret';
+    SeederService.resetInMemoryState();
+    try {
+      const seeded = await resolverHandler(
+        { call: { functionKey: 'seedDemoSuite', payload: {} }, context: {} },
+        { principal: { accountId: 'operator-1' } }
+      );
+      assert.strictEqual(seeded.success, true);
 
-    const bound = await resolverHandler(
-      { call: { functionKey: 'bindIssueToHazard', payload: { hazardKey: 'HAZ-101', issueKey: 'MED-200' } }, context: {} },
-      { principal: { accountId: 'operator-1' } }
-    );
-    assert.strictEqual(bound.success, true);
+      const bound = await resolverHandler(
+        { call: { functionKey: 'bindIssueToHazard', payload: { hazardKey: 'HAZ-101', issueKey: 'MED-200' } }, context: {} },
+        { principal: { accountId: 'operator-1' } }
+      );
+      assert.strictEqual(bound.success, true);
 
-    const recorded = await resolverHandler(
-      { call: { functionKey: 'recordTestResult', payload: { hazardKey: 'HAZ-101', status: 'PASSED' } }, context: {} },
-      { principal: { accountId: 'operator-1' } }
-    );
-    assert.strictEqual(recorded.traceLinks[0].test.status, 'PASSED');
+      const recorded = await resolverHandler(
+        { call: { functionKey: 'recordTestResult', payload: { hazardKey: 'HAZ-101', status: 'PASSED' } }, context: {} },
+        { principal: { accountId: 'operator-1' } }
+      );
+      assert.strictEqual(recorded.traceLinks[0].test.status, 'PASSED');
 
-    const signed = await resolverHandler(
-      {
-        call: {
-          functionKey: 'signOffPart11',
-          payload: {
-            hazardKey: 'HAZ-101',
-            meaning: 'Clinical safety release sign-off',
-            attestationConfirmed: true,
+      // Non-Forge bindIssueToHazard does not query Jira; transition work.status -> Done before clinical release signoff
+      recorded.traceLinks[0].work.status = 'Done';
+      await SeederService.saveComplianceSuite(recorded);
+
+      const signed = await resolverHandler(
+        {
+          call: {
+            functionKey: 'signOffPart11',
+            payload: {
+              hazardKey: 'HAZ-101',
+              meaning: 'Clinical safety release sign-off',
+              attestationConfirmed: true,
+              passwordConfirmed: true,
+              attestationPhrase: PART11_ATTESTATION_PHRASE,
+            },
           },
+          context: {},
         },
-        context: {},
-      },
-      { principal: { accountId: 'operator-1' } }
-    );
-    assert.strictEqual(signed.releaseBlocked, false);
+        { principal: { accountId: 'operator-1' } }
+      );
+      assert.strictEqual(signed.releaseBlocked, false);
 
-    const blast = await resolverHandler(
-      { call: { functionKey: 'analyzeBlastRadius', payload: { triggerKey: 'srs-104' } }, context: {} },
-      { principal: { accountId: 'operator-1' } }
-    );
-    assert.deepStrictEqual(blast.affectedHazardKeys, ['HAZ-101']);
+      const blast = await resolverHandler(
+        { call: { functionKey: 'analyzeBlastRadius', payload: { triggerKey: 'srs-104' } }, context: {} },
+        { principal: { accountId: 'operator-1' } }
+      );
+      assert.deepStrictEqual(blast.affectedHazardKeys, ['HAZ-101']);
 
-    const auditEntries = await resolverHandler(
-      { call: { functionKey: 'getAuditLog', payload: { limit: 10 } }, context: {} },
-      { principal: { accountId: 'operator-1' } }
-    );
-    assert.ok(auditEntries.length >= 4);
+      const auditEntries = await resolverHandler(
+        { call: { functionKey: 'getAuditLog', payload: { limit: 10 } }, context: {} },
+        { principal: { accountId: 'operator-1' } }
+      );
+      assert.ok(auditEntries.length >= 4);
 
-    const verification = await resolverHandler(
-      { call: { functionKey: 'verifyAuditChain', payload: {} }, context: {} },
-      { principal: { accountId: 'operator-1' } }
-    );
-    assert.strictEqual(verification.valid, true);
+      const verification = await resolverHandler(
+        { call: { functionKey: 'verifyAuditChain', payload: {} }, context: {} },
+        { principal: { accountId: 'operator-1' } }
+      );
+      assert.strictEqual(verification.valid, true);
+    } finally {
+      SeederService.resetInMemoryState();
+      if (origSecret === undefined) delete process.env.MEDTRACE_PART11_SECRET;
+      else process.env.MEDTRACE_PART11_SECRET = origSecret;
+    }
   });
 });
 
@@ -1814,157 +2064,772 @@ test.describe('Webtrigger Hardening & kvsNonceStore Coverage', () => {
   });
 });
 
-test.describe('Standalone Stdio MCP Server (mcp-server/index.mjs)', () => {
-  const mcpEntry = path.resolve(__dirname, '..', 'mcp-server', 'index.mjs');
+test.describe('Task 1A-Engine: Compliance Rules, Cryptographic Seals, Blast Radius, McpToolService & Rovo Action Handler', () => {
+  const baseHazard = {
+    id: 'haz-201',
+    key: 'HAZ-201',
+    title: 'Class A Alert Lamp Hazard',
+    riskClass: 'CLASS_A',
+    severity: 'MINOR',
+    probability: 'REMOTE',
+    mitigationRequirementId: 'srs-201',
+    status: 'UNVERIFIED_RISK',
+  };
+  const baseSpec = {
+    id: 'srs-201',
+    pageId: '55201',
+    title: 'SRS-201: Alert Lamp Control',
+    version: 2,
+    sha256Hash: 'a'.repeat(64),
+    lastSignedHash: 'a'.repeat(64),
+    isSignatureInvalidated: false,
+    contentSnippet: 'Alert lamp clause',
+    lastUpdated: '2026-11-10T00:00:00Z',
+  };
+  const baseWork = {
+    id: 'med-201',
+    key: 'MED-201',
+    title: 'Implement Alert Lamp Driver',
+    status: 'Done',
+    assignee: 'Alice QA',
+  };
+  const baseTest = {
+    id: 'test-201',
+    testKey: 'TEST-201',
+    title: 'Alert Lamp Unit Test',
+    testType: 'Unit Test',
+    status: 'PASSED',
+    executionDate: '2026-11-10T01:00:00Z',
+    evidenceUrl: 'https://ci.example.internal/runs/201',
+  };
+  const baseSig = {
+    id: 'sig-201',
+    signedBy: 'Alice QA (acc-alice)',
+    signedByAccountId: 'acc-alice',
+    signedAt: '2026-11-10T02:00:00Z',
+    role: 'Authorized Signatory',
+    meaning: 'Release approval',
+    artifactSha256: 'a'.repeat(64),
+    isValid: true,
+    authMethod: 'PART11_ATTESTATION',
+  };
 
-  test.it('fails closed when MEDTRACE_MCP_SECRET is missing', async () => {
-    const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'medtrace-mcp-test-'));
-    const tmpSub = path.join(tmpRoot, 'mcp-server');
-    fs.mkdirSync(tmpSub, { recursive: true });
-    const isolatedEntry = path.join(tmpSub, 'index.mjs');
-    fs.copyFileSync(mcpEntry, isolatedEntry);
+  test.it('enforces CLASS_A test status, CLASS_C missing SRS, work.status Done, evidenceUrl https://, and M:N trace link IDs', () => {
+    for (const status of ['UNTESTED', 'IN_PROGRESS']) {
+      const link = ComplianceEngine.evaluateTraceLink(
+        baseHazard,
+        baseSpec,
+        baseWork,
+        { ...baseTest, status },
+        baseSig
+      );
+      assert.strictEqual(link.complianceState, 'INCOMPLETE', `CLASS_A ${status} test must be INCOMPLETE`);
+    }
 
+    const classCHazard = { ...baseHazard, key: 'HAZ-300', riskClass: 'CLASS_C', severity: 'CATASTROPHIC' };
+    const missingSpecLink = ComplianceEngine.evaluateTraceLink(
+      classCHazard,
+      { ...baseSpec, title: '', isMissingSentinel: true },
+      baseWork,
+      baseTest,
+      baseSig
+    );
+    assert.strictEqual(missingSpecLink.complianceState, 'SAFETY_VIOLATION');
+    assert.match(missingSpecLink.violations[0], /ISO 14971 Violation/);
+
+    const classCInProgressWork = ComplianceEngine.evaluateTraceLink(
+      classCHazard,
+      baseSpec,
+      { ...baseWork, status: 'In Progress' },
+      baseTest,
+      baseSig
+    );
+    assert.strictEqual(classCInProgressWork.complianceState, 'SAFETY_VIOLATION');
+
+    const classAUntestedWork = ComplianceEngine.evaluateTraceLink(
+      baseHazard,
+      baseSpec,
+      { ...baseWork, status: 'Under Review' },
+      baseTest,
+      baseSig
+    );
+    assert.strictEqual(classAUntestedWork.complianceState, 'INCOMPLETE');
+
+    const unsafeEvidence = ComplianceEngine.evaluateTraceLink(
+      classCHazard,
+      baseSpec,
+      baseWork,
+      { ...baseTest, evidenceUrl: 'javascript:alert(1)' },
+      baseSig
+    );
+    assert.strictEqual(unsafeEvidence.complianceState, 'SAFETY_VIOLATION');
+    assert.match(unsafeEvidence.violations[0], /evidenceUrl/i);
+
+    const missingEvidence = ComplianceEngine.evaluateTraceLink(
+      baseHazard,
+      baseSpec,
+      baseWork,
+      { ...baseTest, evidenceUrl: undefined },
+      baseSig,
+      undefined,
+      { requireTestEvidence: true }
+    );
+    assert.strictEqual(missingEvidence.complianceState, 'INCOMPLETE');
+    assert.match(missingEvidence.violations[0], /evidenceUrl/);
+
+    const id1 = ComplianceEngine.buildTraceLinkId('HAZ-101', 'srs-104', 'MED-42');
+    const id2 = ComplianceEngine.buildTraceLinkId('HAZ-101', 'srs-105', 'MED-42');
+    assert.notStrictEqual(id1, id2);
+    assert.strictEqual(
+      ComplianceEngine.evaluateTraceLink(baseHazard, baseSpec, baseWork, baseTest, baseSig).id,
+      ComplianceEngine.buildTraceLinkId('HAZ-201', 'srs-201', 'MED-201')
+    );
+    assert.strictEqual(
+      ComplianceEngine.evaluateTraceLink(baseHazard, baseSpec, baseWork, baseTest, baseSig, undefined, {
+        linkId: 'custom-link-id',
+      }).id,
+      'custom-link-id'
+    );
+
+    assert.strictEqual(ComplianceEngine.deriveHazardStatus('VERIFIED'), 'MITIGATED');
+    assert.strictEqual(ComplianceEngine.deriveHazardStatus('SAFETY_VIOLATION'), 'ACTION_REQUIRED');
+    assert.strictEqual(ComplianceEngine.deriveHazardStatus('SIGNATURE_DRIFT'), 'ACTION_REQUIRED');
+    assert.strictEqual(ComplianceEngine.deriveHazardStatus('INCOMPLETE'), 'UNVERIFIED_RISK');
+  });
+
+  test.it('computes and verifies Part 11 HMAC-SHA256 seals and detects tampering', () => {
+    const secret = 'part11-unit-test-secret';
+    assert.throws(() =>
+      ComplianceEngine.computePart11Seal(
+        {
+          hazardKey: 'HAZ-201',
+          specId: 'srs-201',
+          artifactSha256: baseSig.artifactSha256,
+          signedByAccountId: baseSig.signedByAccountId,
+          signedBy: baseSig.signedBy,
+          role: baseSig.role,
+          meaning: baseSig.meaning,
+          signedAt: baseSig.signedAt,
+          authMethod: baseSig.authMethod,
+        },
+        ''
+      )
+    );
+
+    const seal = ComplianceEngine.computePart11Seal(
+      {
+        hazardKey: 'HAZ-201',
+        specId: 'srs-201',
+        artifactSha256: baseSig.artifactSha256,
+        signedByAccountId: baseSig.signedByAccountId,
+        signedBy: baseSig.signedBy,
+        role: baseSig.role,
+        meaning: baseSig.meaning,
+        signedAt: baseSig.signedAt,
+        authMethod: baseSig.authMethod,
+      },
+      secret
+    );
+    const sealedSig = {
+      ...baseSig,
+      signatureAlgorithm: 'HMAC-SHA256-SEAL-V1',
+      signatureSeal: seal,
+    };
+
+    assert.strictEqual(ComplianceEngine.verifyPart11Seal('HAZ-201', 'srs-201', sealedSig, secret), true);
+    assert.strictEqual(ComplianceEngine.verifyPart11Seal('HAZ-201', 'srs-201', sealedSig, 'wrong-secret'), false);
+    assert.strictEqual(
+      ComplianceEngine.verifyPart11Seal('HAZ-201', 'srs-201', { ...sealedSig, meaning: 'Tampered' }, secret),
+      false
+    );
+
+    const verifiedSealed = ComplianceEngine.evaluateTraceLink(
+      baseHazard,
+      baseSpec,
+      baseWork,
+      baseTest,
+      sealedSig,
+      undefined,
+      { part11Secret: secret, requireCryptographicSeal: true }
+    );
+    assert.strictEqual(verifiedSealed.complianceState, 'VERIFIED');
+
+    const tamperedSealed = ComplianceEngine.evaluateTraceLink(
+      baseHazard,
+      baseSpec,
+      baseWork,
+      baseTest,
+      { ...sealedSig, signedBy: 'Spoofed Signer' },
+      undefined,
+      { part11Secret: secret, requireCryptographicSeal: true }
+    );
+    assert.strictEqual(tamperedSealed.complianceState, 'SIGNATURE_DRIFT');
+    assert.match(tamperedSealed.violations[0], /HMAC-SHA256/);
+  });
+
+  test.it('fails closed on empty/uninitialized suites in generateComplianceReport and evaluateIssueReleaseGate', () => {
+    const emptyLive = ComplianceEngine.generateComplianceReport([], 'LIVE');
+    assert.strictEqual(emptyLive.initialized, false);
+    assert.strictEqual(emptyLive.releaseBlocked, true);
+    assert.strictEqual(emptyLive.projectName, 'Atlassian Cloud Medical Project');
+    assert.ok(emptyLive.blockingReasons.length > 0);
+
+    const globalGate = ComplianceEngine.evaluateIssueReleaseGate(undefined, emptyLive);
+    assert.strictEqual(globalGate.result, false);
+    assert.match(globalGate.errorMessage, /uninitialized/i);
+
+    const unrelatedIssueGate = ComplianceEngine.evaluateIssueReleaseGate('DOCS-10', emptyLive);
+    assert.strictEqual(unrelatedIssueGate.result, false);
+
+    const cleanLink = ComplianceEngine.evaluateTraceLink(baseHazard, baseSpec, baseWork, baseTest, baseSig);
+    const initializedBlockedFalse = {
+      ...ComplianceEngine.generateComplianceReport([cleanLink], 'LIVE', 'Test'),
+      initialized: false,
+    };
+    assert.strictEqual(ComplianceEngine.evaluateIssueReleaseGate('MED-201', initializedBlockedFalse).result, false);
+  });
+
+  test.it('prevents specShortKey colon collisions, sibling tainting on shared work.key, and supports computeMultiBlastRadius', () => {
+    const driftedLink = ComplianceEngine.evaluateTraceLink(
+      { ...baseHazard, id: 'haz-c', key: 'HAZ-101', riskClass: 'CLASS_C', severity: 'CATASTROPHIC' },
+      {
+        ...baseSpec,
+        id: 'srs-104',
+        title: 'Overview: Bolus Clamp',
+        sha256Hash: 'b'.repeat(64),
+        isSignatureInvalidated: true,
+      },
+      { ...baseWork, id: 'med-42', key: 'MED-42', status: 'In Progress' },
+      { ...baseTest, id: 'test-88', testKey: 'TEST-88', status: 'UNTESTED' },
+      { ...baseSig, id: 'sig-001', artifactSha256: 'a'.repeat(64), isValid: false }
+    );
+    const cleanSiblingSharingWork = ComplianceEngine.evaluateTraceLink(
+      { ...baseHazard, id: 'haz-202', key: 'HAZ-202', riskClass: 'CLASS_A', mitigationRequirementId: 'srs-202' },
+      { ...baseSpec, id: 'srs-202', pageId: '55202', title: 'SRS-202: Watchdog Display' },
+      { ...baseWork, id: 'med-42', key: 'MED-42', status: 'Done' },
+      { ...baseTest, id: 'test-202', testKey: 'TEST-202', status: 'PASSED' },
+      { ...baseSig, id: 'sig-202' }
+    );
+    const suite = ComplianceEngine.generateComplianceReport([driftedLink, cleanSiblingSharingWork], 'LIVE', 'Shared Work');
+
+    // Colon collision guard: "Overview: Bolus Clamp" must NOT match triggerKey "Overview"
+    const overviewBlast = ComplianceEngine.computeBlastRadius('Overview', suite);
+    assert.deepStrictEqual(overviewBlast.affectedHazardKeys, []);
+
+    // Sibling tainting guard: triggering drifted srs-104 must NOT taint clean srs-202 / HAZ-202 / TEST-202 / sig-202
+    const srs104Blast = ComplianceEngine.computeBlastRadius('srs-104', suite);
+    assert.ok(!srs104Blast.invalidatedTestKeys.includes('TEST-202'));
+    assert.ok(!srs104Blast.invalidatedSignatureIds.includes('sig-202'));
+    assert.ok(
+      srs104Blast.traversalPath.some(
+        (h) => h.edge === 'MITIGATES' && h.to.includes('HAZ-202') && h.effect.includes('Safety mitigation verified')
+      ),
+      'Clean sibling hazard sharing only work.key must remain verified'
+    );
+
+    // Multi-trigger blast radius across [cleanWork, dirtyWork]
+    const cleanStandalone = ComplianceEngine.evaluateTraceLink(
+      { ...baseHazard, id: 'haz-203', key: 'HAZ-203', mitigationRequirementId: 'srs-203' },
+      { ...baseSpec, id: 'srs-203', pageId: '55203', title: 'SRS-203: Standalone' },
+      { ...baseWork, id: 'med-43', key: 'MED-43', status: 'Done' },
+      { ...baseTest, id: 'test-203', testKey: 'TEST-203', status: 'PASSED' },
+      { ...baseSig, id: 'sig-203' }
+    );
+    const multiSuite = ComplianceEngine.generateComplianceReport([cleanStandalone, driftedLink], 'LIVE', 'Multi');
+    const multiBlast = ComplianceEngine.computeMultiBlastRadius(['MED-43', 'MED-42'], multiSuite);
+    assert.ok(multiBlast.affectedHazardKeys.includes('HAZ-203'));
+    assert.ok(multiBlast.affectedHazardKeys.includes('HAZ-101'));
+    assert.ok(multiBlast.blockedWorkItemKeys.includes('MED-42'));
+    assert.ok(!multiBlast.blockedWorkItemKeys.includes('MED-43'));
+  });
+
+  test.it('McpToolService handles 9-field lookup, uninitialized fail-closed, multi-key diffs without contradiction, and LIVE keyword isolation', async () => {
+    const originalGet = SeederService.getActiveComplianceSuite;
     try {
-      const child = spawn(process.execPath, [isolatedEntry], {
-        cwd: tmpSub,
-        env: { PATH: process.env.PATH },
-        stdio: ['pipe', 'pipe', 'pipe'],
+      // 1. Uninitialized suite fails closed
+      SeederService.getActiveComplianceSuite = async () =>
+        ComplianceEngine.generateComplianceReport([], 'LIVE', 'Atlassian Cloud (Uninitialized)', {
+          initialized: false,
+        });
+
+      const uninitVerify = await McpToolService.verifyIecCompliance({ componentName: 'bolus clamp' });
+      assert.strictEqual(uninitVerify.initialized, false);
+      assert.strictEqual(uninitVerify.canShipToClinicalProduction, false);
+      assert.strictEqual(uninitVerify.touchesSafetyCriticalCode, false);
+      assert.match(uninitVerify.activeViolations[0], /uninitialized/i);
+
+      const uninitLineage = await McpToolService.getHazardLineage({ hazardKey: 'HAZ-101' });
+      assert.strictEqual(uninitLineage.found, false);
+      assert.strictEqual(uninitLineage.initialized, false);
+      assert.strictEqual(uninitLineage.datasetMode, 'LIVE');
+
+      // 2. Multi-key diff ['MED-43', 'MED-42'] and LIVE keyword suppression
+      const cleanLink = ComplianceEngine.evaluateTraceLink(
+        { ...baseHazard, id: 'haz-43', key: 'HAZ-102', mitigationRequirementId: 'srs-202' },
+        { ...baseSpec, id: 'srs-202', pageId: '55202', title: 'SRS-202: Clean Module' },
+        { ...baseWork, id: 'med-43', key: 'MED-43', title: 'Clean Driver', status: 'Done' },
+        { ...baseTest, id: 'test-89', testKey: 'TEST-89', status: 'PASSED' },
+        { ...baseSig, id: 'sig-002' }
+      );
+      const blockedLink = ComplianceEngine.evaluateTraceLink(
+        { ...baseHazard, id: 'haz-42', key: 'HAZ-101', riskClass: 'CLASS_C', severity: 'CATASTROPHIC', title: 'Rate Control' },
+        { ...baseSpec, id: 'srs-104', pageId: '55104', title: 'SRS-104: Rate Limiter', contentSnippet: 'Rate limiter' },
+        { ...baseWork, id: 'med-42', key: 'MED-42', title: 'Rate Implementation', status: 'In Progress' },
+        { ...baseTest, id: 'test-88', testKey: 'TEST-88', status: 'UNTESTED' },
+        { ...baseSig, id: 'sig-001' }
+      );
+      const sharedVerifiedLink = ComplianceEngine.evaluateTraceLink(
+        { ...baseHazard, id: 'haz-200', key: 'HAZ-200', mitigationRequirementId: 'srs-200', title: 'Alarm Escalation' },
+        { ...baseSpec, id: 'srs-200', pageId: '55200', title: 'SRS-200: Telemetry Check', contentSnippet: 'Telemetry check' },
+        { ...baseWork, id: 'med-501', key: 'MED-501', title: 'Telemetry Module', status: 'Done' },
+        { ...baseTest, id: 'test-501', testKey: 'TEST-501', status: 'PASSED' },
+        { ...baseSig, id: 'sig-200' }
+      );
+      const sharedBlockedSibling = ComplianceEngine.evaluateTraceLink(
+        { ...baseHazard, id: 'haz-200', key: 'HAZ-200', mitigationRequirementId: 'srs-201', title: 'Alarm Escalation' },
+        { ...baseSpec, id: 'srs-201', pageId: '55201', title: 'SRS-201: Telemetry Redundancy', contentSnippet: 'Redundancy check' },
+        { ...baseWork, id: 'med-502', key: 'MED-502', title: 'Telemetry Redundancy Task', status: 'In Progress' },
+        { ...baseTest, id: 'test-502', testKey: 'TEST-502', status: 'UNTESTED' },
+        { ...baseSig, id: 'sig-201' }
+      );
+      SeederService.getActiveComplianceSuite = async () =>
+        ComplianceEngine.generateComplianceReport(
+          [cleanLink, blockedLink, sharedVerifiedLink, sharedBlockedSibling],
+          'LIVE',
+          'Live Prod'
+        );
+
+      // 9-field lookup check (work.id, test.id, spec.pageId, signature.id)
+      for (const q of ['med-43', 'test-89', '55202', 'sig-002']) {
+        const res = await McpToolService.getHazardLineage({ issueKey: q });
+        assert.strictEqual(res.found, true, `Expected 9-field lookup match for ${q}`);
+        assert.strictEqual(res.datasetMode, 'LIVE');
+        assert.strictEqual(res.initialized, true);
+      }
+
+      // Targeting a VERIFIED link sharing a hazard with an unverified sibling must still block when graphBlastRadius.blockedWorkItems is non-empty
+      const sharedHazardRes = await McpToolService.verifyIecCompliance({
+        prDiff: 'Touches MED-501 only',
       });
-      const exitCode = await new Promise((resolve) => child.on('exit', resolve));
-      assert.notStrictEqual(exitCode, 0);
+      assert.strictEqual(sharedHazardRes.touchesSafetyCriticalCode, true);
+      assert.ok(sharedHazardRes.graphBlastRadius);
+      assert.ok(sharedHazardRes.graphBlastRadius.blockedWorkItems.includes('MED-502'));
+      assert.strictEqual(sharedHazardRes.canShipToClinicalProduction, false);
+      assert.ok(
+        !sharedHazardRes.remediationGuidance.some((g) => /no remediation required|All traversed artifacts are verified/i.test(g)),
+        'Shared hazard sibling gap must never emit clean remediation guidance'
+      );
+
+      // Isolated VERIFIED link remains shippable despite unrelated blocked hazards in the suite
+      const isolatedCleanRes = await McpToolService.verifyIecCompliance({
+        prDiff: 'Touches MED-43 only',
+      });
+      assert.strictEqual(isolatedCleanRes.touchesSafetyCriticalCode, true);
+      assert.deepStrictEqual(isolatedCleanRes.graphBlastRadius.blockedWorkItems, []);
+      assert.strictEqual(isolatedCleanRes.canShipToClinicalProduction, true);
+
+      // Multi-key diff with clean key first, blocked key second
+      const multiDiffRes = await McpToolService.verifyIecCompliance({
+        prDiff: 'Touches MED-43 and MED-42',
+      });
+      assert.strictEqual(multiDiffRes.canShipToClinicalProduction, false);
+      assert.strictEqual(multiDiffRes.touchesSafetyCriticalCode, true);
+      assert.ok(multiDiffRes.affectedHazards.some((h) => h.includes('HAZ-101')));
+      assert.ok(
+        !multiDiffRes.remediationGuidance.some((g) => /no remediation required|All traversed artifacts are verified/i.test(g)),
+        'Must never emit contradictory clean guidance when blocking gaps exist'
+      );
+
+      // LIVE mode suppresses infusion-pump keyword fallbacks (bolus/clamp/motor/droplet/oled) and avoids substring matches ("generated" != "rate")
+      const liveFallbackBlocked = await McpToolService.verifyIecCompliance({
+        prDiff: 'generated bolus clamp motor flow pwm droplet sensor oled battery',
+      });
+      assert.strictEqual(liveFallbackBlocked.touchesSafetyCriticalCode, false);
     } finally {
-      fs.rmSync(tmpRoot, { recursive: true, force: true });
+      SeederService.getActiveComplianceSuite = originalGet;
     }
   });
 
-  test.it('handles initialize, tools/list, lineage, verify, remediate (-32602 & success), and HTTP error propagation over JSON-RPC stdio', async () => {
-    const secret = 'stdio-mcp-test-secret';
-    let mockMode = 'OK';
-    const suite = (await SeederService.seedEnterpriseDemoSuite('acc-mcp', 'SYSTEM_INIT')).summary;
+  test.it('rovoActionHandler rejects unknown actions, empty accountId, and unauthorized Forge user read probes', async () => {
+    const unknownRes = await rovoActionHandler({ actionKey: 'drop-database' });
+    assert.match(unknownRes.error, /Unknown action/);
+    assert.ok(Array.isArray(unknownRes.availableTools));
 
-    const server = http.createServer((req, res) => {
-      const chunks = [];
-      req.on('data', (c) => chunks.push(c));
-      req.on('end', () => {
-        if (mockMode === 'HTTP_500') {
-          res.writeHead(500, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: 'Upstream Forge failure' }));
-          return;
-        }
-        const raw = Buffer.concat(chunks).toString('utf8');
-        if (req.method === 'GET') {
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify(suite));
-          return;
-        }
-        const body = JSON.parse(raw || '{}');
-        if (body.action === 'verify') {
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ canShipToClinicalProduction: false, touchesSafetyCriticalCode: true }));
-          return;
-        }
-        if (body.action === 'remediate') {
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ success: true, summary: { ...suite, releaseBlocked: false } }));
-          return;
-        }
-        res.writeHead(400, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'Unknown action' }));
-      });
-    });
-
-    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
-    const port = server.address().port;
-    const child = spawn(process.execPath, [mcpEntry], {
-      cwd: path.resolve(__dirname, '..'),
-      env: {
-        PATH: process.env.PATH,
-        MEDTRACE_MCP_SECRET: secret,
-        MEDTRACE_WEBTRIGGER_URL: `http://127.0.0.1:${port}`,
+    const kvsMock = createMockForgeKvs();
+    await withForgeMocks(
+      {
+        kvsMock,
+        asUserImpl: () => ({
+          requestJira: async () =>
+            makeJsonResponse(200, {
+              permissions: { BROWSE_PROJECTS: { havePermission: false } },
+            }),
+          requestConfluence: async () => makeJsonResponse(403, {}),
+        }),
       },
-      stdio: ['pipe', 'pipe', 'pipe'],
-    });
+      async () => {
+        const emptyAccountRes = await rovoActionHandler(
+          { issueKey: 'MED-42' },
+          { moduleKey: 'get-hazard-lineage-action', accountId: '   ' }
+        );
+        assert.match(emptyAccountRes.error, /Unauthorized|Empty/i);
 
-    const pending = new Map();
-    let buffer = '';
-    child.stdout.on('data', (chunk) => {
-      buffer += chunk.toString('utf8');
-      const lines = buffer.split('\n');
-      buffer = lines.pop() || '';
-      for (const line of lines) {
-        if (!line.trim()) continue;
-        const msg = JSON.parse(line);
-        const resolver = pending.get(msg.id);
-        if (resolver) {
-          pending.delete(msg.id);
-          resolver(msg);
-        }
+        const forbiddenJiraRes = await rovoActionHandler(
+          { issueKey: 'MED-42' },
+          { moduleKey: 'get-hazard-lineage-action', accountId: 'viewer-no-browse' }
+        );
+        assert.match(forbiddenJiraRes.error, /Forbidden/i);
+
+        const forbiddenConfRes = await rovoActionHandler(
+          { issueKey: 'MED-42' },
+          {
+            moduleKey: 'get-hazard-lineage-action',
+            accountId: 'conf-blocked',
+            extension: { type: 'confluence:globalPage' },
+          }
+        );
+        assert.match(forbiddenConfRes.error, /Forbidden/i);
       }
-    });
+    );
 
-    const rpc = (id, method, params) =>
-      new Promise((resolve, reject) => {
-        const timer = setTimeout(() => reject(new Error(`RPC timeout for ${method}`)), 5000);
-        pending.set(id, (msg) => {
-          clearTimeout(timer);
-          resolve(msg);
-        });
-        child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n');
-      });
-
+    const originalGet = SeederService.getActiveComplianceSuite;
+    SeederService.getActiveComplianceSuite = async () =>
+      ComplianceEngine.generateComplianceReport(
+        [ComplianceEngine.evaluateTraceLink(baseHazard, baseSpec, baseWork, baseTest, baseSig)],
+        'LIVE',
+        'Live Prod'
+      );
     try {
-      const initRes = await rpc(1, 'initialize', {});
-      assert.strictEqual(initRes.result.protocolVersion, '2024-11-05');
-      assert.strictEqual(initRes.result.serverInfo.name, 'medtrace-mcp-server');
-
-      const listRes = await rpc(2, 'tools/list', {});
-      assert.strictEqual(listRes.result.tools.length, 3);
-
-      const missingKeyRes = await rpc(3, 'tools/call', {
-        name: 'medtrace_get_hazard_lineage',
-        arguments: { hazardKey: 'UNKNOWN-999' },
-      });
-      const missingParsed = JSON.parse(missingKeyRes.result.content[0].text);
-      assert.strictEqual(missingParsed.found, false);
-
-      const foundKeyRes = await rpc(4, 'tools/call', {
-        name: 'medtrace_get_hazard_lineage',
-        arguments: { hazardKey: 'HAZ-101' },
-      });
-      const foundParsed = JSON.parse(foundKeyRes.result.content[0].text);
-      assert.strictEqual(foundParsed.found, true);
-      assert.strictEqual(foundParsed.hazard.key, 'HAZ-101');
-
-      const verifyRes = await rpc(5, 'tools/call', {
-        name: 'medtrace_verify_iec_compliance',
-        arguments: { issueKey: 'MED-42' },
-      });
-      assert.strictEqual(JSON.parse(verifyRes.result.content[0].text).canShipToClinicalProduction, false);
-
-      const missingParamRes = await rpc(6, 'tools/call', {
-        name: 'medtrace_remediate_safety_gap',
-        arguments: { simulate: true, attestationConfirmed: true },
-      });
-      assert.strictEqual(missingParamRes.error.code, -32602);
-
-      const remediateRes = await rpc(7, 'tools/call', {
-        name: 'medtrace_remediate_safety_gap',
-        arguments: { hazardKey: 'HAZ-101', simulate: true, attestationConfirmed: true },
-      });
-      assert.strictEqual(JSON.parse(remediateRes.result.content[0].text).remediated, true);
-
-      mockMode = 'HTTP_500';
-      const errRes = await rpc(8, 'tools/call', {
-        name: 'medtrace_get_hazard_lineage',
-        arguments: {},
-      });
-      assert.strictEqual(errRes.result.isError, true);
-      assert.strictEqual(JSON.parse(errRes.result.content[0].text).httpStatus, 500);
+      await withForgeMocks(
+        {
+          kvsMock,
+          asUserImpl: () => ({
+            requestJira: async () =>
+              makeJsonResponse(200, {
+                permissions: { BROWSE_PROJECTS: { havePermission: true } },
+              }),
+            requestConfluence: async () => makeJsonResponse(200, { accountId: 'acc-ok' }),
+          }),
+        },
+        async () => {
+          const okRes = await rovoActionHandler(
+            { issueKey: 'MED-201' },
+            { moduleKey: 'get-hazard-lineage-action', accountId: 'acc-ok' }
+          );
+          assert.strictEqual(okRes.found, true);
+          assert.strictEqual(okRes.hazard.key, 'HAZ-201');
+        }
+      );
     } finally {
-      child.stdin.end();
-      child.kill('SIGKILL');
-      server.closeAllConnections?.();
-      await new Promise((resolve) => server.close(resolve));
+      SeederService.getActiveComplianceSuite = originalGet;
     }
+  });
+});
+
+test.describe('ComplianceEngine - Part 11 Key-Ring Rotation & Fast-Path Gate Compatibility', () => {
+  const sampleHazard = {
+    id: 'haz-rot-1',
+    key: 'HAZ-501',
+    title: 'Key Rotation Hazard',
+    riskClass: 'CLASS_C',
+    severity: 'CRITICAL',
+    probability: 'REMOTE',
+    mitigationRequirementId: 'srs-rot-1',
+    status: 'VERIFIED',
+  };
+
+  const sampleSpec = {
+    id: 'srs-rot-1',
+    title: 'SRS-501: Key Rotation Spec',
+    version: 1,
+    sha256Hash: 'a'.repeat(64),
+    lastSignedHash: 'a'.repeat(64),
+    isSignatureInvalidated: false,
+    contentSnippet: 'Spec content',
+    lastUpdated: '2026-11-15T00:00:00Z',
+  };
+
+  const sampleWork = {
+    id: 'work-rot-1',
+    key: 'MED-501',
+    title: 'Implement Spec',
+    status: 'Done',
+    assignee: 'Eng 1',
+  };
+
+  const sampleTest = {
+    id: 'test-rot-1',
+    testKey: 'TEST-501',
+    status: 'PASSED',
+    evidenceUrl: 'https://ci.example.com/run/501',
+    executionDate: '2026-11-15T00:00:00Z',
+  };
+
+  test.it('rotates MEDTRACE_PART11_SECRET via MEDTRACE_PART11_PREVIOUS_SECRETS without rejecting valid historical seals', () => {
+    const oldSecret = 'retired-part11-secret-v1';
+    const newSecret = 'active-part11-secret-v2';
+
+    const fpOld = ComplianceEngine.computePart11KeyFingerprint(oldSecret);
+    const fpNew = ComplianceEngine.computePart11KeyFingerprint(newSecret);
+    assert.match(fpOld, /^sha256:[0-9a-f]{12}$/);
+    assert.notStrictEqual(fpOld, fpNew);
+    assert.throws(() => ComplianceEngine.computePart11KeyFingerprint('   '), /non-empty/i);
+
+    const sealPayload = {
+      hazardKey: 'HAZ-501',
+      specId: 'srs-rot-1',
+      artifactSha256: sampleSpec.sha256Hash,
+      signedByAccountId: 'acc-rot-1',
+      signedBy: 'Dr. Signer',
+      role: 'Clinical Safety Officer',
+      meaning: 'Approved safety specification',
+      signedAt: '2026-11-15T00:00:00Z',
+      authMethod: 'PART11_ATTESTATION',
+    };
+    const legacySeal = ComplianceEngine.computePart11Seal(sealPayload, oldSecret);
+    const sigObj = {
+      id: 'sig-rot-1',
+      signerName: 'Dr. Signer',
+      signedBy: 'Dr. Signer',
+      signedByAccountId: 'acc-rot-1',
+      role: 'Clinical Safety Officer',
+      signedAt: '2026-11-15T00:00:00Z',
+      signatureHash: sampleSpec.sha256Hash,
+      artifactSha256: sampleSpec.sha256Hash,
+      signatureSeal: legacySeal,
+      signatureAlgorithm: 'HMAC-SHA256-SEAL-V1',
+      authMethod: 'PART11_ATTESTATION',
+      isValid: true,
+      meaning: 'Approved safety specification',
+    };
+
+    // Explicitly fails when only newSecret is provided
+    assert.strictEqual(ComplianceEngine.verifyPart11Seal('HAZ-501', 'srs-rot-1', sigObj, newSecret), false);
+
+    // Passes when previousSecretsCsv includes oldSecret
+    assert.strictEqual(
+      ComplianceEngine.verifyPart11Seal('HAZ-501', 'srs-rot-1', sigObj, newSecret, `other-old, ${oldSecret}`),
+      true
+    );
+
+    // Passes via environment variables when active secret matches primary
+    const prevPrimary = process.env.MEDTRACE_PART11_SECRET;
+    const prevRetired = process.env.MEDTRACE_PART11_PREVIOUS_SECRETS;
+    try {
+      process.env.MEDTRACE_PART11_SECRET = newSecret;
+      process.env.MEDTRACE_PART11_PREVIOUS_SECRETS = oldSecret;
+
+      assert.strictEqual(
+        ComplianceEngine.verifyPart11Seal('HAZ-501', 'srs-rot-1', sigObj, newSecret),
+        true
+      );
+      assert.strictEqual(
+        ComplianceEngine.verifyPart11Seal('HAZ-501', 'srs-rot-1', sigObj, undefined),
+        true
+      );
+      // Explicit mismatched negative test secret must STILL fail closed
+      assert.strictEqual(
+        ComplianceEngine.verifyPart11Seal('HAZ-501', 'srs-rot-1', sigObj, 'wrong-secret'),
+        false
+      );
+    } finally {
+      if (prevPrimary === undefined) delete process.env.MEDTRACE_PART11_SECRET;
+      else process.env.MEDTRACE_PART11_SECRET = prevPrimary;
+      if (prevRetired === undefined) delete process.env.MEDTRACE_PART11_PREVIOUS_SECRETS;
+      else process.env.MEDTRACE_PART11_PREVIOUS_SECRETS = prevRetired;
+    }
+  });
+
+  test.it('evaluateIssueReleaseGate allows fast-path empty issue match only on initialized populated suites', () => {
+    const activeSecret = 'gate-test-secret';
+    const sealPayload = {
+      hazardKey: sampleHazard.key,
+      specId: sampleSpec.id,
+      artifactSha256: sampleSpec.sha256Hash,
+      signedByAccountId: 'acc-gate-1',
+      signedBy: 'Dr. Signer',
+      role: 'Clinical Safety Officer',
+      meaning: 'Approved',
+      signedAt: '2026-11-15T00:00:00Z',
+      authMethod: 'PART11_ATTESTATION',
+    };
+    const seal = ComplianceEngine.computePart11Seal(sealPayload, activeSecret);
+    const verifiedLink = ComplianceEngine.evaluateTraceLink(
+      sampleHazard,
+      sampleSpec,
+      sampleWork,
+      sampleTest,
+      {
+        id: 'sig-rot-1',
+        signerName: 'Dr. Signer',
+        signedBy: 'Dr. Signer',
+        signedByAccountId: 'acc-gate-1',
+        role: 'Clinical Safety Officer',
+        signedAt: '2026-11-15T00:00:00Z',
+        signatureHash: sampleSpec.sha256Hash,
+        artifactSha256: sampleSpec.sha256Hash,
+        signatureSeal: seal,
+        signatureAlgorithm: 'HMAC-SHA256-SEAL-V1',
+        authMethod: 'PART11_ATTESTATION',
+        isValid: true,
+        meaning: 'Approved',
+      },
+      undefined,
+      { requireTestEvidence: true, requireCryptographicSeal: true, part11Secret: activeSecret }
+    );
+    const fullSuite = ComplianceEngine.generateComplianceReport([verifiedLink], 'LIVE', 'Populated Suite');
+    const fastPathUnlinked = { ...fullSuite, traceLinks: [] };
+
+    // Fast-path empty result for an unlinked Jira issue in an initialized suite must PASS
+    const unlinkedOutcome = ComplianceEngine.evaluateIssueReleaseGate('UNLINKED-77', fastPathUnlinked);
+    assert.strictEqual(unlinkedOutcome.result, true);
+
+    // Global gate (no issueKey) with empty traceLinks must still FAIL closed
+    const globalOutcome = ComplianceEngine.evaluateIssueReleaseGate(undefined, fastPathUnlinked);
+    assert.strictEqual(globalOutcome.result, false);
+
+    // Uninitialized suite must ALWAYS fail closed even for an unlinked issueKey
+    const uninitOutcome = ComplianceEngine.evaluateIssueReleaseGate('UNLINKED-77', {
+      ...fastPathUnlinked,
+      initialized: false,
+    });
+    assert.strictEqual(uninitOutcome.result, false);
+  });
+
+  test.it('supports hybrid ECDSA P-256 asymmetric + HMAC-SHA256 non-repudiation signatures and blocks server-only forgery', () => {
+    const serverSecret = 'hybrid-server-secret';
+    const kp1 = ComplianceEngine.generateEcdsaP256KeyPair();
+    const kp2 = ComplianceEngine.generateEcdsaP256KeyPair();
+    assert.match(kp1.keyFingerprint, /^ecdsa-p256:[a-f0-9]{16}$/);
+
+    const challenge = ComplianceEngine.computePart11ClientChallenge({
+      hazardKey: sampleHazard.key,
+      specId: sampleSpec.id,
+      artifactSha256: sampleSpec.sha256Hash,
+      meaning: 'Approved for clinical safety release',
+    });
+    const clientSigIeee = ComplianceEngine.signPart11ClientChallenge(challenge, kp1.privateKeyPkcs8Base64);
+    assert.strictEqual(Buffer.from(clientSigIeee, 'base64').length, 64, 'Expected 64-byte IEEE P1363 ECDSA signature');
+    assert.strictEqual(
+      ComplianceEngine.verifyPart11ClientSignature(challenge, clientSigIeee, kp1.publicKeySpkiBase64),
+      true
+    );
+
+    // Also verify ASN.1 DER encoded ECDSA P-256 signatures work identically
+    const privObj = crypto.createPrivateKey({
+      key: Buffer.from(kp1.privateKeyPkcs8Base64, 'base64'),
+      format: 'der',
+      type: 'pkcs8',
+    });
+    const clientSigDer = crypto.sign('sha256', Buffer.from(challenge, 'utf8'), privObj).toString('base64');
+    assert.strictEqual(
+      ComplianceEngine.verifyPart11ClientSignature(challenge, clientSigDer, kp1.publicKeySpkiBase64),
+      true
+    );
+
+    const hybridPayload = {
+      hazardKey: sampleHazard.key,
+      specId: sampleSpec.id,
+      artifactSha256: sampleSpec.sha256Hash,
+      signedByAccountId: 'acc-ecdsa-1',
+      signedBy: 'Dr. Asymmetric',
+      role: 'Authorized Atlassian User',
+      meaning: 'Approved for clinical safety release',
+      signedAt: '2026-11-15T01:00:00Z',
+      authMethod: 'PART11_ATTESTATION',
+      signatureAlgorithm: 'ECDSA-P256-SHA256+HMAC-SEAL-V1',
+      clientPublicKeySpki: kp1.publicKeySpkiBase64,
+      clientSignatureBase64: clientSigIeee,
+    };
+    const hybridSeal = ComplianceEngine.computePart11Seal(hybridPayload, serverSecret);
+    const hybridSig = {
+      id: 'sig-hybrid-1',
+      signerName: 'Dr. Asymmetric',
+      signedBy: 'Dr. Asymmetric',
+      signedByAccountId: 'acc-ecdsa-1',
+      role: 'Authorized Atlassian User',
+      signedAt: '2026-11-15T01:00:00Z',
+      signatureHash: sampleSpec.sha256Hash,
+      artifactSha256: sampleSpec.sha256Hash,
+      authMethod: 'PART11_ATTESTATION',
+      isValid: true,
+      meaning: 'Approved for clinical safety release',
+      signatureAlgorithm: 'ECDSA-P256-SHA256+HMAC-SEAL-V1',
+      signatureSeal: hybridSeal,
+      clientPublicKeySpki: kp1.publicKeySpkiBase64,
+      clientSignatureBase64: clientSigIeee,
+      clientKeyFingerprint: kp1.keyFingerprint,
+    };
+
+    assert.strictEqual(
+      ComplianceEngine.verifyPart11Seal(sampleHazard.key, sampleSpec.id, hybridSig, serverSecret),
+      true
+    );
+
+    // Server-only compromise test: recomputing HMAC with real serverSecret after changing meaning MUST FAIL
+    const forgedMeaning = 'Tampered server meaning without private key';
+    const serverForgedSeal = ComplianceEngine.computePart11Seal(
+      { ...hybridPayload, meaning: forgedMeaning },
+      serverSecret
+    );
+    assert.strictEqual(
+      ComplianceEngine.verifyPart11Seal(
+        sampleHazard.key,
+        sampleSpec.id,
+        { ...hybridSig, meaning: forgedMeaning, signatureSeal: serverForgedSeal },
+        serverSecret
+      ),
+      false
+    );
+
+    // Swapping client public key or corrupting fingerprint or stripping clientSignatureBase64 MUST FAIL
+    const wrongPubSeal = ComplianceEngine.computePart11Seal(
+      { ...hybridPayload, clientPublicKeySpki: kp2.publicKeySpkiBase64 },
+      serverSecret
+    );
+    assert.strictEqual(
+      ComplianceEngine.verifyPart11Seal(
+        sampleHazard.key,
+        sampleSpec.id,
+        {
+          ...hybridSig,
+          clientPublicKeySpki: kp2.publicKeySpkiBase64,
+          clientKeyFingerprint: kp2.keyFingerprint,
+          signatureSeal: wrongPubSeal,
+        },
+        serverSecret
+      ),
+      false
+    );
+    assert.strictEqual(
+      ComplianceEngine.verifyPart11Seal(
+        sampleHazard.key,
+        sampleSpec.id,
+        { ...hybridSig, clientKeyFingerprint: kp2.keyFingerprint },
+        serverSecret
+      ),
+      false
+    );
+    assert.strictEqual(
+      ComplianceEngine.verifyPart11Seal(
+        sampleHazard.key,
+        sampleSpec.id,
+        { ...hybridSig, clientSignatureBase64: undefined },
+        serverSecret
+      ),
+      false
+    );
+
+    // evaluateTraceLink must fail closed when hybrid client fields are forged even without explicit requireCryptographicSeal
+    const forgedEvaluated = ComplianceEngine.evaluateTraceLink(
+      sampleHazard,
+      sampleSpec,
+      sampleWork,
+      sampleTest,
+      { ...hybridSig, meaning: forgedMeaning, signatureSeal: serverForgedSeal },
+      undefined,
+      { part11Secret: serverSecret }
+    );
+    assert.strictEqual(forgedEvaluated.complianceState, 'SIGNATURE_DRIFT');
   });
 });

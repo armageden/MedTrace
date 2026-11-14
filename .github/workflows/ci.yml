@@ -5,10 +5,18 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   verify:
     name: Typecheck, Build, Test, Docs & Manifest
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -26,53 +34,127 @@ jobs:
         run: npm ci
 
       - name: Install frontend dependencies
-        run: cd static/frontend && npm ci
+        run: npm --prefix static/frontend ci
 
-      - name: Typecheck backend
-        run: npx tsc --noEmit
+      - name: Typecheck backend and frontend
+        run: npm run typecheck
 
-      - name: Typecheck frontend
-        run: cd static/frontend && npx tsc --noEmit
+      - name: Build backend and frontend bundles
+        run: npm run build:all
 
-      - name: Build backend
-        run: npm run build
+      - name: Run full test suites (backend, MCP, scripts, frontend)
+        run: npm run test:all
 
-      - name: Build frontend
-        run: cd static/frontend && npm run build
-
-      - name: Run test suite
-        run: npm test
-
-      - name: Check documentation links and coverage
+      - name: Check documentation links, anchors, and entry coverage
         run: npm run docs:check
 
-      - name: Syntax check MCP stdio server
-        run: node --check mcp-server/index.mjs
-
-      - name: Validate Forge manifest schema
+      - name: Syntax check scripts and MCP stdio server
         run: |
-          node -e "
-            const { validate } = require('@forge/manifest');
-            validate(false, 'manifest.yml')
-              .then((res) => {
-                if (!res.success || (res.errors && res.errors.length > 0)) {
-                  console.error(JSON.stringify(res.errors, null, 2));
-                  process.exit(1);
-                }
-                console.log('Forge manifest schema validation passed.');
-              })
-              .catch((err) => {
-                console.error(err);
-                process.exit(1);
-              });
-          "
+          node --check mcp-server/index.mjs
+          node --check scripts/validate-manifest.mjs
+          node --check scripts/docs-check.mjs
+          bash -n scripts/rotate-mcp-secret.sh
 
+      # Offline @forge/manifest schema, trigger/agent scope, compiled handler export,
+      # and local icon policy validation always run on every PR without credentials.
+      - name: Validate Forge manifest and compiled handler exports (offline)
+        run: npm run lint:manifest
+
+      # Root runs strict --audit-level=high. Frontend checks --audit-level=critical strictly
+      # and inspects --audit-level=high --json so any new high/critical issue fails CI while
+      # accounting for the upstream @forge/bridge -> prosemirror-view advisory (GHSA-c8x8-7fp4-3x9w)
+      # that currently has no non-breaking Atlassian SDK patch.
+      - name: Dependency vulnerability audit (root and frontend)
+        run: |
+          set -euo pipefail
+          echo "== Root npm audit (--audit-level=high) =="
+          npm audit --audit-level=high
+
+          echo "== Frontend npm audit (--audit-level=critical) =="
+          npm --prefix static/frontend audit --audit-level=critical
+
+          echo "== Frontend npm audit (--audit-level=high scoped check) =="
+          npm --prefix static/frontend audit --audit-level=high --json > /tmp/frontend-audit.json || true
+          node -e '
+            const fs = require("node:fs");
+            const report = JSON.parse(fs.readFileSync("/tmp/frontend-audit.json", "utf8"));
+            if (report.error || !report.vulnerabilities || typeof report.vulnerabilities !== "object") {
+              console.error("Frontend npm audit failed to return a valid report:", report.error || report);
+              process.exit(1);
+            }
+            const allowedSdkChain = new Set([
+              "@forge/bridge",
+              "@atlaskit/adf-schema",
+              "@atlaskit/adf-schema-generator",
+              "@atlaskit/editor-prosemirror",
+              "prosemirror-view",
+            ]);
+            const unexpected = [];
+            for (const [pkg, info] of Object.entries(report.vulnerabilities)) {
+              if (info.severity !== "high" && info.severity !== "critical") continue;
+              if (info.severity === "critical" || !allowedSdkChain.has(pkg)) {
+                unexpected.push({ pkg, severity: info.severity, via: info.via });
+                continue;
+              }
+              if (pkg === "prosemirror-view") {
+                const via = Array.isArray(info.via) ? info.via : [];
+                const onlyKnownAdvisory = via.length > 0 && via.every((v) =>
+                  v && typeof v === "object" && String(v.url || "").includes("GHSA-c8x8-7fp4-3x9w")
+                );
+                if (!onlyKnownAdvisory) {
+                  unexpected.push({ pkg, severity: info.severity, via });
+                }
+              }
+            }
+            if (unexpected.length > 0) {
+              console.error("Unexpected high/critical frontend vulnerabilities:", JSON.stringify(unexpected, null, 2));
+              process.exit(1);
+            }
+            console.log("Frontend scoped audit passed (only documented @forge/bridge -> prosemirror-view GHSA-c8x8-7fp4-3x9w advisory present).");
+          '
+          rm -f /tmp/frontend-audit.json
+
+      - name: Secret and env-file hygiene check
+        run: |
+          node -e '
+            const { execFileSync } = require("node:child_process");
+            const fs = require("node:fs");
+            const files = execFileSync("git", ["ls-files", "-z"]).toString("utf8").split("\0").filter(Boolean);
+            const badEnvFiles = files.filter((f) =>
+              (/(^|\/)\.env(\..*)?$/i.test(f) && !/(^|\/)\.env\.example$/i.test(f)) ||
+              /(^|\/)\.forge-env$/i.test(f)
+            );
+            if (badEnvFiles.length > 0) {
+              console.error("Tracked .env / .forge-env files are forbidden:", badEnvFiles);
+              process.exit(1);
+            }
+            const secretPatterns = [
+              { name: "Atlassian API token", re: /ATATT3x[A-Za-z0-9_-]{20,}/ },
+              { name: "AWS Access Key", re: /\bAKIA[0-9A-Z]{16}\b/ },
+              { name: "GitHub Token", re: /\bgh[pousr]_[A-Za-z0-9]{36,}\b/ },
+              { name: "Private Key Header", re: /-----BEGIN (?:RSA |EC |DSA |OPENSSH |)PRIVATE KEY-----/ },
+              { name: "Hardcoded MedTrace hex secret", re: /\bMEDTRACE_(?:MCP|PART11)_SECRET\s*=\s*["\x27]?[a-f0-9]{32,}["\x27]?/i },
+            ];
+            const hits = [];
+            for (const file of files) {
+              if (!fs.existsSync(file) || fs.statSync(file).isDirectory()) continue;
+              const content = fs.readFileSync(file, "utf8");
+              for (const { name, re } of secretPatterns) {
+                if (re.test(content)) hits.push({ file, pattern: name });
+              }
+            }
+            if (hits.length > 0) {
+              console.error("Potential secrets detected in tracked files:", JSON.stringify(hits, null, 2));
+              process.exit(1);
+            }
+            console.log(`Secret and env-file hygiene check passed (${files.length} tracked files scanned).`);
+          '
+
+      # Online Forge CLI lint requires repository secrets (unavailable on external fork PRs).
       - name: Forge CLI lint (when credentials configured)
-        if: env.FORGE_API_TOKEN != '' && env.FORGE_EMAIL != ''
+        if: ${{ secrets.FORGE_API_TOKEN != '' && secrets.FORGE_EMAIL != '' }}
         env:
           FORGE_EMAIL: ${{ secrets.FORGE_EMAIL }}
           FORGE_API_TOKEN: ${{ secrets.FORGE_API_TOKEN }}
           FORGE_DISABLE_ANALYTICS: 'true'
-        run: |
-          npm install -g @forge/cli@15
-          forge lint
+        run: npx --yes @forge/cli@15.0.0 lint
