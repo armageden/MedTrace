@@ -4,6 +4,24 @@
 
 Run this checklist after **any** change to source code, manifest, workflows, tests, or operational scripts. Every tracked entry point matched by `CONFIG.entryGlobs` in `scripts/docs-check.mjs` must remain documented and cross-linked.
 
+## 0. Six-Step Checklist
+
+1. **Inspect the working tree** — `git status`, `git diff`, `git diff --cached` (read-only; never stage or commit).
+2. **Map changed paths to subjects** — use the `Changed File(s) -> Doc(s) to Check / Update` tables below.
+3. **Update affected docs** — reflect new, changed, or removed symbols, paths, configs, and behaviors. Cite only what you have read in source.
+4. **Reverse coverage** — any newly created public entry point (`src/*.ts`, `mcp-server/index.mjs`, `scripts/*`, `static/frontend/src/**/*.ts*`, `tests/*.test.*`, workflows, `manifest.yml`) must be referenced in at least one doc, or `npm run docs:check` fails with `reverse-coverage`.
+5. **ADR logging** — if the change involved a significant architectural, dependency, or storage decision, add `docs/99-design-decisions/NNN-<slug>.md` (Title, Context, Decision, Status, Consequences), number sequentially, never reuse a number, and link it from [docs/99-design-decisions/00-overview.md](../99-design-decisions/00-overview.md).
+6. **Run the validator** — `npm run docs:check` must exit `0` with zero errors and zero warnings. Resolve every error before finishing.
+
+Validator flags (verified against `scripts/docs-check.mjs`):
+
+```bash
+npm run docs:check                              # strict: exit 1 on any error
+node scripts/docs-check.mjs --json              # machine-readable result for CI
+node scripts/docs-check.mjs --warn-only         # advisory (always exit 0) for hooks
+node scripts/docs-check.mjs --strict-listing    # pre-Marketplace placeholder gate
+```
+
 ## 1. Tracked File Inventory & Source-to-Docs Mapping
 
 ### Root Configuration, CI, MCP Server & Scripts
