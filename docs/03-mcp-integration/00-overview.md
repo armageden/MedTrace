@@ -13,7 +13,7 @@ Bridges local AI engineering assistants (via Model Context Protocol JSON-RPC 2.0
 
 | MCP Stdio Tool (`mcp-server/index.mjs`) | Rovo Action (`manifest.yml` / `src/mcp-server.ts`) | Webtrigger Method / Action (`src/index.ts`) | Inputs & Behavior |
 |---|---|---|---|
-| `medtrace_get_hazard_lineage` | `get-hazard-lineage-action` | `GET` (`status` / `get-suite` or omitted) | Optional `hazardKey` or `issueKey`. Queries 5-stage lineage across 9 canonical key fields (`McpToolService.getHazardLineage`). |
+| `medtrace_get_hazard_lineage` | `get-hazard-lineage-action` | `GET` (`status` returns suite summary without `traceLinks`; `get-suite` or omitted returns full suite) | Optional `hazardKey` or `issueKey`. Queries 5-stage lineage across 9 canonical key fields (`McpToolService.getHazardLineage`). |
 | `medtrace_verify_iec_compliance` | `verify-iec-compliance-action` | `POST` (`action: "verify"`) | Optional `prDiff`, `componentName`, `issueKey`. Computes multi-trigger BFS blast radius (`ComplianceEngine.computeMultiBlastRadius`). |
 | `medtrace_remediate_safety_gap` | — | `POST` (`action: "remediate"`) | Required `hazardKey`, `simulate: true`, `attestationConfirmed: true`; optional `meaning`. Demo-only (HTTP `403` in `LIVE` mode). |
 | — | — | `POST` (`action: "verify-release-gate"`) | Optional `issueKey`, `requireLiveMode` (`boolean`). Enforces `ComplianceEngine.evaluateIssueReleaseGate` for CI release gates ([medtrace-release-gate.yml](../../.github/workflows/medtrace-release-gate.yml)). |

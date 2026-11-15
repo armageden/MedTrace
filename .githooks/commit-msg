@@ -1,0 +1,23 @@
+#!/bin/sh
+# Enforced via core.hooksPath=.githooks (set by `npm run prepare` at repo root).
+# Validates the SUBJECT LINE only (first non-comment, non-blank line), so a body
+# paragraph cannot satisfy the pattern on the subject's behalf.
+# Merge and revert subjects are exempt because git generates them without a
+# conventional prefix.
+
+MSG_FILE="$1"
+
+SUBJECT=$(sed -e 's/\r$//' "$MSG_FILE" | grep -v '^#' | grep -v '^[[:space:]]*$' | head -n 1)
+
+case "$SUBJECT" in
+  Merge\ *|Revert\ \"*|revert:*) exit 0 ;;
+esac
+
+PATTERN='^(feat|fix|chore|docs|test|refactor|ci)(\([^)]+\))?: .{10,}$'
+if ! printf '%s\n' "$SUBJECT" | grep -qE "$PATTERN"; then
+  echo "commit-msg: rejected. Use a conventional subject line with a 10+ character description:" >&2
+  echo "  <type>(optional-scope): description" >&2
+  echo "  type: feat|fix|chore|docs|test|refactor|ci" >&2
+  echo "  got:  ${SUBJECT:-<empty>}" >&2
+  exit 1
+fi

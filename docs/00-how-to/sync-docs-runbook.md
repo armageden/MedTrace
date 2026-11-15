@@ -32,6 +32,7 @@ node scripts/docs-check.mjs --strict-listing    # pre-Marketplace placeholder ga
 | `package.json`, `static/frontend/package.json`, `static/frontend/vite.config.ts`, `static/frontend/vitest.config.ts` | [docs/00-how-to/00-overview.md](./00-overview.md), [README.md](../../README.md) |
 | `.github/workflows/ci.yml`, `.github/workflows/medtrace-release-gate.yml` | [docs/00-how-to/03-deploy-production.md](./03-deploy-production.md), [SECURITY.md](../../SECURITY.md) |
 | `scripts/validate-manifest.mjs`, `scripts/docs-check.mjs`, `scripts/rotate-mcp-secret.sh` | [docs/00-how-to/03-deploy-production.md](./03-deploy-production.md), [SECURITY.md](../../SECURITY.md) |
+| `.githooks/commit-msg` | [docs/00-how-to/00-overview.md](./00-overview.md) |
 | `mcp-server/index.mjs` | [docs/03-mcp-integration/live-sync.md](../03-mcp-integration/live-sync.md), [docs/00-how-to/02-add-mcp-tool.md](./02-add-mcp-tool.md), [mcp-server/README.md](../../mcp-server/README.md) |
 
 ### Backend Forge Runtime (`src/*.ts`)
@@ -41,7 +42,7 @@ node scripts/docs-check.mjs --strict-listing    # pre-Marketplace placeholder ga
 | `src/index.ts` | [docs/01-architecture/forge-modules.md](../01-architecture/forge-modules.md), [docs/03-mcp-integration/live-sync.md](../03-mcp-integration/live-sync.md) |
 | `src/runtime.ts` | [docs/01-architecture/forge-modules.md](../01-architecture/forge-modules.md) |
 | `src/compliance-engine.ts`, `src/types.ts` | [docs/02-compliance-engine/evaluation-rules.md](../02-compliance-engine/evaluation-rules.md), [docs/99-design-decisions/004-artifact-node-bfs-blast-radius.md](../99-design-decisions/004-artifact-node-bfs-blast-radius.md) |
-| `src/seeder.ts` | [docs/02-compliance-engine/evaluation-rules.md](../02-compliance-engine/evaluation-rules.md), [docs/99-design-decisions/001-twg-and-kvs-hybrid.md](../99-design-decisions/001-twg-and-kvs-hybrid.md), [docs/99-design-decisions/005-hash-chained-audit-log-and-sharded-kvs.md](../99-design-decisions/005-hash-chained-audit-log-and-sharded-kvs.md) |
+| `src/seeder.ts`, `src/seeder-storage.ts`, `src/seeder-identity.ts` | [docs/02-compliance-engine/evaluation-rules.md](../02-compliance-engine/evaluation-rules.md), [docs/99-design-decisions/001-twg-and-kvs-hybrid.md](../99-design-decisions/001-twg-and-kvs-hybrid.md), [docs/99-design-decisions/005-hash-chained-audit-log-and-sharded-kvs.md](../99-design-decisions/005-hash-chained-audit-log-and-sharded-kvs.md) |
 | `src/ingestion.ts` | [docs/02-compliance-engine/evaluation-rules.md](../02-compliance-engine/evaluation-rules.md), [docs/01-architecture/forge-modules.md](../01-architecture/forge-modules.md), [docs/99-design-decisions/005-hash-chained-audit-log-and-sharded-kvs.md](../99-design-decisions/005-hash-chained-audit-log-and-sharded-kvs.md) |
 | `src/audit-log.ts`, `src/crypto-utils.ts` | [docs/02-compliance-engine/evaluation-rules.md](../02-compliance-engine/evaluation-rules.md), [docs/99-design-decisions/005-hash-chained-audit-log-and-sharded-kvs.md](../99-design-decisions/005-hash-chained-audit-log-and-sharded-kvs.md), [SECURITY.md](../../SECURITY.md) |
 | `src/teamwork-graph.ts` | [docs/99-design-decisions/003-twg-dual-engine-fallback.md](../99-design-decisions/003-twg-dual-engine-fallback.md) |

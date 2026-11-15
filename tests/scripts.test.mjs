@@ -25,6 +25,7 @@ const REPO_ROOT = path.resolve(__dirname, '..');
 const DOCS_CHECK_SCRIPT = path.join(REPO_ROOT, 'scripts', 'docs-check.mjs');
 const ROTATE_SCRIPT = path.join(REPO_ROOT, 'scripts', 'rotate-mcp-secret.sh');
 const VALIDATE_MANIFEST_SCRIPT = path.join(REPO_ROOT, 'scripts', 'validate-manifest.mjs');
+const COMMIT_MSG_HOOK = path.join(REPO_ROOT, '.githooks', 'commit-msg');
 
 /**
  * Runs a command and captures exit code, stdout, and stderr without throwing on non-zero exits.
@@ -1218,5 +1219,54 @@ test('validate-manifest.mjs: passes on built repository and rejects remote icon 
     );
   } finally {
     badIconFixture.cleanup();
+  }
+});
+
+test('.githooks/commit-msg enforces a conventional subject line and exempts git-generated messages', async () => {
+  const fixture = createTempTree('medtrace-commit-msg-', {});
+  const writeMessage = (content) => {
+    const file = path.join(fixture.dir, `msg-${crypto.randomUUID()}`);
+    fs.writeFileSync(file, content, 'utf8');
+    return file;
+  };
+  const hookResult = async (content) =>
+    await runProcess('sh', [COMMIT_MSG_HOOK, writeMessage(content)]);
+
+  try {
+    const accepted = [
+      'feat: add nightly coverage ratchet\n',
+      'fix(seeder): split storage helpers out\n',
+      'ci: tighten coverage gate\n',
+      'docs: expand the runbook\n',
+      '# leading comment line\nchore: ignore workspace artifacts\n\nbody text\n',
+      'feat: handle windows line endings\r\n\r\nbody\r\n',
+      "Merge branch 'feature/x' into 'main'\n",
+      'Merge pull request #12 from org/branch\n',
+      'Revert "feat: add nightly coverage ratchet"\n\nThis reverts commit abc123.\n',
+      'revert: undo the seeder split\n',
+    ];
+    for (const message of accepted) {
+      const res = await hookResult(message);
+      assert.equal(res.code, 0, `expected accept for ${JSON.stringify(message)}: ${res.stderr}`);
+    }
+
+    const rejected = [
+      ['bare non-conventional subject', 'revamped the whole hardness\n'],
+      ['subject shorter than 10 characters', 'docs: fix typo\n'],
+      ['unknown type', 'feature: add something long enough\n'],
+      ['missing description', 'feat: \n'],
+      [
+        'conventional body cannot rescue a bad subject',
+        'revamped the whole hardness\n\nfeat: smuggled in the body\n',
+      ],
+      ['empty message', '\n\n'],
+    ];
+    for (const [label, message] of rejected) {
+      const res = await hookResult(message);
+      assert.equal(res.code, 1, `expected reject for ${label}`);
+      assert.match(res.stderr, /commit-msg: rejected/, `expected rejection notice for ${label}`);
+    }
+  } finally {
+    fixture.cleanup();
   }
 });

@@ -607,17 +607,19 @@ export class LiveIngestionService {
     const { summary: existingSuite, version: existingVersion } = await SeederService.getSuiteWithVersion();
     const existingByWorkKey = new Map<string, TraceLink[]>();
     const existingByWorkAndSpec = new Map<string, TraceLink>();
-    for (const link of existingSuite.traceLinks) {
-      const workKeyUpper = (link.work?.key || '').trim().toUpperCase();
-      if (!workKeyUpper) continue;
-      const arr = existingByWorkKey.get(workKeyUpper) || [];
-      arr.push(link);
-      existingByWorkKey.set(workKeyUpper, arr);
-      if (link.spec?.id) {
-        existingByWorkAndSpec.set(`${workKeyUpper}::${link.spec.id.toLowerCase()}`, link);
-      }
-      if (link.spec?.pageId) {
-        existingByWorkAndSpec.set(`${workKeyUpper}::${link.spec.pageId.toLowerCase()}`, link);
+    if (existingSuite.datasetMode === 'LIVE' && existingSuite.initialized !== false) {
+      for (const link of existingSuite.traceLinks) {
+        const workKeyUpper = (link.work?.key || '').trim().toUpperCase();
+        if (!workKeyUpper) continue;
+        const arr = existingByWorkKey.get(workKeyUpper) || [];
+        arr.push(link);
+        existingByWorkKey.set(workKeyUpper, arr);
+        if (link.spec?.id) {
+          existingByWorkAndSpec.set(`${workKeyUpper}::${link.spec.id.toLowerCase()}`, link);
+        }
+        if (link.spec?.pageId) {
+          existingByWorkAndSpec.set(`${workKeyUpper}::${link.spec.pageId.toLowerCase()}`, link);
+        }
       }
     }
 

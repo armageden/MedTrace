@@ -12,7 +12,31 @@ import {
 } from './crypto-utils';
 import { isForgeRuntime } from './runtime';
 import {
-  AuthorizedUserIdentity,
+  getActiveUserIdentityResolver,
+  getPart11SigningSecret,
+  mapJiraStatusToWorkStatus,
+} from './seeder-identity';
+import {
+  BATCH_CHUNK_SIZE,
+  batchDeleteBestEffort,
+  batchGetStrict,
+  batchSetStrict,
+  buildMetaAndShardItems,
+  buildSafeKvsKey,
+  buildSignedBaselineRecord,
+  cloneJsonValue,
+  getBaselineKeyCandidates,
+  LEGACY_STORAGE_KEY,
+  LINK_KEY_PREFIX,
+  MAX_AUDIT_DETAILS_BYTES,
+  MAX_TRANSACT_BYTES,
+  resolveTraceLinkByHazard,
+  SIGNED_SPEC_PREFIX,
+  SUITE_META_KEY,
+  VLOCK_PREFIX,
+} from './seeder-storage';
+import type { ShardedSuiteMetaV2 } from './seeder-storage';
+import {
   ComplianceSummary,
   ConfluenceSpec,
   IsoHazard,
@@ -24,70 +48,20 @@ import {
   TraceLink,
   VerificationTest,
 } from './types';
+import type { SignedSpecBaseline } from './seeder-storage';
 
-const SUITE_META_KEY = 'medtrace:compliance:suite_meta';
-const LINK_KEY_PREFIX = 'medtrace:compliance:link:';
-const SIGNED_SPEC_PREFIX = 'medtrace:compliance:signed_spec:';
-const VLOCK_PREFIX = 'medtrace:compliance:vlock:';
-const META_REASONS_SHARD_PREFIX = 'medtrace:compliance:meta_reasons:';
-const META_LINKS_SHARD_PREFIX = 'medtrace:compliance:meta_links:';
-const META_INDEX_SHARD_PREFIX = 'medtrace:compliance:meta_index:';
-const LEGACY_STORAGE_KEY = 'medtrace:compliance:active_suite';
-
-const BATCH_CHUNK_SIZE = 25;
-const MAX_TRANSACT_BYTES = Math.floor(3.5 * 1024 * 1024);
-const MAX_KVS_META_BYTES = 128 * 1024;
-const MAX_META_SHARD_BYTES = 96 * 1024;
-const MAX_AUDIT_DETAILS_BYTES = 200 * 1024;
-const MAX_KVS_KEY_LENGTH = 500;
-const FORGE_KVS_KEY_REGEX = /^(?!\s+$)[a-zA-Z0-9:._\s-#]+$/;
+export { SignedSpecBaseline } from './seeder-storage';
+export {
+  forgeUserIdentityResolver,
+  getPart11SigningSecret,
+  mapJiraStatusToWorkStatus,
+  setUserIdentityResolver,
+} from './seeder-identity';
+export type { UserIdentityResolver, UserIdentityResolverContext } from './seeder-identity';
 
 type AuditAppendInput = Parameters<typeof AuditLogService.append>[0];
 type AuditAuthMethod = NonNullable<AuditAppendInput['authMethod']>;
 
-/**
- * Persisted baseline snapshot for an electronically signed Confluence SRS revision.
- * Scoped per `(hazardKey, specId)` when `hazardKey` is supplied to prevent cross-hazard leakage.
- */
-export interface SignedSpecBaseline {
-  hazardKey?: string;
-  specId: string;
-  pageId?: string;
-  sha256Hash: string;
-  signedBy: string;
-  signedByAccountId?: string;
-  signedAt: string;
-  role: string;
-  meaning: string;
-  authMethod?: string;
-  signatureAlgorithm?: 'HMAC-SHA256-SEAL-V1' | 'ECDSA-P256-SHA256+HMAC-SEAL-V1';
-  signatureSeal?: string;
-  sealKeyId?: string;
-  clientPublicKeySpki?: string;
-  clientSignatureBase64?: string;
-  clientKeyFingerprint?: string;
-  invalidatedAt?: string;
-  invalidatedByHash?: string;
-  invalidationReason?: string;
-}
-
-/**
- * Context supplied to a `UserIdentityResolver` when authenticating a Part 11 signatory.
- */
-export interface UserIdentityResolverContext {
-  actorAccountId: string;
-  extensionType?: string;
-  projectKey?: string;
-  spaceKey?: string;
-  authMethod?: AuditAuthMethod;
-}
-
-/**
- * Authoritative identity and role resolver used to bind Part 11 signatures on the server.
- */
-export interface UserIdentityResolver {
-  resolveSignerIdentity(ctx: UserIdentityResolverContext): Promise<AuthorizedUserIdentity>;
-}
 
 /**
  * Optional guard parameters for seeding demo data.
@@ -179,592 +153,6 @@ export interface CommitSuiteMutationParams {
 export interface GetSuiteOptions {
   issueKeyFilter?: string;
   projectKey?: string;
-}
-
-interface ShardedSuiteMetaV2 {
-  projectName: string;
-  datasetMode: 'DEMO' | 'LIVE';
-  initialized: boolean;
-  standards: string[];
-  totalHazards: number;
-  classCCount: number;
-  classBCount: number;
-  classACount: number;
-  verifiedPercentage: number;
-  releaseBlocked: boolean;
-  blockingReasons: string[];
-  blockingReasonShardKeys?: string[];
-  signatureDriftCount: number;
-  lastAuditTimestamp: string;
-  linkKeys: string[];
-  linkKeyShardKeys?: string[];
-  issueKeyIndex?: Record<string, string[]>;
-  issueKeyIndexShardKeys?: string[];
-  storageFormat: 'SHARDED_V2';
-  version: number;
-}
-
-let customUserIdentityResolver: UserIdentityResolver | null = null;
-
-/**
- * Overrides the active `UserIdentityResolver` (pass `null` to restore runtime default).
- */
-export function setUserIdentityResolver(resolver: UserIdentityResolver | null): void {
-  customUserIdentityResolver = resolver;
-}
-
-const localFallbackIdentityResolver: UserIdentityResolver = {
-  async resolveSignerIdentity(ctx: UserIdentityResolverContext): Promise<AuthorizedUserIdentity> {
-    return {
-      accountId: ctx.actorAccountId,
-      displayName: `accountId:${ctx.actorAccountId}`,
-      role: 'Authorized Signatory',
-      authSource: 'LOCAL_TEST',
-    };
-  },
-};
-
-function hasConfluenceEditorPermission(operations: Array<{ operation?: string; targetType?: string }>): {
-  canEdit: boolean;
-  isAdmin: boolean;
-} {
-  let canEdit = false;
-  let isAdmin = false;
-  for (const op of operations) {
-    const operation = String(op?.operation || '').toLowerCase();
-    const targetType = String(op?.targetType || '').toLowerCase();
-    if (operation === 'administer') {
-      canEdit = true;
-      isAdmin = true;
-    } else if (
-      (operation === 'create' || operation === 'update' || operation === 'delete') &&
-      (targetType === 'page' || targetType === 'space' || targetType === 'comment' || targetType === '')
-    ) {
-      canEdit = true;
-    }
-  }
-  return { canEdit, isAdmin };
-}
-
-async function resolveJiraSignerIdentity(ctx: UserIdentityResolverContext): Promise<AuthorizedUserIdentity> {
-  const myselfResp = await api.asUser().requestJira(route`/rest/api/3/myself?expand=groups`);
-  if (myselfResp.status !== 200) {
-    throw new Error(`Forbidden: Failed to verify Jira signatory identity (HTTP ${myselfResp.status}).`);
-  }
-  const userData = (await myselfResp.json()) as {
-    accountId?: string;
-    displayName?: string;
-    emailAddress?: string;
-    active?: boolean;
-  };
-  if (!userData?.accountId || userData.active === false) {
-    throw new Error('Forbidden: Authenticated Jira user account is inactive or missing accountId.');
-  }
-  if (ctx.actorAccountId && userData.accountId !== ctx.actorAccountId) {
-    throw new Error('Forbidden: Signatory accountId does not match authenticated Jira session user.');
-  }
-
-  const permsRoute = ctx.projectKey?.trim()
-    ? route`/rest/api/3/mypermissions?projectKey=${ctx.projectKey.trim()}&permissions=EDIT_ISSUES,ADMINISTER_PROJECTS`
-    : route`/rest/api/3/mypermissions?permissions=EDIT_ISSUES,ADMINISTER_PROJECTS`;
-  const permsResp = await api.asUser().requestJira(permsRoute);
-  if (permsResp.status !== 200) {
-    throw new Error(`Forbidden: Unable to verify Jira permissions for signatory (HTTP ${permsResp.status}).`);
-  }
-  const permsData = (await permsResp.json()) as {
-    permissions?: Record<string, { havePermission?: boolean }>;
-  };
-  const canEdit = Boolean(permsData?.permissions?.EDIT_ISSUES?.havePermission);
-  const isAdmin = Boolean(permsData?.permissions?.ADMINISTER_PROJECTS?.havePermission);
-  if (!canEdit && !isAdmin) {
-    throw new Error('Forbidden: Jira user lacks EDIT_ISSUES or ADMINISTER_PROJECTS permission for Part 11 sign-off.');
-  }
-
-  const displayName = (userData.displayName || userData.accountId).trim();
-  const role = isAdmin
-    ? 'Project Administrator / Compliance Approver'
-    : 'Jira Engineering Approver';
-
-  return {
-    accountId: userData.accountId,
-    displayName: `${displayName} (${userData.accountId})`,
-    role,
-    emailAddress: userData.emailAddress,
-    authSource: 'JIRA_MYSELF',
-  };
-}
-
-async function resolveConfluenceSignerIdentity(ctx: UserIdentityResolverContext): Promise<AuthorizedUserIdentity> {
-  const userResp = await api.asUser().requestConfluence(route`/wiki/rest/api/user/current`);
-  if (userResp.status !== 200) {
-    throw new Error(`Forbidden: Failed to verify Confluence signatory identity (HTTP ${userResp.status}).`);
-  }
-  const userData = (await userResp.json()) as {
-    accountId?: string;
-    displayName?: string;
-    publicName?: string;
-    email?: string;
-  };
-  if (!userData?.accountId) {
-    throw new Error('Forbidden: Authenticated Confluence user response missing accountId.');
-  }
-  if (ctx.actorAccountId && userData.accountId !== ctx.actorAccountId) {
-    throw new Error('Forbidden: Signatory accountId does not match authenticated Confluence session user.');
-  }
-
-  const spacesResp = await api.asUser().requestConfluence(route`/wiki/api/v2/spaces?type=global&limit=25`);
-  if (spacesResp.status !== 200) {
-    throw new Error(`Forbidden: Unable to inspect Confluence global space permissions (HTTP ${spacesResp.status}).`);
-  }
-  const spacesJson = (await spacesResp.json()) as {
-    results?: Array<{ id?: string; key?: string; type?: string }>;
-  };
-  const globalSpaces = (spacesJson?.results || []).filter(
-    (s) => s?.id && (!s.type || s.type.toLowerCase() === 'global') && (!ctx.spaceKey || s.key === ctx.spaceKey)
-  );
-
-  let authorizedEditor = false;
-  let authorizedAdmin = false;
-  for (const space of globalSpaces) {
-    const opsResp = await api
-      .asUser()
-      .requestConfluence(route`/wiki/api/v2/spaces/${space.id!}/operations`);
-    if (opsResp.status !== 200) continue;
-    const opsJson = (await opsResp.json()) as {
-      operations?: Array<{ operation?: string; targetType?: string }>;
-    };
-    const perms = hasConfluenceEditorPermission(opsJson?.operations || []);
-    if (perms.canEdit) {
-      authorizedEditor = true;
-      if (perms.isAdmin) authorizedAdmin = true;
-      break;
-    }
-  }
-
-  if (!authorizedEditor) {
-    throw new Error(
-      'Forbidden: Confluence user lacks edit permission in any global space and cannot perform Part 11 sign-off.'
-    );
-  }
-
-  const displayName = (userData.displayName || userData.publicName || userData.accountId).trim();
-  return {
-    accountId: userData.accountId,
-    displayName: `${displayName} (${userData.accountId})`,
-    role: authorizedAdmin
-      ? 'Confluence Space Administrator / Compliance Approver'
-      : 'Confluence Compliance Approver',
-    emailAddress: userData.email,
-    authSource: 'CONFLUENCE_CURRENT_USER',
-  };
-}
-
-/**
- * Production Forge identity resolver querying `/rest/api/3/myself` + `/mypermissions`
- * or Confluence `/wiki/rest/api/user/current` + global-space `/operations` as the calling user.
- */
-export const forgeUserIdentityResolver: UserIdentityResolver = {
-  async resolveSignerIdentity(ctx: UserIdentityResolverContext): Promise<AuthorizedUserIdentity> {
-    if (ctx.actorAccountId.startsWith('service:')) {
-      throw new Error('Forbidden: Automated service principals cannot execute human Part 11 signatures.');
-    }
-    const ext = (ctx.extensionType || '').toLowerCase();
-    if (ext.startsWith('confluence:')) {
-      return await resolveConfluenceSignerIdentity(ctx);
-    }
-    if (ext.startsWith('jira:')) {
-      return await resolveJiraSignerIdentity(ctx);
-    }
-
-    try {
-      return await resolveJiraSignerIdentity(ctx);
-    } catch (jiraErr) {
-      if (jiraErr instanceof Error && jiraErr.message.includes('lacks EDIT_ISSUES')) {
-        throw jiraErr;
-      }
-      try {
-        return await resolveConfluenceSignerIdentity(ctx);
-      } catch (confErr) {
-        if (confErr instanceof Error && confErr.message.startsWith('Forbidden:')) {
-          throw confErr;
-        }
-        throw jiraErr;
-      }
-    }
-  },
-};
-
-function getActiveUserIdentityResolver(): UserIdentityResolver {
-  if (customUserIdentityResolver) {
-    return customUserIdentityResolver;
-  }
-  return isForgeRuntime() ? forgeUserIdentityResolver : localFallbackIdentityResolver;
-}
-
-/**
- * Retrieves `MEDTRACE_PART11_SECRET` for Part 11 HMAC-SHA256 signing and fails closed if missing.
- */
-export function getPart11SigningSecret(): string {
-  const secret = (process.env.MEDTRACE_PART11_SECRET || '').trim();
-  if (!secret) {
-    throw new Error(
-      '21 CFR Part 11 configuration error: MEDTRACE_PART11_SECRET environment variable must be set before signing.'
-    );
-  }
-  return secret;
-}
-
-/**
- * Maps Jira `fields.status` name and category onto MedTrace's canonical workflow statuses.
- */
-export function mapJiraStatusToWorkStatus(statusField?: {
-  name?: string;
-  statusCategory?: { key?: string; name?: string };
-}): JiraWorkItem['status'] {
-  const rawName = String(statusField?.name || '').trim().toLowerCase();
-  const categoryKey = String(statusField?.statusCategory?.key || '').trim().toLowerCase();
-  const categoryName = String(statusField?.statusCategory?.name || '').trim().toLowerCase();
-
-  if (
-    categoryKey === 'done' ||
-    categoryName === 'done' ||
-    rawName === 'done' ||
-    rawName === 'closed' ||
-    rawName === 'resolved' ||
-    rawName === 'verified' ||
-    rawName === 'completed' ||
-    rawName === 'complete'
-  ) {
-    return 'Done';
-  }
-  if (
-    rawName === 'under review' ||
-    rawName === 'in review' ||
-    rawName === 'code review' ||
-    rawName === 'qa review' ||
-    rawName === 'peer review' ||
-    rawName === 'review'
-  ) {
-    return 'Under Review';
-  }
-  if (
-    categoryKey === 'indeterminate' ||
-    categoryName === 'in progress' ||
-    rawName === 'in progress' ||
-    rawName === 'in development' ||
-    rawName === 'active' ||
-    rawName === 'doing'
-  ) {
-    return 'In Progress';
-  }
-  return 'To Do';
-}
-
-function cloneJsonValue<T>(val: T): T {
-  return JSON.parse(JSON.stringify(val)) as T;
-}
-
-function buildSafeKvsKey(prefix: string, rawSegment: string): string {
-  const remaining = MAX_KVS_KEY_LENGTH - prefix.length;
-  const maxSegLen = Math.max(16, Math.min(180, remaining));
-  const safeSegment = sanitizeKvsKeySegment(rawSegment, maxSegLen);
-  const fullKey = `${prefix}${safeSegment}`;
-  if (fullKey.length > MAX_KVS_KEY_LENGTH || !FORGE_KVS_KEY_REGEX.test(fullKey)) {
-    throw new Error(`Constructed invalid Forge KVS key: ${fullKey}`);
-  }
-  return fullKey;
-}
-
-function chunkArray<T>(items: T[], size: number): T[][] {
-  const chunks: T[][] = [];
-  for (let i = 0; i < items.length; i += size) {
-    chunks.push(items.slice(i, i + size));
-  }
-  return chunks;
-}
-
-function shardStringArray(
-  items: string[],
-  prefix: string,
-  version: number
-): Array<{ key: string; value: string[] }> {
-  const shards: Array<{ key: string; value: string[] }> = [];
-  let current: string[] = [];
-
-  for (const item of items) {
-    const candidate = [...current, item];
-    if (current.length > 0 && measureJsonBytes(candidate) > MAX_META_SHARD_BYTES) {
-      shards.push({ key: `${prefix}v${version}:${shards.length}`, value: current });
-      current = [item];
-    } else {
-      current = candidate;
-    }
-  }
-  if (current.length > 0 || shards.length === 0) {
-    shards.push({ key: `${prefix}v${version}:${shards.length}`, value: current });
-  }
-  return shards;
-}
-
-function shardRecordOfStringArrays(
-  record: Record<string, string[]>,
-  prefix: string,
-  nextVersion: number
-): Array<{ key: string; value: Record<string, string[]> }> {
-  const shards: Array<{ key: string; value: Record<string, string[]> }> = [];
-  let current: Record<string, string[]> = {};
-  let currentCount = 0;
-
-  for (const [entryKey, entryVal] of Object.entries(record)) {
-    const candidate = currentCount === 0 ? { [entryKey]: entryVal } : { ...current, [entryKey]: entryVal };
-    if (currentCount > 0 && measureJsonBytes(candidate) > MAX_META_SHARD_BYTES) {
-      shards.push({
-        key: `${prefix}v${nextVersion}:${shards.length}`,
-        value: current,
-      });
-      current = { [entryKey]: entryVal };
-      currentCount = 1;
-    } else {
-      current[entryKey] = entryVal;
-      currentCount++;
-    }
-  }
-  if (currentCount > 0) {
-    shards.push({
-      key: `${prefix}v${nextVersion}:${shards.length}`,
-      value: current,
-    });
-  }
-  return shards;
-}
-
-function buildMetaAndShardItems(
-  summary: ComplianceSummary,
-  linkKeys: string[],
-  nextVersion: number
-): {
-  meta: ShardedSuiteMetaV2;
-  metaShardItems: Array<{ key: string; value: string[] | Record<string, string[]> }>;
-} {
-  const initialized = summary.initialized ?? (summary.traceLinks.length > 0 || summary.datasetMode === 'DEMO');
-  const issueKeyIndex: Record<string, string[]> = {};
-  summary.traceLinks.forEach((link, idx) => {
-    const kvsKey = linkKeys[idx];
-    if (!kvsKey) return;
-    for (const rawKey of [link.work?.key, link.hazard?.key]) {
-      const normalized = rawKey?.trim().toUpperCase();
-      if (!normalized) continue;
-      const existing = issueKeyIndex[normalized];
-      if (!existing) {
-        issueKeyIndex[normalized] = [kvsKey];
-      } else if (!existing.includes(kvsKey)) {
-        existing.push(kvsKey);
-      }
-    }
-  });
-
-  const meta: ShardedSuiteMetaV2 = {
-    projectName: summary.projectName,
-    datasetMode: summary.datasetMode ?? 'LIVE',
-    initialized,
-    standards: summary.standards,
-    totalHazards: summary.totalHazards,
-    classCCount: summary.classCCount,
-    classBCount: summary.classBCount,
-    classACount: summary.classACount,
-    verifiedPercentage: summary.verifiedPercentage,
-    releaseBlocked: summary.releaseBlocked,
-    blockingReasons: [...summary.blockingReasons],
-    signatureDriftCount: summary.signatureDriftCount,
-    lastAuditTimestamp: summary.lastAuditTimestamp,
-    linkKeys: [...linkKeys],
-    ...(Object.keys(issueKeyIndex).length > 0 ? { issueKeyIndex } : {}),
-    storageFormat: 'SHARDED_V2',
-    version: nextVersion,
-  };
-
-  if (measureJsonBytes(meta) <= MAX_KVS_META_BYTES) {
-    return { meta, metaShardItems: [] };
-  }
-
-  const metaShardItems: Array<{ key: string; value: string[] | Record<string, string[]> }> = [];
-  if (measureJsonBytes(meta.blockingReasons) > 32 * 1024) {
-    const reasonShards = shardStringArray(meta.blockingReasons, META_REASONS_SHARD_PREFIX, nextVersion);
-    meta.blockingReasons = [];
-    meta.blockingReasonShardKeys = reasonShards.map((s) => s.key);
-    metaShardItems.push(...reasonShards);
-  }
-
-  if (measureJsonBytes(meta) > MAX_KVS_META_BYTES && meta.linkKeys.length > 0) {
-    const linkShards = shardStringArray(meta.linkKeys, META_LINKS_SHARD_PREFIX, nextVersion);
-    meta.linkKeys = [];
-    meta.linkKeyShardKeys = linkShards.map((s) => s.key);
-    metaShardItems.push(...linkShards);
-  }
-
-  if (measureJsonBytes(meta) > MAX_KVS_META_BYTES && meta.issueKeyIndex) {
-    const indexShards = shardRecordOfStringArrays(
-      meta.issueKeyIndex,
-      META_INDEX_SHARD_PREFIX,
-      nextVersion
-    );
-    delete meta.issueKeyIndex;
-    meta.issueKeyIndexShardKeys = indexShards.map((s) => s.key);
-    metaShardItems.push(...indexShards);
-  }
-
-  return { meta, metaShardItems };
-}
-
-async function batchGetStrict<T>(keys: string[]): Promise<Map<string, T>> {
-  const result = new Map<string, T>();
-  if (keys.length === 0) return result;
-
-  for (const chunk of chunkArray(keys, BATCH_CHUNK_SIZE)) {
-    const firstPass = await kvs.batchGet<T>(chunk.map((key) => ({ key })));
-    for (const item of firstPass.successfulKeys || []) {
-      result.set(item.key, item.value);
-    }
-
-    const failedOnce = firstPass.failedKeys || [];
-    if (failedOnce.length > 0) {
-      const retryPass = await kvs.batchGet<T>(failedOnce.map((f) => ({ key: f.key })));
-      for (const item of retryPass.successfulKeys || []) {
-        result.set(item.key, item.value);
-      }
-      if (retryPass.failedKeys && retryPass.failedKeys.length > 0) {
-        const details = retryPass.failedKeys.map((f) => `${f.key}:${f.error?.code || 'ERR'}`).join(', ');
-        throw new Error(`Failed to batch-read KVS shards after retry: ${details}`);
-      }
-    }
-  }
-
-  for (const key of keys) {
-    if (!result.has(key)) {
-      throw new Error(`Missing expected KVS shard key during fail-closed suite load: ${key}`);
-    }
-  }
-  return result;
-}
-
-async function batchSetStrict(items: Array<{ key: string; value: unknown }>): Promise<string[]> {
-  const writtenKeys: string[] = [];
-  for (const chunk of chunkArray(items, BATCH_CHUNK_SIZE)) {
-    const res = await kvs.batchSet(chunk);
-    for (const item of chunk) {
-      writtenKeys.push(item.key);
-    }
-    if (res.failedKeys && res.failedKeys.length > 0) {
-      throw new Error(
-        `Failed to persist compliance shards to Forge KVS: ${res.failedKeys.map((f) => `${f.key}:${f.error.code}`).join(', ')}`
-      );
-    }
-  }
-  return writtenKeys;
-}
-
-async function batchDeleteBestEffort(keys: string[]): Promise<void> {
-  if (keys.length === 0) return;
-  for (const chunk of chunkArray(keys, BATCH_CHUNK_SIZE)) {
-    await kvs.batchDelete(chunk.map((key) => ({ key })));
-  }
-}
-
-function getBaselineKeyCandidates(specId: string, pageId?: string, hazardKey?: string): {
-  compositeKeys: string[];
-  unscopedKeys: string[];
-} {
-  const compositeKeys: string[] = [];
-  const unscopedKeys: string[] = [];
-
-  const cleanSpec = specId.trim();
-  const cleanPage = pageId?.trim() || '';
-  const cleanHaz = hazardKey?.trim() || '';
-
-  if (cleanHaz) {
-    if (cleanSpec) {
-      compositeKeys.push(sanitizeKvsKeySegment(`${cleanHaz}--${cleanSpec}`, 180));
-    }
-    if (cleanPage && cleanPage !== cleanSpec) {
-      compositeKeys.push(sanitizeKvsKeySegment(`${cleanHaz}--${cleanPage}`, 180));
-    }
-  }
-  if (cleanSpec) {
-    unscopedKeys.push(sanitizeKvsKeySegment(cleanSpec, 180));
-  }
-  if (cleanPage && cleanPage !== cleanSpec) {
-    unscopedKeys.push(sanitizeKvsKeySegment(cleanPage, 180));
-  }
-
-  return { compositeKeys, unscopedKeys };
-}
-
-function buildSignedBaselineRecord(
-  link: TraceLink,
-  signedBy: string,
-  signedByAccountId: string,
-  signedAt: string,
-  role: string,
-  meaning: string,
-  authMethod: string,
-  signatureSeal: string,
-  hybrid?: {
-    signatureAlgorithm?: 'HMAC-SHA256-SEAL-V1' | 'ECDSA-P256-SHA256+HMAC-SEAL-V1';
-    clientPublicKeySpki?: string;
-    clientSignatureBase64?: string;
-    clientKeyFingerprint?: string;
-  }
-): SignedSpecBaseline {
-  return {
-    hazardKey: link.hazard.key,
-    specId: link.spec.id,
-    pageId: link.spec.pageId,
-    sha256Hash: link.spec.sha256Hash,
-    signedBy,
-    signedByAccountId,
-    signedAt,
-    role,
-    meaning,
-    authMethod,
-    signatureAlgorithm: hybrid?.signatureAlgorithm ?? 'HMAC-SHA256-SEAL-V1',
-    signatureSeal,
-    sealKeyId: 'env:MEDTRACE_PART11_SECRET',
-    ...(hybrid?.clientPublicKeySpki ? { clientPublicKeySpki: hybrid.clientPublicKeySpki } : {}),
-    ...(hybrid?.clientSignatureBase64
-      ? { clientSignatureBase64: hybrid.clientSignatureBase64 }
-      : {}),
-    ...(hybrid?.clientKeyFingerprint
-      ? { clientKeyFingerprint: hybrid.clientKeyFingerprint }
-      : {}),
-  };
-}
-
-function resolveTraceLinkByHazard(
-  traceLinks: TraceLink[],
-  hazardKey: string,
-  specId?: string,
-  workKey?: string,
-  linkId?: string
-): number {
-  const cleanLinkId = linkId?.trim();
-  const cleanHaz = (hazardKey || '').trim().toLowerCase();
-  const cleanSpec = specId?.trim().toLowerCase();
-  const cleanWork = workKey?.trim().toLowerCase();
-  if (cleanLinkId) {
-    return traceLinks.findIndex(
-      (l) =>
-        l.id === cleanLinkId &&
-        (!cleanHaz || l.hazard.key.toLowerCase() === cleanHaz) &&
-        (!cleanSpec || l.spec.id.toLowerCase() === cleanSpec) &&
-        (!cleanWork || l.work.key.toLowerCase() === cleanWork)
-    );
-  }
-  return traceLinks.findIndex(
-    (l) =>
-      l.hazard.key.toLowerCase() === cleanHaz &&
-      (!cleanSpec || l.spec.id.toLowerCase() === cleanSpec) &&
-      (!cleanWork || l.work.key.toLowerCase() === cleanWork)
-  );
 }
 
 /**
@@ -1550,7 +938,12 @@ export class SeederService {
     projectKey?: string
   ): ComplianceSummary {
     const cleanProject = projectKey?.trim().toUpperCase();
-    if (!cleanProject || suite.initialized === false || suite.traceLinks.length === 0) {
+    if (
+      !cleanProject ||
+      suite.initialized === false ||
+      suite.datasetMode === 'DEMO' ||
+      suite.traceLinks.length === 0
+    ) {
       return suite;
     }
 

@@ -176,7 +176,14 @@ export const InspectionDrawer: React.FC<InspectionDrawerProps> = ({
   // Fetch live AGG / Jira REST context dynamically for the selected link's Jira work key
   useEffect(() => {
     const currentLinkId = latestLinkRef.current?.id;
-    if (!currentLinkId || !workKey) {
+    const activeProjectKey = panelContext?.projectKey?.trim().toUpperCase();
+    const isCrossProjectDemoFixture =
+      datasetMode === 'DEMO' &&
+      Boolean(activeProjectKey) &&
+      Boolean(workKey) &&
+      !workKey.toUpperCase().startsWith(`${activeProjectKey}-`);
+
+    if (!currentLinkId || !workKey || isCrossProjectDemoFixture) {
       setGraphContext(null);
       setGraphContextError(null);
       setIsLoadingGraph(false);
@@ -212,7 +219,7 @@ export const InspectionDrawer: React.FC<InspectionDrawerProps> = ({
     return () => {
       cancelled = true;
     };
-  }, [link?.id, workKey]);
+  }, [link?.id, workKey, datasetMode, panelContext?.projectKey]);
 
   // Centralized WCAG dialog Escape stack, focus trap, and focus restoration
   useDialogA11y({

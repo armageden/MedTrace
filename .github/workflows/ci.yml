@@ -45,6 +45,11 @@ jobs:
       - name: Run full test suites (backend, MCP, scripts, frontend)
         run: npm run test:all
 
+      # Coverage ratchet: thresholds sit ~5 points below measured baselines
+      # (backend 88/77/87, frontend 77/70/76). Only tighten, never loosen.
+      - name: Enforce coverage thresholds (backend and frontend)
+        run: npm run test:coverage:all
+
       - name: Check documentation links, anchors, and entry coverage
         run: npm run docs:check
 
@@ -60,59 +65,10 @@ jobs:
       - name: Validate Forge manifest and compiled handler exports (offline)
         run: npm run lint:manifest
 
-      # Root runs strict --audit-level=high. Frontend checks --audit-level=critical strictly
-      # and inspects --audit-level=high --json so any new high/critical issue fails CI while
-      # accounting for the upstream @forge/bridge -> prosemirror-view advisory (GHSA-c8x8-7fp4-3x9w)
-      # that currently has no non-breaking Atlassian SDK patch.
       - name: Dependency vulnerability audit (root and frontend)
         run: |
-          set -euo pipefail
-          echo "== Root npm audit (--audit-level=high) =="
           npm audit --audit-level=high
-
-          echo "== Frontend npm audit (--audit-level=critical) =="
-          npm --prefix static/frontend audit --audit-level=critical
-
-          echo "== Frontend npm audit (--audit-level=high scoped check) =="
-          npm --prefix static/frontend audit --audit-level=high --json > /tmp/frontend-audit.json || true
-          node -e '
-            const fs = require("node:fs");
-            const report = JSON.parse(fs.readFileSync("/tmp/frontend-audit.json", "utf8"));
-            if (report.error || !report.vulnerabilities || typeof report.vulnerabilities !== "object") {
-              console.error("Frontend npm audit failed to return a valid report:", report.error || report);
-              process.exit(1);
-            }
-            const allowedSdkChain = new Set([
-              "@forge/bridge",
-              "@atlaskit/adf-schema",
-              "@atlaskit/adf-schema-generator",
-              "@atlaskit/editor-prosemirror",
-              "prosemirror-view",
-            ]);
-            const unexpected = [];
-            for (const [pkg, info] of Object.entries(report.vulnerabilities)) {
-              if (info.severity !== "high" && info.severity !== "critical") continue;
-              if (info.severity === "critical" || !allowedSdkChain.has(pkg)) {
-                unexpected.push({ pkg, severity: info.severity, via: info.via });
-                continue;
-              }
-              if (pkg === "prosemirror-view") {
-                const via = Array.isArray(info.via) ? info.via : [];
-                const onlyKnownAdvisory = via.length > 0 && via.every((v) =>
-                  v && typeof v === "object" && String(v.url || "").includes("GHSA-c8x8-7fp4-3x9w")
-                );
-                if (!onlyKnownAdvisory) {
-                  unexpected.push({ pkg, severity: info.severity, via });
-                }
-              }
-            }
-            if (unexpected.length > 0) {
-              console.error("Unexpected high/critical frontend vulnerabilities:", JSON.stringify(unexpected, null, 2));
-              process.exit(1);
-            }
-            console.log("Frontend scoped audit passed (only documented @forge/bridge -> prosemirror-view GHSA-c8x8-7fp4-3x9w advisory present).");
-          '
-          rm -f /tmp/frontend-audit.json
+          npm --prefix static/frontend audit --audit-level=high
 
       - name: Secret and env-file hygiene check
         run: |
@@ -152,9 +108,13 @@ jobs:
 
       # Online Forge CLI lint requires repository secrets (unavailable on external fork PRs).
       - name: Forge CLI lint (when credentials configured)
-        if: ${{ secrets.FORGE_API_TOKEN != '' && secrets.FORGE_EMAIL != '' }}
         env:
           FORGE_EMAIL: ${{ secrets.FORGE_EMAIL }}
           FORGE_API_TOKEN: ${{ secrets.FORGE_API_TOKEN }}
           FORGE_DISABLE_ANALYTICS: 'true'
-        run: npx --yes @forge/cli@15.0.0 lint
+        run: |
+          if [ -z "${FORGE_API_TOKEN:-}" ] || [ -z "${FORGE_EMAIL:-}" ]; then
+            echo "Skipping online Forge CLI lint (FORGE_API_TOKEN / FORGE_EMAIL secrets not configured)."
+            exit 0
+          fi
+          npx --yes @forge/cli@15.0.0 lint

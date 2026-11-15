@@ -425,4 +425,57 @@ describe('FE-05: InspectionDrawer form persistence, error surfacing, and §11.20
       expect(signMeaning).toHaveValue('Official Part 11 Meaning');
     });
   });
+
+  it('skips queryGraphContext in DEMO mode when workKey belongs to another project', async () => {
+    const demoMedLink = makeLink({
+      id: 'link-med-42',
+      work: {
+        id: 'work-med-42',
+        key: 'MED-42',
+        title: 'Infusion pump alarm fix',
+        status: 'In Progress',
+        assignee: 'Demo Engineer',
+      },
+    });
+
+    const { rerender } = render(
+      <InspectionDrawer
+        link={demoMedLink}
+        datasetMode="DEMO"
+        panelContext={LIVE_PANEL_CONTEXT}
+        blastRadius={null}
+        onClose={() => {}}
+        onBindIssue={async () => true}
+        onRecordTestResult={async () => true}
+        onSignOffPart11={async () => true}
+        onRemediateDemo={async () => true}
+        isMutating={false}
+      />
+    );
+
+    expect(
+      screen.getByText(/No live AGG\/REST issue context returned for MED-42/i)
+    ).toBeInTheDocument();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(mockedInvokeResolver).not.toHaveBeenCalledWith('queryGraphContext', expect.anything());
+
+    rerender(
+      <InspectionDrawer
+        link={demoMedLink}
+        datasetMode="LIVE"
+        panelContext={LIVE_PANEL_CONTEXT}
+        blastRadius={null}
+        onClose={() => {}}
+        onBindIssue={async () => true}
+        onRecordTestResult={async () => true}
+        onSignOffPart11={async () => true}
+        onRemediateDemo={async () => true}
+        isMutating={false}
+      />
+    );
+
+    await waitFor(() => {
+      expect(mockedInvokeResolver).toHaveBeenCalledWith('queryGraphContext', { issueKey: 'MED-42' });
+    });
+  });
 });

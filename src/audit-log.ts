@@ -11,6 +11,7 @@ import {
 } from './types';
 
 export const AUDIT_GENESIS_HASH = '0'.repeat(64);
+export const MAX_AUDIT_LOG_PAGE_LIMIT = 200;
 export const MAX_AUDIT_ENTRY_BYTES = 220 * 1024;
 export const AUDIT_BATCH_CHUNK_SIZE = 25;
 export const AUDIT_TAIL_PROBE_BATCH_SIZE = 10;
@@ -345,7 +346,7 @@ export class AuditLogService {
     const adapter = getActiveAdapter();
     const safeLimit = Math.max(
       1,
-      Math.min(200, Math.floor(typeof limit === 'number' && Number.isFinite(limit) && limit !== 0 ? limit : 50))
+      Math.min(MAX_AUDIT_LOG_PAGE_LIMIT, Math.floor(typeof limit === 'number' && Number.isFinite(limit) && limit !== 0 ? limit : 50))
     );
 
     if (beforeSeq !== undefined) {

@@ -26,7 +26,20 @@ npm run test:backend    # Backend unit/integration tests (tests/*.test.cjs)
 npm run test:mcp        # Local MCP stdio server tests (tests/mcp-server.test.mjs)
 npm run test:scripts    # Docs-check & rotation script tests (tests/scripts.test.mjs)
 npm run test:frontend   # React Testing Library / Vitest suite (static/frontend)
+npm run test:coverage   # Backend coverage gate (compiled dist/, thresholds ~5 pts below measured)
+npm run test:coverage:all # Backend + frontend coverage gates (CI step in .github/workflows/ci.yml)
 npm run lint:manifest   # Offline @forge/manifest validation + dist/index.js export checks
 npm run docs:check      # Mechanical links, headings, backtick paths, and reverse-coverage check
 node scripts/docs-check.mjs --strict-listing  # Pre-Marketplace gate failing on [CONFIGURE BEFORE LISTING]
 ```
+
+## Commit Message Hook ([.githooks/commit-msg](../../.githooks/commit-msg))
+
+`npm install` / `npm ci` runs the root `prepare` script, which sets `core.hooksPath=.githooks`. The hook validates the **subject line only** (first non-comment, non-blank line) against `^(feat|fix|chore|docs|test|refactor|ci)(\(scope\))?: .{10,}$`. Git-generated `Merge …` and `Revert …` subjects are exempt. A conventional-style line in the commit body cannot satisfy the check on the subject's behalf.
+
+Enable it immediately in an existing clone (the `prepare` hook only applies on the next install):
+
+```bash
+git config core.hooksPath .githooks
+```
+

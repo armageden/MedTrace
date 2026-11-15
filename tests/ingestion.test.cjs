@@ -1719,4 +1719,83 @@ test.describe('Task 1C-Ingestion: Confluence Revert Non-Resurrection & 3-Attempt
       else process.env.MEDTRACE_PART11_SECRET = prevSecret;
     }
   });
+
+  test.it('does not leak prior DEMO hazard keys or PASSED test state into LIVE syncFromAtlassian when Jira shares MED-43 key', async () => {
+    const kvsMock = createFullMockForgeKvs();
+    const mockClient = {
+      requestJira: async (routeObj) => {
+        const r = String(routeObj?.value || routeObj);
+        if (r.includes('/rest/api/3/search/jql')) {
+          return makeJsonResponse(200, {
+            issues: [
+              {
+                id: '4300',
+                key: 'MED-43',
+                fields: {
+                  summary: 'Live Med-43 issue sharing DEMO key',
+                  status: { name: 'In Progress', statusCategory: { name: 'In Progress' } },
+                  labels: ['class-b'],
+                  issuetype: { name: 'Hazard' },
+                  project: { name: 'Live Med Project' },
+                },
+              },
+            ],
+            isLast: true,
+          });
+        }
+        if (r.includes('/remotelink')) {
+          return makeJsonResponse(200, [
+            {
+              application: { type: 'com.atlassian.confluence' },
+              globalId: 'pageId=92043',
+              object: { title: 'SRS-92043', url: 'https://example.atlassian.net/wiki/pages/92043' },
+            },
+          ]);
+        }
+        if (r.includes('/rest/api/3/issue/MED-43')) {
+          return makeJsonResponse(200, {
+            id: '4300',
+            key: 'MED-43',
+            self: 'https://api.atlassian.com/ex/jira/11111111-2222-3333-4444-555555555555/rest/api/3/issue/MED-43',
+            fields: { summary: 'Live Med-43 issue sharing DEMO key', issuelinks: [] },
+          });
+        }
+        return makeJsonResponse(404, {});
+      },
+      requestConfluence: async (routeObj) => {
+        const r = String(routeObj?.value || routeObj);
+        if (r.includes('/wiki/api/v2/pages/92043')) {
+          return makeJsonResponse(200, {
+            id: '92043',
+            title: 'SRS-92043',
+            version: { number: 1 },
+            body: { storage: { value: '<p>Live SRS content</p>' } },
+          });
+        }
+        return makeJsonResponse(200, { results: [] });
+      },
+      requestGraph: async () => makeJsonResponse(200, { data: {} }),
+    };
+
+    await withForgeMocks({ kvsMock, asAppImpl: () => mockClient }, async () => {
+      // Seed DEMO first (in DEMO, MED-43 is mapped to HAZ-102 with PASSED test status)
+      const demoResp = await SeederService.seedEnterpriseDemoSuite('op-demo', 'FORGE_USER_SESSION');
+      const demo = demoResp.summary || (await SeederService.getActiveComplianceSuite());
+      const demoMed43 = demo.traceLinks.find((l) => l.work.key === 'MED-43');
+      assert.strictEqual(demoMed43.hazard.key, 'HAZ-102');
+      assert.strictEqual(demoMed43.test.status, 'PASSED');
+
+      // Live sync for MED-43 must NOT inherit DEMO's HAZ-102 or PASSED test status
+      const syncRes = await LiveIngestionService.syncFromAtlassian(
+        { projectKey: 'MED', maxIssues: 10, callerMode: 'APP' },
+        'op-live'
+      );
+      assert.strictEqual(syncRes.summary.datasetMode, 'LIVE');
+      const liveMed43 = syncRes.summary.traceLinks.find((l) => l.work.key === 'MED-43');
+      assert.ok(liveMed43, 'Expected MED-43 in synced LIVE suite');
+      assert.strictEqual(liveMed43.hazard.key, 'HAZ-MED-43');
+      assert.strictEqual(liveMed43.test.status, 'UNTESTED');
+      assert.strictEqual(liveMed43.signature.isValid, false);
+    });
+  });
 });

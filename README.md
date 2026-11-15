@@ -79,6 +79,8 @@ forge lint
 
 See [docs/00-how-to/03-deploy-production.md](docs/00-how-to/03-deploy-production.md) for setting encrypted `MEDTRACE_MCP_SECRET` and `MEDTRACE_PART11_SECRET`, deploying to Jira and Confluence, binding `medtrace-safety-validator`, configuring [.github/workflows/ci.yml](.github/workflows/ci.yml) and [.github/workflows/medtrace-release-gate.yml](.github/workflows/medtrace-release-gate.yml), and rotating secrets via [scripts/rotate-mcp-secret.sh](scripts/rotate-mcp-secret.sh).
 
+- **First-run setup:** Fresh installations start uninitialized and fail Jira workflow transitions closed (`0 hazards synced`). Open **MedTrace Safety Matrix** and run **Sync Live Atlassian Data** (or load demo data for evaluation) immediately after installing.
+
 ## Documentation Map
 
 - **Guides & Runbooks:** [docs/00-how-to/00-overview.md](docs/00-how-to/00-overview.md) (including [Production Deploy](docs/00-how-to/03-deploy-production.md) & [Docs Sync Runbook](docs/00-how-to/sync-docs-runbook.md))

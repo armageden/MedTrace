@@ -3,12 +3,13 @@ import api, { route } from '@forge/api';
 import crypto from 'crypto';
 import { ComplianceEngine } from './compliance-engine';
 import { SeederService } from './seeder';
+import { resolveTraceLinkByHazard } from './seeder-storage';
 import {
   LiveIngestionService,
   ConfluencePageUpdatedEvent,
   ConfluencePageUpdatedResult,
 } from './ingestion';
-import { AuditLogService } from './audit-log';
+import { AuditLogService, MAX_AUDIT_LOG_PAGE_LIMIT } from './audit-log';
 import { TeamworkGraphService } from './teamwork-graph';
 import { McpToolService, rovoActionHandler } from './mcp-server';
 import { workflowValidatorHandler } from './workflow-validator';
@@ -549,6 +550,58 @@ export async function assertAuthorizedOperator(
   };
 }
 
+async function assertOperatorAuthorizedForTarget(
+  req: ForgeResolverRequest<unknown> | undefined,
+  target: {
+    hazardKey?: string;
+    specId?: string;
+    workKey?: string;
+    linkId?: string;
+    testKey?: string;
+  }
+): Promise<void> {
+  const suite = await SeederService.getActiveComplianceSuite();
+  if (suite.datasetMode === 'DEMO') {
+    return;
+  }
+
+  let idx = -1;
+  if (target.testKey !== undefined || !target.hazardKey) {
+    const cleanLinkId = target.linkId?.trim();
+    const cleanHazard = target.hazardKey?.trim().toLowerCase();
+    const cleanTest = target.testKey?.trim().toLowerCase();
+    idx = cleanLinkId
+      ? suite.traceLinks.findIndex(
+          (l) =>
+            l.id === cleanLinkId &&
+            (!cleanHazard || l.hazard.key.toLowerCase() === cleanHazard) &&
+            (!cleanTest || l.test.testKey.toLowerCase() === cleanTest)
+        )
+      : suite.traceLinks.findIndex(
+          (l) =>
+            (cleanHazard && l.hazard.key.toLowerCase() === cleanHazard) ||
+            (cleanTest && l.test.testKey.toLowerCase() === cleanTest)
+        );
+  } else {
+    idx = resolveTraceLinkByHazard(
+      suite.traceLinks,
+      target.hazardKey,
+      target.specId,
+      target.workKey,
+      target.linkId
+    );
+  }
+
+  if (idx < 0) {
+    return;
+  }
+
+  const boundIssueKey = suite.traceLinks[idx].work?.key?.trim().toUpperCase();
+  if (boundIssueKey && ISSUE_KEY_RE.test(boundIssueKey)) {
+    await assertAuthorizedOperator(req, { issueKey: boundIssueKey });
+  }
+}
+
 function defineTypedResolver<K extends keyof MedTraceResolverMap & string>(
   key: K,
   handler: (
@@ -572,8 +625,8 @@ function defineTypedResolver<K extends keyof MedTraceResolverMap & string>(
 // =========================================================================
 
 defineTypedResolver('getComplianceSuite', async (req) => {
-  await assertAuthorizedReader(req);
-  return SeederService.getActiveComplianceSuite();
+  const caller = await assertAuthorizedReader(req);
+  return SeederService.getActiveComplianceSuite({ projectKey: caller.projectKey });
 });
 
 defineTypedResolver('seedDemoSuite', async (req) => {
@@ -598,6 +651,10 @@ defineTypedResolver('syncLiveSuite', async (req) => {
     projectKey: rawProjectKey,
     spaceId: rawSpaceId,
   });
+  if (isForgeRuntime() && caller.extensionType.startsWith('confluence:') && !rawProjectKey) {
+    await verifyJiraIdentity(caller.accountId);
+    await assertJiraReaderPermissions(caller.projectKey);
+  }
 
   const rawJql =
     typeof req.payload?.jql === 'string' && req.payload.jql.trim().length > 0
@@ -645,6 +702,7 @@ defineTypedResolver('remediateGap', async (req) => {
   if (!hazardKey) {
     throw new Error('Bad Request: hazardKey is required.');
   }
+  await assertOperatorAuthorizedForTarget(req, { hazardKey });
   return SeederService.remediateClassCGap(hazardKey, caller.accountId, {
     simulate: req.payload?.simulate === true,
     attestationConfirmed: req.payload?.attestationConfirmed === true,
@@ -685,6 +743,8 @@ defineTypedResolver('recordTestResult', async (req) => {
     const trimmedUrl = req.payload.evidenceUrl.trim();
     normalizedEvidenceUrl = trimmedUrl === '' ? '' : validateHttpsUrl(trimmedUrl);
   }
+
+  await assertOperatorAuthorizedForTarget(req, { hazardKey, testKey, linkId });
 
   return SeederService.recordTestResult({
     hazardKey,
@@ -751,6 +811,8 @@ defineTypedResolver('signOffPart11', async (req) => {
 
   // Derive signer role server-side rather than trusting client-supplied role/signedBy fields.
   const role = 'Authorized Atlassian User';
+
+  await assertOperatorAuthorizedForTarget(req, { hazardKey, specId, linkId });
 
   return SeederService.signOffPart11({
     hazardKey,
@@ -861,12 +923,12 @@ defineTypedResolver('simulateTransition', async (req) => {
 });
 
 defineTypedResolver('analyzeBlastRadius', async (req) => {
-  await assertAuthorizedReader(req);
+  const caller = await assertAuthorizedReader(req);
   const triggerKey = typeof req.payload?.triggerKey === 'string' ? req.payload.triggerKey.trim() : '';
   if (!triggerKey) {
     throw new Error('Bad Request: triggerKey is required.');
   }
-  const suite = await SeederService.getActiveComplianceSuite();
+  const suite = await SeederService.getActiveComplianceSuite({ projectKey: caller.projectKey });
   return ComplianceEngine.computeBlastRadius(triggerKey, suite);
 });
 
@@ -876,7 +938,7 @@ defineTypedResolver('getAuditLog', async (req) => {
     typeof req.payload?.limit === 'number' && Number.isFinite(req.payload.limit)
       ? Math.floor(req.payload.limit)
       : 50;
-  const limit = Math.max(1, Math.min(500, rawLimit));
+  const limit = Math.max(1, Math.min(MAX_AUDIT_LOG_PAGE_LIMIT, rawLimit));
   const beforeSeq =
     typeof req.payload?.beforeSeq === 'number' &&
     Number.isFinite(req.payload.beforeSeq) &&
@@ -1177,6 +1239,10 @@ export async function mcpWebtriggerHandler(request: WebtriggerRequest): Promise<
       }
 
       const suite = await SeederService.getActiveComplianceSuite();
+      if (cleanQueryAction === 'status') {
+        const { traceLinks: _traceLinks, ...statusSummary } = suite;
+        return jsonResponse(200, statusSummary);
+      }
       return jsonResponse(200, suite);
     }
 

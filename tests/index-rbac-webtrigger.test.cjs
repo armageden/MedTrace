@@ -1503,4 +1503,239 @@ test.describe('SEC-01 & SEC-03: Resolver RBAC, Confused-Deputy, Part 11 & Webtri
       SeederService.getActiveComplianceSuite = origGet;
     }
   });
+
+  // =========================================================================
+  // 6. Cross-Project LIVE Read Isolation, Target-Issue IDOR & Confluence-Only Sync RBAC
+  // =========================================================================
+  test.it('isolates LIVE suites per project while keeping DEMO visible, blocks cross-project write IDOR, and blocks Confluence-only syncLiveSuite without Jira access', async () => {
+    const { ComplianceEngine } = require('../dist/compliance-engine');
+    const {
+      PART11_ATTESTATION_PHRASE,
+    } = require('../dist/types');
+
+    await withForgeMocks(
+      {
+        requestJira: async (url) => {
+          if (url === '/rest/api/3/myself') {
+            return makeHttpResponse(200, { accountId: 'op-acme', active: true });
+          }
+          if (url.startsWith('/rest/api/3/mypermissions')) {
+            return makeHttpResponse(200, {
+              permissions: {
+                BROWSE_PROJECTS: { havePermission: true },
+                EDIT_ISSUES: { havePermission: true },
+                ADMINISTER_PROJECTS: { havePermission: false },
+              },
+            });
+          }
+          return makeHttpResponse(404, {});
+        },
+      },
+      async () => {
+        // DEMO remains visible inside non-MED project ACME
+        await SeederService.seedEnterpriseDemoSuite('op-acme', 'FORGE_USER_SESSION');
+        const demoFromAcme = await resolverHandler(
+          {
+            call: { functionKey: 'getComplianceSuite', payload: {} },
+            context: { extension: { type: 'jira:projectPage', project: { key: 'ACME' } } },
+          },
+          { principal: { accountId: 'op-acme' } }
+        );
+        assert.strictEqual(demoFromAcme.datasetMode, 'DEMO');
+        assert.ok(demoFromAcme.traceLinks.some((l) => l.work.key === 'MED-42'));
+
+        // Switch to LIVE multi-project suite (MED-20 + ACME-1)
+        const baseSpec = {
+          pageId: '777',
+          version: 1,
+          sha256Hash: 'a'.repeat(64),
+          lastSignedHash: 'a'.repeat(64),
+          isSignatureInvalidated: false,
+          contentSnippet: 'Spec text',
+          lastUpdated: '2026-01-01T00:00:00.000Z',
+        };
+        const baseSig = {
+          id: 'sig-base',
+          signedBy: '',
+          signedAt: '',
+          role: 'QA',
+          meaning: '',
+          artifactSha256: '',
+          isValid: false,
+        };
+        const medLink = ComplianceEngine.evaluateTraceLink(
+          {
+            id: 'haz-med',
+            key: 'HAZ-MED',
+            title: 'MED hazard',
+            riskClass: 'CLASS_C',
+            severity: 'CATASTROPHIC',
+            probability: 'REMOTE',
+            mitigationRequirementId: 'SRS-MED',
+            status: 'ACTION_REQUIRED',
+          },
+          { ...baseSpec, id: 'spec-med', title: 'SRS-MED' },
+          { id: 'w-med', key: 'MED-20', title: 'MED issue', status: 'In Progress', assignee: 'Alice' },
+          { id: 't-med', testKey: 'TEST-MED', title: 'MED test', testType: 'Unit', status: 'UNTESTED' },
+          { ...baseSig, id: 'sig-med' },
+          undefined,
+          { linkId: 'link-med', requireTestEvidence: true }
+        );
+        const acmeLink = ComplianceEngine.evaluateTraceLink(
+          {
+            id: 'haz-acme',
+            key: 'HAZ-ACME',
+            title: 'ACME hazard',
+            riskClass: 'CLASS_A',
+            severity: 'MINOR',
+            probability: 'REMOTE',
+            mitigationRequirementId: 'SRS-ACME',
+            status: 'SAFE',
+          },
+          { ...baseSpec, id: 'spec-acme', title: 'SRS-ACME' },
+          { id: 'w-acme', key: 'ACME-1', title: 'ACME issue', status: 'Done', assignee: 'Bob' },
+          {
+            id: 't-acme',
+            testKey: 'TEST-ACME',
+            title: 'ACME test',
+            testType: 'Unit',
+            status: 'PASSED',
+            evidenceUrl: 'https://ci.example.com/acme/1',
+          },
+          { ...baseSig, id: 'sig-acme' },
+          undefined,
+          { linkId: 'link-acme', requireTestEvidence: true }
+        );
+        const multiProjectLive = ComplianceEngine.generateComplianceReport(
+          [medLink, acmeLink],
+          'LIVE',
+          'Multi Project',
+          { initialized: true }
+        );
+        await SeederService.saveComplianceSuite(multiProjectLive, 1);
+
+        // LIVE read resolvers filter strictly to caller's project ACME
+        const acmeSuite = await resolverHandler(
+          {
+            call: { functionKey: 'getComplianceSuite', payload: {} },
+            context: { extension: { type: 'jira:projectPage', project: { key: 'ACME' } } },
+          },
+          { principal: { accountId: 'op-acme' } }
+        );
+        assert.strictEqual(acmeSuite.datasetMode, 'LIVE');
+        assert.deepStrictEqual(
+          acmeSuite.traceLinks.map((l) => l.work.key),
+          ['ACME-1']
+        );
+
+        const acmeBlast = await resolverHandler(
+          {
+            call: { functionKey: 'analyzeBlastRadius', payload: { triggerKey: 'MED-20' } },
+            context: { extension: { type: 'jira:projectPage', project: { key: 'ACME' } } },
+          },
+          { principal: { accountId: 'op-acme' } }
+        );
+        assert.deepStrictEqual(acmeBlast.affectedHazardKeys, []);
+        assert.deepStrictEqual(acmeBlast.blockedWorkItemKeys, []);
+
+        // Cross-project write IDOR blocked before mutating target link bound to MED-20
+        await assert.rejects(
+          () =>
+            resolverHandler(
+              {
+                call: {
+                  functionKey: 'recordTestResult',
+                  payload: {
+                    linkId: 'link-med',
+                    hazardKey: 'HAZ-MED',
+                    testKey: 'TEST-MED',
+                    status: 'PASSED',
+                    evidenceUrl: 'https://ci.example.com/spoof',
+                  },
+                },
+                context: { extension: { type: 'jira:projectPage', project: { key: 'ACME' } } },
+              },
+              { principal: { accountId: 'op-acme' } }
+            ),
+          /Forbidden: Cross-project issue access/
+        );
+
+        await assert.rejects(
+          () =>
+            resolverHandler(
+              {
+                call: {
+                  functionKey: 'signOffPart11',
+                  payload: {
+                    linkId: 'link-med',
+                    hazardKey: 'HAZ-MED',
+                    specId: 'spec-med',
+                    meaning: 'Unauthorized cross-project approval',
+                    attestationConfirmed: true,
+                    passwordConfirmed: true,
+                    attestationPhrase: PART11_ATTESTATION_PHRASE,
+                  },
+                },
+                context: { extension: { type: 'jira:projectPage', project: { key: 'ACME' } } },
+              },
+              { principal: { accountId: 'op-acme' } }
+            ),
+          /Forbidden: Cross-project issue access/
+        );
+
+        const persisted = await SeederService.getActiveComplianceSuite();
+        const untouchedMed = persisted.traceLinks.find((l) => l.id === 'link-med');
+        assert.strictEqual(untouchedMed.test.status, 'UNTESTED');
+        assert.strictEqual(untouchedMed.signature.isValid, false);
+      }
+    );
+
+    // Confluence-only user without Jira access fails cleanly in syncLiveSuite RBAC before syncing
+    const origSync = LiveIngestionService.syncFromAtlassian;
+    let syncInvoked = false;
+    LiveIngestionService.syncFromAtlassian = async () => {
+      syncInvoked = true;
+      throw new Error('Should not reach syncFromAtlassian');
+    };
+    try {
+      await withForgeMocks(
+        {
+          requestConfluence: async (url) => {
+            if (url === '/wiki/rest/api/user/current') {
+              return makeHttpResponse(200, { accountId: 'conf-only', type: 'known' });
+            }
+            if (url.startsWith('/wiki/api/v2/spaces?type=global')) {
+              return makeHttpResponse(200, { results: [{ id: 'sp-1', type: 'global' }] });
+            }
+            if (url === '/wiki/api/v2/spaces/sp-1/operations') {
+              return makeHttpResponse(200, { operations: [{ operation: 'administer', targetType: 'space' }] });
+            }
+            return makeHttpResponse(404, {});
+          },
+          requestJira: async (url) => {
+            if (url === '/rest/api/3/myself') {
+              return makeHttpResponse(403, { message: 'Product access denied' });
+            }
+            return makeHttpResponse(404, {});
+          },
+        },
+        async () => {
+          await assert.rejects(
+            () =>
+              resolverHandler(
+                {
+                  call: { functionKey: 'syncLiveSuite', payload: {} },
+                  context: { extension: { type: 'confluence:globalPage' } },
+                },
+                { principal: { accountId: 'conf-only' } }
+              ),
+            /Forbidden: Jira user session validation failed/
+          );
+          assert.strictEqual(syncInvoked, false);
+        }
+      );
+    } finally {
+      LiveIngestionService.syncFromAtlassian = origSync;
+    }
+  });
 });

@@ -5,6 +5,7 @@
   "license": "Apache-2.0",
   "main": "src/index.ts",
   "scripts": {
+    "prepare": "git config core.hooksPath .githooks || true",
     "pretest": "npm run build",
     "build": "tsc",
     "build:frontend": "npm --prefix static/frontend run build",
@@ -20,6 +21,8 @@
     "test": "node --test \"tests/*.test.*\"",
     "test:frontend": "npm --prefix static/frontend test",
     "test:all": "npm test && npm run test:frontend",
+    "test:coverage": "npm run build && node --test --experimental-test-coverage --test-coverage-lines=83 --test-coverage-branches=72 --test-coverage-functions=81 \"tests/*.test.*\"",
+    "test:coverage:all": "npm run test:coverage && npm --prefix static/frontend run test:coverage",
     "docs:check": "node scripts/docs-check.mjs",
     "mcp": "node mcp-server/index.mjs"
   },
