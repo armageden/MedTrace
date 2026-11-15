@@ -68,6 +68,20 @@ type AuditAuthMethod = NonNullable<AuditAppendInput['authMethod']>;
  */
 export interface SeedDemoOptions {
   confirmOverwriteLive?: boolean;
+  authorizedSiteAdmin?: boolean;
+}
+
+export const LIVE_BACKUP_KEY = 'medtrace:compliance:live_backup_latest';
+
+export interface LiveSuiteBackupSnapshot {
+  backedUpAt: string;
+  backedUpBy: string;
+  authMethod: AuditAuthMethod;
+  previousVersion: number;
+  previousAuditHeadHash?: string;
+  previousTraceLinkCount: number;
+  truncated: boolean;
+  summary: ComplianceSummary;
 }
 
 /**
@@ -163,6 +177,7 @@ export class SeederService {
   private static inMemorySuite: ComplianceSummary | null = null;
   private static inMemoryVersion = 0;
   private static inMemorySignedSpecs = new Map<string, SignedSpecBaseline>();
+  private static inMemoryLiveBackup: LiveSuiteBackupSnapshot | null = null;
   private static lastKvsShardState: {
     version: number;
     entriesByLogicalId: Map<string, { key: string; contentHash: string }>;
@@ -175,7 +190,19 @@ export class SeederService {
     this.inMemorySuite = null;
     this.inMemoryVersion = 0;
     this.inMemorySignedSpecs.clear();
+    this.inMemoryLiveBackup = null;
     this.lastKvsShardState = null;
+  }
+
+  /**
+   * Returns the latest pre-overwrite LIVE suite backup snapshot if one was recorded.
+   */
+  static async getLastLiveBackup(): Promise<LiveSuiteBackupSnapshot | null> {
+    if (!isForgeRuntime()) {
+      return this.inMemoryLiveBackup ? cloneJsonValue(this.inMemoryLiveBackup) : null;
+    }
+    const stored = await kvs.get<LiveSuiteBackupSnapshot>(LIVE_BACKUP_KEY);
+    return stored ?? null;
   }
 
   private static computeTraceLinkHash(link: TraceLink): string {
@@ -675,7 +702,8 @@ export class SeederService {
 
   /**
    * 1-Click Demo Dataset Seeder (explicitly labeled DEMO mode; refuses to overwrite an initialized LIVE suite
-   * unless `options.confirmOverwriteLive === true`).
+   * unless both `options.confirmOverwriteLive === true` and `options.authorizedSiteAdmin === true` are supplied,
+   * and writes an auditable pre-overwrite recovery backup before replacing LIVE state).
    */
   static async seedEnterpriseDemoSuite(
     actorAccountId = 'system:demo-seeder',
@@ -683,10 +711,46 @@ export class SeederService {
     options?: SeedDemoOptions
   ): Promise<SeedDemoResponse> {
     const existing = await this.getSuiteWithVersion();
-    if (existing.summary.datasetMode === 'LIVE' && existing.summary.initialized && !options?.confirmOverwriteLive) {
-      throw new Error(
-        'Refusing to overwrite initialized LIVE compliance suite with DEMO data without explicit confirmOverwriteLive: true.'
-      );
+    const isInitializedLive =
+      existing.summary.datasetMode === 'LIVE' && existing.summary.initialized;
+    if (isInitializedLive) {
+      if (!options?.confirmOverwriteLive) {
+        throw new Error(
+          'Refusing to overwrite initialized LIVE compliance suite with DEMO data without explicit confirmOverwriteLive: true.'
+        );
+      }
+      if (!options?.authorizedSiteAdmin) {
+        throw new Error(
+          'Forbidden: Overwriting an initialized LIVE compliance suite requires Jira site administrator (ADMINISTER) authorization.'
+        );
+      }
+
+      const fullBackup: LiveSuiteBackupSnapshot = {
+        backedUpAt: new Date().toISOString(),
+        backedUpBy: actorAccountId,
+        authMethod,
+        previousVersion: existing.version ?? 0,
+        previousAuditHeadHash: existing.summary.auditHeadHash,
+        previousTraceLinkCount: existing.summary.traceLinks.length,
+        truncated: false,
+        summary: cloneJsonValue(existing.summary),
+      };
+      let backupToPersist = fullBackup;
+      if (measureJsonBytes(fullBackup) > MAX_AUDIT_DETAILS_BYTES) {
+        backupToPersist = {
+          ...fullBackup,
+          truncated: true,
+          summary: {
+            ...cloneJsonValue(existing.summary),
+            traceLinks: [],
+          },
+        };
+      }
+      if (!isForgeRuntime()) {
+        this.inMemoryLiveBackup = backupToPersist;
+      } else {
+        await kvs.set(LIVE_BACKUP_KEY, backupToPersist);
+      }
     }
 
     const confluenceEnabled = await this.checkConfluenceAvailable();
@@ -915,6 +979,15 @@ export class SeederService {
         details: {
           hazardCount: traceLinks.length,
           confluenceEnabled,
+          ...(isInitializedLive
+            ? {
+                overwroteInitializedLive: true,
+                previousMode: 'LIVE',
+                previousTraceLinkCount: existing.summary.traceLinks.length,
+                previousAuditHeadHash: existing.summary.auditHeadHash ?? null,
+                liveBackupKey: LIVE_BACKUP_KEY,
+              }
+            : {}),
         },
         authMethod,
       },

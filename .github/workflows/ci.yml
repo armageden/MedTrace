@@ -118,3 +118,25 @@ jobs:
             exit 0
           fi
           npx --yes @forge/cli@15.0.0 lint
+
+  # Production release gate on PRs and pushes to main. Skipped (not failed) when the
+  # repository secrets are unavailable, e.g. on fork PRs.
+  release-gate-preflight:
+    name: Detect release gate secrets
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    outputs:
+      enabled: ${{ steps.check.outputs.enabled }}
+    steps:
+      - id: check
+        env:
+          MEDTRACE_SECRET: ${{ secrets.MEDTRACE_MCP_SECRET }}
+          WEBTRIGGER_URL: ${{ secrets.MEDTRACE_WEBTRIGGER_URL }}
+        run: echo "enabled=$([ -n "$MEDTRACE_SECRET" ] && [ -n "$WEBTRIGGER_URL" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+
+  release-gate:
+    name: IEC 62304 release gate
+    needs: release-gate-preflight
+    if: needs.release-gate-preflight.outputs.enabled == 'true'
+    uses: ./.github/workflows/medtrace-release-gate.yml
+    secrets: inherit

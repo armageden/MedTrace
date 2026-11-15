@@ -1,14 +1,14 @@
 # Architecture
 
-MedTrace runs inside the Atlassian Forge `nodejs22.x` runtime with zero outbound network egress. Every compliance evaluation, sharded storage mutation, hash-chained audit entry, Jira/Confluence API call, and Rovo/MCP interaction executes inside Atlassian Cloud using Forge KVS (`@forge/kvs`), Jira/Confluence REST APIs, and the Atlassian Graph Gateway (AGG).
+MedTrace runs inside the Atlassian Forge `nodejs22.x` runtime without any `permissions.external.fetch.backend` manifest entries. Compliance evaluations, sharded storage mutations, hash-chained audit entries, Jira/Confluence API calls, and Rovo actions execute inside Atlassian Cloud using Forge KVS (`@forge/kvs`), Jira/Confluence REST APIs, and the Atlassian Graph Gateway (AGG), while authenticated MCP/CI webtrigger responses return requested compliance results to their configured callers.
 
 ## Files
 
-- [forge-modules.md](./forge-modules.md) — Forge manifest (`manifest.yml`) Jira & Confluence module parity, local icon resources, RBAC (`assertAuthorizedReader` / `assertAuthorizedOperator` / `assertRovoUserReadAccess`), 12 typed `MedTraceResolverMap` resolvers, `ECO-624` workflow validator boundary, `mcp-webtrigger-fn` hardening, Custom UI architecture, and zero-egress permissions.
+- [forge-modules.md](./forge-modules.md) — Forge manifest (`manifest.yml`) Jira & Confluence module parity, local icon resources, RBAC (`assertAuthorizedReader` / `assertAuthorizedOperator` / `assertRovoUserReadAccess`), 12 typed `MedTraceResolverMap` resolvers, `ECO-624` workflow validator boundary, `mcp-webtrigger-fn` hardening, Custom UI architecture, and no-external-fetch / MCP data-return boundaries.
 
 ## Configuration & Assets
 
-- [manifest.yml](../../manifest.yml) — Forge `nodejs22.x` modules, `main` (`static/frontend/dist`) and `icons` (`static/icons`) resources, `storage:app` & read scopes, CSP `styles: ['unsafe-inline']`, and zero external egress.
+- [manifest.yml](../../manifest.yml) — Forge `nodejs22.x` modules, `main` (`static/frontend/dist`) and `icons` (`static/icons`) resources, `storage:app` & read scopes, CSP `styles: ['unsafe-inline']`, and no `permissions.external.fetch.backend` entries.
 - [package.json](../../package.json), [static/frontend/package.json](../../static/frontend/package.json), & [static/frontend/vite.config.ts](../../static/frontend/vite.config.ts) — Backend and frontend npm build (`manualChunks` vendor splitting for `vendor-xyflow`, `vendor-react`, `vendor-forge`), typecheck, manifest validation, docs check, and test scripts.
 - [static/icons/medtrace-icon.svg](../../static/icons/medtrace-icon.svg) — Bundled SVG module icon referenced as `resource:icons;medtrace-icon.svg` by `jira:issuePanel` and `confluence:contentBylineItem`.
 

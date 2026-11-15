@@ -656,7 +656,8 @@ test.describe('McpToolService & rovoActionHandler Integration Tests', () => {
     assert.strictEqual(cleanRes.touchesSafetyCriticalCode, true);
     assert.strictEqual(cleanRes.canShipToClinicalProduction, true);
     assert.deepStrictEqual(cleanRes.graphBlastRadius.blockedWorkItems, []);
-    assert.match(cleanRes.remediationGuidance[0], /All regulatory gates satisfied/);
+    assert.match(cleanRes.remediationGuidance[0], /Configured traceability checks passed/);
+    assert.doesNotMatch(cleanRes.remediationGuidance[0], /Authorized for 510\(k\)|CERTIFIED_READY/i);
 
     // LIVE mode disables DEMO infusion-pump fallbacks ('oled', 'droplet') and avoids substring matches ('generated' != 'rate')
     const liveKeywordBlocked = await McpToolService.verifyIecCompliance({
@@ -710,7 +711,7 @@ test.describe('McpToolService & rovoActionHandler Integration Tests', () => {
 
     const kvsMock = createLocalMockKvs();
 
-    // Forge runtime read-probe rejections (empty accountId, Jira 403/inactive, Confluence 403/mismatch)
+    // Forge runtime read-probe rejections (missing accountId, empty accountId, missing BROWSE_PROJECTS, Jira 403/inactive, Confluence missing/mismatch)
     await withForgeMocks(
       {
         kvsMock,
@@ -724,6 +725,12 @@ test.describe('McpToolService & rovoActionHandler Integration Tests', () => {
         }),
       },
       async () => {
+        const missingAcct = await rovoActionHandler(
+          { issueKey: 'MED-42' },
+          { moduleKey: 'get-hazard-lineage-action' }
+        );
+        assert.match(missingAcct.error, /Unauthorized/i);
+
         const emptyAcct = await rovoActionHandler(
           { issueKey: 'MED-42' },
           { moduleKey: 'get-hazard-lineage-action', accountId: '   ' }
@@ -743,6 +750,124 @@ test.describe('McpToolService & rovoActionHandler Integration Tests', () => {
         assert.match(mismatchConf.error, /Forbidden/i);
       }
     );
+
+    // Fail closed when Jira mypermissions omits BROWSE_PROJECTS or Confluence omits accountId
+    await withForgeMocks(
+      {
+        kvsMock,
+        asUserImpl: () => ({
+          requestJira: async () => makeJsonResponse(200, { active: true, permissions: {} }),
+          requestConfluence: async () => makeJsonResponse(200, {}),
+        }),
+      },
+      async () => {
+        const missingBrowseField = await rovoActionHandler(
+          { issueKey: 'MED-42' },
+          { moduleKey: 'get-hazard-lineage-action', accountId: 'acc-incomplete', extension: { type: 'jira:projectPage' } }
+        );
+        assert.match(missingBrowseField.error, /Forbidden/i);
+
+        const missingConfAccount = await rovoActionHandler(
+          { issueKey: 'MED-42' },
+          { moduleKey: 'get-hazard-lineage-action', accountId: 'acc-incomplete', extension: { type: 'confluence:globalPage' } }
+        );
+        assert.match(missingConfAccount.error, /Forbidden/i);
+      }
+    );
+
+    // Target-scoped & cross-project isolation in multi-project LIVE suite
+    const alphaLink = {
+      ...verifiedLink,
+      id: 'link-alpha-1',
+      hazard: { ...verifiedLink.hazard, id: 'haz-alpha-1', key: 'HAZ-102' },
+      work: { ...verifiedLink.work, id: 'alpha-1', key: 'ALPHA-1' },
+      test: { ...verifiedLink.test, id: 'test-alpha-1', testKey: 'TEST-101' },
+    };
+    const betaLink = {
+      ...blockedLink,
+      id: 'link-beta-9',
+      hazard: { ...blockedLink.hazard, id: 'haz-beta-9', key: 'HAZ-202' },
+      work: { ...blockedLink.work, id: 'beta-9', key: 'BETA-9' },
+      test: { ...blockedLink.test, id: 'test-beta-9', testKey: 'TEST-202' },
+    };
+    const multiProjectSuite = ComplianceEngine.generateComplianceReport([alphaLink, betaLink], 'LIVE', 'Multi Project');
+    SeederService.getActiveComplianceSuite = async () => multiProjectSuite;
+
+    await withForgeMocks(
+      {
+        kvsMock,
+        asUserImpl: () => ({
+          requestJira: async (url) => {
+            const urlStr = url && typeof url.value_ === 'string' ? url.value_ : String(url || '');
+            if (urlStr.includes('BETA')) {
+              return makeJsonResponse(200, {
+                active: true,
+                permissions: { BROWSE_PROJECTS: { havePermission: false } },
+              });
+            }
+            return makeJsonResponse(200, {
+              active: true,
+              permissions: { BROWSE_PROJECTS: { havePermission: true } },
+            });
+          },
+          requestConfluence: async () => makeJsonResponse(200, { accountId: 'acc-alpha' }),
+        }),
+      },
+      async () => {
+        const crossProjIssue = await rovoActionHandler(
+          { issueKey: 'BETA-9' },
+          { moduleKey: 'get-hazard-lineage-action', accountId: 'acc-alpha', extension: { type: 'jira:projectPage' } }
+        );
+        assert.match(crossProjIssue.error, /Forbidden/i);
+
+        const crossProjHazard = await rovoActionHandler(
+          { hazardKey: 'HAZ-202' },
+          { moduleKey: 'get-hazard-lineage-action', accountId: 'acc-alpha', extension: { type: 'jira:projectPage' } }
+        );
+        assert.match(crossProjHazard.error, /Forbidden/i);
+
+        const crossProjDiff = await rovoActionHandler(
+          { prDiff: 'diff touching BETA-9' },
+          { moduleKey: 'verify-iec-compliance-action', accountId: 'acc-alpha', extension: { type: 'jira:projectPage' } }
+        );
+        assert.match(crossProjDiff.error, /Forbidden/i);
+
+        const ctxMismatch = await rovoActionHandler(
+          { issueKey: 'BETA-9' },
+          {
+            moduleKey: 'get-hazard-lineage-action',
+            accountId: 'acc-alpha',
+            extension: { type: 'jira:projectPage', project: { key: 'ALPHA' } },
+          }
+        );
+        assert.match(ctxMismatch.error, /Forbidden/i);
+
+        const scopedSummary = await rovoActionHandler(
+          {},
+          { moduleKey: 'get-hazard-lineage-action', accountId: 'acc-alpha', extension: { type: 'jira:projectPage' } }
+        );
+        assert.strictEqual(scopedSummary.traceLinks.length, 1);
+        assert.strictEqual(scopedSummary.traceLinks[0].workKey, 'ALPHA-1');
+
+        const scopedMiss = await rovoActionHandler(
+          { issueKey: 'ALPHA-999' },
+          { moduleKey: 'get-hazard-lineage-action', accountId: 'acc-alpha', extension: { type: 'jira:projectPage' } }
+        );
+        assert.strictEqual(scopedMiss.found, false);
+        assert.strictEqual(scopedMiss.availableKeys.length, 1);
+        assert.strictEqual(scopedMiss.availableKeys[0].workKey, 'ALPHA-1');
+
+        const cleanVerify = await rovoActionHandler(
+          { issueKey: 'ALPHA-1' },
+          { moduleKey: 'verify-iec-compliance-action', accountId: 'acc-alpha', extension: { type: 'jira:projectPage' } }
+        );
+        assert.strictEqual(cleanVerify.canShipToClinicalProduction, true);
+        assert.strictEqual(cleanVerify.classCSummary.status, 'CONFIGURED_CHECKS_PASSED');
+        assert.doesNotMatch(cleanVerify.remediationGuidance.join(' '), /Authorized for 510\(k\)|CERTIFIED_READY/i);
+      }
+    );
+
+    SeederService.getActiveComplianceSuite = async () => liveSuite;
 
     // Authorized Jira and Confluence callers succeed inside Forge runtime
     await withForgeMocks(

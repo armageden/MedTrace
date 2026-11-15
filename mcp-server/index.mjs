@@ -536,100 +536,21 @@ export async function handleMessage(message) {
     const args = params.arguments ?? {};
 
     if (name === 'medtrace_get_hazard_lineage') {
-      const cloudResp = await signedCloudRequest('GET');
+      const cloudResp = await signedCloudRequest('POST', {
+        action: 'get-hazard-lineage',
+        hazardKey: typeof args.hazardKey === 'string' ? args.hazardKey : undefined,
+        issueKey: typeof args.issueKey === 'string' ? args.issueKey : undefined,
+      });
       if (!cloudResp.ok) {
         return cloudErrorResult(id, cloudResp);
       }
-      if (!Array.isArray(cloudResp.data?.traceLinks)) {
+      if (!isPlainObject(cloudResp.data)) {
         return cloudErrorResult(id, {
           ok: false,
           status: 502,
-          error: 'Malformed compliance suite response from Forge webtrigger: missing traceLinks array.',
+          error: 'Malformed hazard lineage response from Forge webtrigger.',
           data: cloudResp.data,
         });
-      }
-
-      const liveSuite = cloudResp.data;
-      const initialized = liveSuite.initialized ?? liveSuite.traceLinks.length > 0;
-      const source = formatSourceLabel(liveSuite.datasetMode);
-      const rawHazardKey = typeof args.hazardKey === 'string' ? args.hazardKey : '';
-      const rawIssueKey = typeof args.issueKey === 'string' ? args.issueKey : '';
-      const lookupKey = (rawHazardKey || rawIssueKey).trim();
-
-      if (lookupKey) {
-        const lower = lookupKey.toLowerCase();
-        const matches = liveSuite.traceLinks.filter((l) =>
-          collectCanonicalLinkKeys(l).includes(lower)
-        );
-
-        if (matches.length === 0) {
-          return {
-            jsonrpc: '2.0',
-            id,
-            result: {
-              content: [
-                {
-                  type: 'text',
-                  text: JSON.stringify(
-                    {
-                      source,
-                      datasetMode: liveSuite.datasetMode,
-                      initialized,
-                      found: false,
-                      queriedKey: lookupKey,
-                      message: `No trace link found for key "${lookupKey}" in project "${liveSuite.projectName || 'MedTrace'}".`,
-                      availableKeys: liveSuite.traceLinks.map((l) => ({
-                        hazardKey: l.hazard?.key,
-                        workKey: l.work?.key,
-                        specId: l.spec?.id,
-                        testKey: l.test?.testKey,
-                      })),
-                    },
-                    null,
-                    2
-                  ),
-                },
-              ],
-            },
-          };
-        }
-
-        const match = matches[0];
-        return {
-          jsonrpc: '2.0',
-          id,
-          result: {
-            content: [
-              {
-                type: 'text',
-                text: JSON.stringify(
-                  {
-                    source,
-                    datasetMode: liveSuite.datasetMode,
-                    initialized,
-                    found: true,
-                    traceLink: match,
-                    ...(matches.length > 1 ? { matchedLinks: matches } : {}),
-                    regulatoryStatus: match.complianceState,
-                    riskClass: match.hazard?.riskClass,
-                    safetyRequirement: match.spec?.title,
-                    testStatus: match.test?.status,
-                    part11Valid: match.signature?.isValid,
-                    hazard: match.hazard,
-                    spec: match.spec,
-                    work: match.work,
-                    test: match.test,
-                    signature: match.signature,
-                    complianceState: match.complianceState,
-                    violations: match.violations,
-                  },
-                  null,
-                  2
-                ),
-              },
-            ],
-          },
-        };
       }
 
       return {
@@ -640,16 +561,7 @@ export async function handleMessage(message) {
             {
               type: 'text',
               text: JSON.stringify(
-                {
-                  source,
-                  projectName: liveSuite.projectName,
-                  datasetMode: liveSuite.datasetMode,
-                  initialized,
-                  totalHazards: liveSuite.totalHazards,
-                  verifiedPercentage: `${liveSuite.verifiedPercentage ?? 0}%`,
-                  releaseBlocked: liveSuite.releaseBlocked,
-                  traceLinks: liveSuite.traceLinks,
-                },
+                { source: formatSourceLabel(cloudResp.data.datasetMode), ...cloudResp.data },
                 null,
                 2
               ),

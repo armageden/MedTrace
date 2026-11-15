@@ -2,7 +2,7 @@
 
 Standalone Model Context Protocol (`stdio`, JSON-RPC 2.0) bridge (`SERVER_VERSION = 1.1.0`) implemented in [mcp-server/index.mjs](./index.mjs), connecting local AI coding assistants (Cursor, Claude Desktop, VS Code, Windsurf) to your Atlassian Forge MedTrace instance.
 
-Zero compliance state is persisted locally. All tool calls are signed with HMAC-SHA256, guarded by single-use nonces, and forwarded over `https://` to the deployed `mcp-sync-webtrigger` (`mcpWebtriggerHandler` in [src/index.ts](../src/index.ts)).
+The bridge does not intentionally persist compliance state locally. Tool requests are signed with HMAC-SHA256 and forwarded over `https://` to the deployed webtrigger; requested response data is returned to the MCP host, which may retain it under its own policies.
 
 ## Configuration & `.env` Rules
 
@@ -66,8 +66,8 @@ MEDTRACE_MCP_SECRET="<your-32-byte-hex-secret>"
 
 ## Available Tools
 
-- `medtrace_get_hazard_lineage`: Queries the 5-stage trace chain (`HAZARD <-> SPEC <-> WORK <-> TEST <-> SIGNATURE`) via `GET`. Matches case-insensitively across 9 canonical identifiers (`hazard.key`, `hazard.id`, `work.key`, `work.id`, `test.testKey`, `test.id`, `spec.id`, `spec.pageId`, `signature.id`).
-  - Returns the unified schema (`found: true`, `datasetMode`, `initialized`, `traceLink`, `regulatoryStatus`, `riskClass`, `safetyRequirement`, `testStatus`, `part11Valid`, and artifact fields) when matched, or `{ found: false, availableKeys }` when no link matches (including uninitialized empty `LIVE` suites).
+- `medtrace_get_hazard_lineage`: Queries the 5-stage trace chain (`HAZARD <-> SPEC <-> WORK <-> TEST <-> SIGNATURE`) via signed `POST action: "get-hazard-lineage"`. Matches case-insensitively across 9 canonical identifiers (`hazard.key`, `hazard.id`, `work.key`, `work.id`, `test.testKey`, `test.id`, `spec.id`, `spec.pageId`, `signature.id`).
+  - Returns one matching lineage, available keys for a miss, or a reduced project summary with selected status fields and projected link identifiers. It does not return the raw full suite.
   - Sets `source` dynamically via `formatSourceLabel`:
     - `'Atlassian Cloud (Forge KVS - LIVE)'` (`LIVE`)
     - `'Atlassian Forge KVS (DEMO Dataset)'` (`DEMO`)
@@ -89,6 +89,6 @@ Tool-level webtrigger errors return MCP `{ isError: true }` with structured JSON
 ## Security Posture (HMAC-SHA256 & Forge KVS Honesty)
 
 - Every request signs `${timestamp}.${nonce}.${rawBody}` with HMAC-SHA256 (`x-medtrace-timestamp` in epoch milliseconds bounded to `-300s`..`+30s`, `x-medtrace-nonce` claimed atomically in `@forge/kvs` with a 7-minute TTL, verified with `crypto.timingSafeEqual`).
-- **Platform Boundary Disclosure:** `@forge/kvs` provides tenant-scoped storage with conditional `FAIL_IF_EXISTS` write protection and a SHA-256 hash-chained audit ledger (`tamper-evident`), **not** hardware WORM or HSM key storage. Electronic signatures under 21 CFR Part 11 combine Atlassian Cloud session identity with server-side `HMAC-SHA256-SEAL-V1` record sealing (`MEDTRACE_PART11_SECRET`, supporting zero-downtime rotation via `MEDTRACE_PART11_PREVIOUS_SECRETS`) and optional hybrid asymmetric `ECDSA-P256-SHA256+HMAC-SEAL-V1` client `prime256v1` non-repudiation signatures; customers must still maintain organizational SOPs and external archival exports for full regulatory compliance.
+- **Platform and Attestation Disclosure:** `@forge/kvs` is not hardware WORM or HSM storage. MedTrace records tamper-evident electronic attestations; it does not claim 21 CFR Part 11 conformance. `passwordConfirmed: true` is an attestation field, not password re-authentication. MCP responses may transmit requested tenant data to the configured client.
 
 For full webtrigger and Rovo integration contracts, see [docs/03-mcp-integration/live-sync.md](../docs/03-mcp-integration/live-sync.md).

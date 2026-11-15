@@ -1,23 +1,22 @@
 # Codegeist 2026 — Devpost Video Script + Judge Rehearsal Plan
 
-**Video constraints (official rules):** under 5 minutes; judges are not required to watch beyond
-3 minutes; must show the app functioning on the platform it was built for; public YouTube link.
-**Target runtime: 2:55 (< 3:00 total).** Everything decisive happens in the first 100 seconds.
+**Video constraints (official rules):** less than 5 minutes; show the app functioning on its
+platform; public YouTube link.
+**Target runtime: 3:10.** Record the real app; this script is not evidence of a completed demo.
 
 ---
 
-## Part 1 — Video script (2:55)
+## Part 1 — Video script (3:10)
 
 ### Shot 1 — Hook (0:00–0:25) · screen: dark slide with the 5-stage chain
-> **NARRATION:** "In medical device software, changing one firmware constant — a bolus clamp
-> limit from 5.0 to 5.5 milliliters per hour — doesn't just change code. It invalidates a
-> clinical hazard assessment, a safety requirement, a verification test, and an FDA
-> electronic signature. IEC 62304 and ISO 14971 demand you prove that chain is intact.
-> MedTrace does it live, inside Jira and Confluence — with zero data leaving Atlassian."
+> **NARRATION:** "A change to a medical-device software requirement can affect linked hazards,
+> work items, test evidence, and approval records. MedTrace makes those trace relationships
+> inspectable in Jira and Confluence. It supports traceability work; it does not determine
+> regulatory compliance."
 
 **On screen:** `HAZARD ↔ SRS ↔ JIRA TASK ↔ TEST ↔ SIGNATURE`, then the 5.0 → 5.5 diff.
 
-### Shot 2 — Cold-start discipline & the demo dataset (0:25–0:40) · screen: Jira → MedTrace project page
+### Shot 2 — Cold-start discipline & the demo dataset (0:25–0:48) · screen: Jira → MedTrace project page
 **Action:** Start on empty uninitialized `LIVE` state (`0 hazards`), then click `⚡ Seed Demo Suite`. Wait for the graph to populate.
 > **NARRATION:** "On an empty tenant, MedTrace starts fail-closed in clean LIVE mode — never
 > auto-seeding fake data. One click seeds a modeled Smart Infusion Pump project, stamped
@@ -25,10 +24,10 @@
 
 **Overlay:** `DEMO DATASET — MODELED RECORDS` badge zoom.
 
-### Shot 3 — The hero: blast radius (0:40–1:15) · screen: the live graph
+### Shot 3 — The hero: blast radius (0:48–1:20) · screen: the live graph
 **Action:** Point at HAZ-101 (Class C, flashing red TEST-88, invalidated signature).
 Click `⚡ Blast Radius`.
-> **NARRATION:** "SRS-104 drifted after its Part 11 signature. One click runs a breadth-first
+> **NARRATION:** "SRS-104 drifted after its approval attestation. One click runs a breadth-first
 > traversal over the trace graph and returns the blast radius: the signature invalidated,
 > the Class C hazard compromised, Jira task MED-42 locked, TEST-88 invalidated — plus the
 > exact re-audit checklist. When two requirements share one hazard, the traversal crosses
@@ -38,35 +37,34 @@ Click `⚡ Blast Radius`.
 test name `propagates blast radius transitively to sibling links sharing the hazard node` with
 `✔ passing`.
 
-### Shot 4 — The gate (1:15–1:35) · screen: same page
+### Shot 4 — The gate (1:20–1:48) · screen: same page
 **Action:** Click `🔒 Test Human Gate` → blocked modal appears.
-> **NARRATION:** "This button invokes the exact validator handler that Jira runs natively —
-> attach it to a workflow transition with site-admin, and Jira itself blocks the move to Done
-> while a Class C hazard is unverified. It fails closed. Because Jira Automation can bypass
-> transition validators — platform issue ECO-624 — an identical gate also runs in CI via an
-> authenticated webtrigger; a working GitHub Actions workflow ships in the repo."
+> **NARRATION:** "This in-app simulation invokes the validator handler. A Jira admin can attach
+> the Forge validator to a workflow transition. Atlassian issue ECO-624 reports an Automation
+> case but is marked Invalid; it does not establish REST behavior. Our separate release-gate
+> workflow also checks the production suite on pull requests and pushes to main."
 
-### Shot 5 — Remediation (1:35–1:55) · screen: inspection drawer
-**Action:** Click `⚡ Remediate Class C Gap & Re-certify Gate`. Graph turns green, banner flips
-to `✅ AUDIT READY`.
-> **NARRATION:** "Verification runs, the electronic signature re-certifies against the current
-> SHA-256, and the release gate unlocks. If the backend were unreachable, you'd get an honest
-> error banner — never a simulated success."
+### Shot 5 — Demo remediation (1:48–2:02) · screen: inspection drawer
+**Action:** Run the demo-only remediation simulation. Show the modeled graph state change and
+the updated demo result.
+> **NARRATION:** "This is a demo-only state change: it does not run hardware tests or certify a
+> real device. In LIVE mode, remediation is blocked. Backend failures remain visible as errors."
 
-### Shot 6 — The evidence dossier (1:55–2:15) · screen: FDA export modal
+### Shot 6 — The evidence export (2:02–2:12) · screen: export modal
 **Action:** Click `📄 Audit Evidence Export` → print preview.
-> **NARRATION:** "Everything compiles into a printable 510(k) eSTAR-aligned traceability
-> dossier — hashes, signatures, test evidence."
+> **NARRATION:** "The printable traceability report includes linked artifacts and hashes. It is
+> not an official FDA eSTAR form or 510(k) submission."
 
-### Shot 7 — Architecture + zero egress (2:15–2:40) · screen: architecture slide
-> **NARRATION:** "No external fetch permissions exist in the manifest — clinical data never
-> leaves the Atlassian tenant. Mutations arrive through a webtrigger protected by HMAC-SHA256,
-> a 300-second replay window, and persistent nonce consumption in Forge storage — replay
-> returns 409, and our test suite proves it live: 200, 409, 409, 200."
+### Shot 7 — Architecture and data flow (2:12–2:44) · screen: architecture slide
+> **NARRATION:** "The Forge manifest grants no external backend-fetch permission. Separately,
+> authenticated MCP and CI requests receive their requested results, so data can leave the
+> tenant through those configured clients. The webtrigger uses HMAC-SHA256 and single-use
+> nonces. Automated tests cover replay handling; show production results only if freshly verified."
 
-**Overlay:** `200 → 409 → 409 → 200` terminal capture (run README's 4-step curl script).
+**Overlay:** Show a redacted live terminal capture only after rerunning the check against the
+deployment being demonstrated. Never include secrets or signed URLs.
 
-### Shot 8 — Rovo agent + MCP (2:35–2:50) · screen: Rovo chat + Cursor
+### Shot 8 — Rovo agent + MCP (2:44–3:00) · screen: Rovo chat + Cursor
 **Action (pre-record the Cursor half separately — Rovo latency often exceeds 20s):**
 In Rovo: "Audit current sprint for IEC 62304 compliance gaps" → agent calls
 `verify-iec-compliance-action`, returns affected hazards + remediation (tighten to the agent's
@@ -75,7 +73,7 @@ answer card). In Cursor (pre-recorded 5s capture): paste the bolus-rate diff que
 > **NARRATION:** "The MedTrace Auditor Rovo agent runs the same deterministic engine from chat.
 > And through our MCP server, Cursor asks the live compliance graph before you commit."
 
-### Shot 9 — Close (2:50–2:55)
+### Shot 9 — Close (3:00–3:10)
 > **NARRATION:** "MedTrace — deterministic regulatory blast radius, a hard safety gate, and
 > cryptographic evidence, inside the tools engineers already use. Built on Atlassian Forge."
 > **Overlay:** repo URL.
@@ -87,8 +85,8 @@ answer card). In Cursor (pre-recorded 5s capture): paste the bolus-rate diff que
 
 ## Part 2 — 60-minute judge dress rehearsal (do this the day before recording)
 
-1. **Fresh tenant install (10 min):** create a brand-new dev tenant → install via the shared
-   installation link (and `forge install --product confluence` for full Confluence parity) →
+1. **Fresh tenant install (10 min):** create a brand-new dev tenant → install using the
+   judge-facing Jira and Confluence links →
    confirm the app appears in a project sidebar. Anything that breaks here is what judges hit first.
 2. **Zero-state path (10 min):** open MedTrace on the empty tenant → confirm clean uninitialized
    `LIVE` state (no fabricated auto-seeded data, no console errors), then click `⚡ Seed Demo Suite`
@@ -98,8 +96,8 @@ answer card). In Cursor (pre-recorded 5s capture): paste the bolus-rate diff que
    (a) native Jira workflow dropdown block on `MED-42` (confirm standalone `WorkflowValidator` log),
    (b) real Confluence SRS page edit (`avi:confluence:updated:page` drift trigger), and
    (c) Rovo prompt triggering `[MedTrace RovoAction] Dispatching action:` in `forge logs -e production`.
-4. **Crypto replay proof (5 min):** run the README's 4-step curl script against the live
-   webtrigger; expect 200/409/409/200.
+4. **Crypto replay proof (5 min):** run the README's replay check against the target deployment;
+   retain dated, redacted output if you intend to claim a live result.
 5. **CI gate (5 min):** POST `verify-release-gate` → expect HTTP 403 with the HAZ-101 violation.
 6. **Rovo live test (10 min):** in the tenant's Rovo chat, ask:
    - "Audit current sprint for IEC 62304 compliance gaps" → expect affected hazards + guidance.
@@ -117,9 +115,10 @@ answer card). In Cursor (pre-recorded 5s capture): paste the bolus-rate diff que
 ## Part 3 — Submission checklist (final 48 hours)
 
 - [ ] Deploy HEAD (`npm run build:all && forge deploy -e production`) and verify production logs are free of old `KEY_NOT_FOUND` batch-read errors.
-- [ ] Replace `<VIDEO_ID>` in `devpost_submission_draft.md` with the public YouTube URL.
-- [ ] Confirm the judges' installation link (note: `&product=jira` installs Jira; run `--product confluence` too if evaluating Confluence byline/trigger on a fresh tenant).
-- [ ] Put the rotated webtrigger secret + judge credentials into the Devpost private fields (and update `Marketplace Listing` status accurately).
+- [ ] Record the functioning app, publish it on YouTube, and add the public URL to `devpost_submission_draft.md` (currently a blocker, no URL present).
+- [ ] Confirm separate judge-facing Jira and Confluence install links on a fresh site.
+- [ ] Provide least-privilege demo accounts; never submit a production webtrigger secret.
+- [ ] Verify the Marketplace status and include a review-ticket/listing link only if one exists.
 - [ ] Re-run `npm run test:all` and verify the final test count (`191`: 158 backend + 33 frontend) matches the draft.
 - [ ] Screenshot the `DEMO DATASET` badge + honest error banner — use one in the Devpost gallery
       images; it's a differentiator, not a weakness.

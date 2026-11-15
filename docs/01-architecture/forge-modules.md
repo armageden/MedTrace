@@ -14,7 +14,7 @@ MedTrace is defined in [manifest.yml](../../manifest.yml) under the Forge `nodej
 | `confluence:contentBylineItem` | `medtrace-confluence-byline` | `resolver-fn` / `main` / `resource:icons;medtrace-icon.svg` | Content byline item on Confluence pages surfacing linked requirements, signature validity, and drift state. |
 | `confluence:globalPage` | `medtrace-confluence-page` | `resolver-fn` / `main` | Confluence global compliance workspace (route: `medtrace-compliance`) matching Jira workspace parity. |
 | `trigger` | `medtrace-confluence-page-updated` | `confluence-trigger-fn` | Listens to `avi:confluence:updated:page`; runs `LiveIngestionService.handleConfluencePageUpdated()` with CAS retry for real-time spec drift detection. |
-| `rovo:agent` | `medtrace-regulatory-auditor` | — | MedTrace Regulatory Auditor agent for IEC 62304 / ISO 14971 compliance review. |
+| `rovo:agent` | `medtrace-regulatory-auditor` | — | MedTrace Auditor assistive traceability agent for IEC 62304 / ISO 14971 inspection (not a regulatory authority). |
 | `action` | `get-hazard-lineage-action` | `rovo-action-fn` | Returns the 5-stage trace chain for a `hazardKey` or `issueKey` (or `found: false` when absent). |
 | `action` | `verify-iec-compliance-action` | `rovo-action-fn` | Analyzes a diff or description for affected suite tokens/safety keywords and computes blast radius. |
 | `rovo:mcp` | `medtrace-mcp-server` | — | Exposes `get-hazard-lineage-action` and `verify-iec-compliance-action` to Rovo / Atlassian Studio. |
@@ -43,7 +43,7 @@ The React 18 Custom UI ([static/frontend/src/App.tsx](../../static/frontend/src/
 | `simulateTransition` | `assertAuthorizedReader` | Evaluates `workflowValidatorHandler()` release-gate readiness for an issue or suite. |
 | `getAuditLog` | `assertAuthorizedReader` | Returns paginated hash-chained audit entries (`limit` clamped, optional `beforeSeq` cursor) via `AuditLogService.getAuditLog()`. |
 | `verifyAuditChain` | `assertAuthorizedReader` | Recomputes canonical SHA-256 hashes over bounded windows (`fromSeq`, `maxEntries` defaulting to `200` / capped at `500`, `expectedPrevHash`) via `AuditLogService.verifyAuditChain()`, returning `{ valid, truncated, nextFromSeq, verifiedFromSeq, verifiedToSeq, windowEntryCount }` for multi-batch verification via `verifyAuditChainBounded()`. |
-| `seedDemoSuite` | `assertAuthorizedOperator` | Resets storage to synthetic `DEMO` dataset and logs `'SEED_DEMO'` (guarded by UI `ConfirmSeedModal` when overwriting `LIVE`). |
+| `seedDemoSuite` | `assertAuthorizedOperator` | Resets storage to synthetic `DEMO` dataset and logs `'SEED_DEMO'`. Overwriting an initialized `LIVE` suite additionally requires `confirmOverwriteLive: true`, server-verified Jira site administrator (`ADMINISTER`) permission (`assertJiraSiteAdminPermissions`), and persists a pre-overwrite recovery backup (`LIVE_BACKUP_KEY`). |
 | `syncLiveSuite` | `assertAuthorizedOperator` | Ingests paginated Jira issues & Confluence pages into `LIVE` mode via `LiveIngestionService.syncFromAtlassian()` (also verifying Jira identity + read access for Confluence-only callers without an explicit `projectKey`), supporting resumable `nextPageToken` KVS cursors (`resumeFromCursor`, `pageToken`, returning `nextPageToken` and `resumedFromCursor`), `LIVE_SYNC_CONCURRENCY_BATCH_SIZE = 5` batching, and untagged `/remotelink` short-circuiting (`requireConfluenceLinkToEnrich`). |
 | `bindIssueToHazard` | `assertAuthorizedOperator` | Binds a verified Jira issue (`/rest/api/3/issue/{key}`, `callerMode: 'USER'`) to a hazard link, clearing stale git/graph fields. |
 | `recordTestResult` | `assertAuthorizedOperator` | Enforces target bound-issue scope in `LIVE` mode (`assertOperatorAuthorizedForTarget`), records `'PASSED' | 'FAILED' | 'UNTESTED' | 'IN_PROGRESS'` test evidence (`validateHttpsUrl` check; `""` clears URL), and logs `'RECORD_TEST_RESULT'`. |
@@ -58,7 +58,7 @@ The React 18 Custom UI ([static/frontend/src/App.tsx](../../static/frontend/src/
 - **Custom UI Write Resolvers (`assertAuthorizedOperator`):** Every mutating resolver enforces caller identity and operator privileges before mutating KVS:
   - **Jira:** Requires `EDIT_ISSUES` or `ADMINISTER_PROJECTS` (plus `BROWSE_PROJECTS` when scoped to `issueKey` / `projectKey`) via `/rest/api/3/mypermissions`, blocking cross-project write abuse.
   - **Confluence:** Verifies `/wiki/rest/api/user/current` and checks write/admin operations via `/wiki/api/v2/pages/{id}/operations`, `/wiki/api/v2/spaces/{id}/operations`, or `/wiki/api/v2/spaces?type=global&limit=25` (probing `/operations` across up to `CONFLUENCE_GLOBAL_SPACES_PROBE_LIMIT = 10` global spaces, preventing personal-space access from bypassing global operator RBAC).
-- **Rovo Actions (`assertRovoUserReadAccess` in [src/mcp-server.ts](../../src/mcp-server.ts)):** Enforces caller-scoped user read access (`api.asUser()`) when invoked by a user inside Forge Rovo.
+- **Rovo Actions (`assertRovoUserReadAccess` & `scopeSuiteForRovoCaller` in [src/mcp-server.ts](../../src/mcp-server.ts)):** Fails closed when `accountId` is missing or empty in Forge runtime, requires `BROWSE_PROJECTS.havePermission === true` (or valid matching Confluence session + target page/space read), checks target-scoped Jira permissions on requested issues/projects, and filters `LIVE` suites to caller-authorized projects.
 
 ## Webtrigger Security & Hardening (`mcpWebtriggerHandler`)
 
@@ -72,8 +72,8 @@ The React 18 Custom UI ([static/frontend/src/App.tsx](../../static/frontend/src/
    - Unexpected internal errors return sanitized HTTP `500` `{ error, errorId }` without stack-trace leakage.
    - Responses omit wildcard `Access-Control-Allow-Origin: *`.
 
-## Permissions & Zero-Egress Boundary
+## Permissions & Forge Network Boundary
 
 - **Scopes ([manifest.yml](../../manifest.yml)):** `read:jira-work`, `read:jira-user`, `read:page:confluence`, `read:space:confluence`, `read:user:confluence`, `read:content.metadata:confluence`, and `storage:app` (note: declares **no** `read:graph:*` scopes).
 - **Content Security Policy:** `permissions.content.styles: ['unsafe-inline']` (required by `@xyflow/react` runtime inline `transform` styles; no external scripts or network origins).
-- **Zero External Egress:** `manifest.yml` declares **no** `permissions.external.fetch.backend` entries. All Jira/Confluence/AGG calls use Forge `api.asApp()` or `api.asUser()` inside Atlassian Cloud.
+- **No External Backend-Fetch Permission:** `manifest.yml` declares **no** `permissions.external.fetch.backend` entries, so Forge cannot initiate external backend fetches. All Jira/Confluence/AGG calls use Forge `api.asApp()` or `api.asUser()` inside Atlassian Cloud, while authenticated MCP/CI webtrigger responses return requested compliance data to their configured clients (not a zero-data-egress guarantee).

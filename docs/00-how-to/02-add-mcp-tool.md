@@ -27,7 +27,7 @@ Expose a new compliance tool so external coding agents (Cursor, Claude Desktop, 
 
 2. **Implement Rovo & Service Handler ([src/mcp-server.ts](../../src/mcp-server.ts)):**
    - Add the new tool method on `McpToolService`.
-   - Allowlist the action key in `ALLOWED_ROVO_ACTIONS` and dispatch it inside `rovoActionHandler()` (which executes `assertRovoUserReadAccess()` when `isForgeRuntime() && accountId` and returns sanitized error payloads).
+   - Allowlist the action key in `ALLOWED_ROVO_ACTIONS` and dispatch it inside `rovoActionHandler()` (which fails closed on missing/empty `accountId` in Forge runtime, executes target-scoped `assertRovoUserReadAccess()` + `scopeSuiteForRovoCaller()`, and returns sanitized error payloads).
 
 3. **Expose Webtrigger Route if Called from Local Stdio MCP ([src/index.ts](../../src/index.ts)):**
    - Add any new `POST` action name to `ALLOWED_WEBTRIGGER_POST_ACTIONS` and the `switch (action)` block inside `mcpWebtriggerHandler()`.

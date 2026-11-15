@@ -4,6 +4,7 @@ import { isForgeRuntime } from './runtime';
 import { SeederService } from './seeder';
 import {
   BlastRadiusReport,
+  ComplianceSummary,
   ConfluenceSpec,
   IsoHazard,
   JiraWorkItem,
@@ -12,6 +13,10 @@ import {
   TraceLink,
   VerificationTest,
 } from './types';
+
+const JIRA_PROJECT_KEY_RE = /^[A-Z][A-Z0-9_]{0,20}$/;
+const JIRA_ISSUE_KEY_RE = /^[A-Z][A-Z0-9_]{0,20}-\d+$/;
+const CONFLUENCE_ID_RE = /^[a-zA-Z0-9_-]{1,64}$/;
 
 const STOP_WORDS = new Set([
   'with', 'from', 'that', 'this', 'must', 'every', 'during', 'within', 'clause',
@@ -106,7 +111,7 @@ export interface IecComplianceVerificationResponse {
   verifiedCoveragePercentage: string;
   classCSummary: {
     totalClassC: number;
-    status: 'BLOCKED_BY_SAFETY_GATE' | 'CERTIFIED_READY';
+    status: 'BLOCKED_BY_SAFETY_GATE' | 'CONFIGURED_CHECKS_PASSED';
   };
   signatureDriftDetected: boolean;
   touchesSafetyCriticalCode: boolean;
@@ -128,7 +133,13 @@ export interface RovoActionContext {
   accountId?: string;
   cloudId?: string;
   principal?: { accountId?: string };
-  extension?: { type?: string };
+  extension?: {
+    type?: string;
+    project?: { key?: string; id?: string };
+    issue?: { key?: string; id?: string };
+    space?: { key?: string; id?: string };
+    content?: { id?: string; type?: string };
+  };
 }
 
 export interface RovoActionInputs {
@@ -197,49 +208,251 @@ function findLinksMatchingTextTokens(fullText: string, traceLinks: TraceLink[]):
   return matched;
 }
 
-async function assertRovoUserReadAccess(accountId: string, extensionType: string): Promise<void> {
-  if (extensionType.startsWith('confluence')) {
+interface RovoExtensionScope {
+  extensionType: string;
+  projectKey?: string;
+  issueKey?: string;
+  spaceId?: string;
+  contentId?: string;
+}
+
+function extractRovoExtensionScope(
+  ctx: RovoActionContext,
+  payloadCtx?: RovoActionContext
+): RovoExtensionScope {
+  const extensionType = String(ctx.extension?.type || payloadCtx?.extension?.type || '').trim();
+  const rawProjectKey = ctx.extension?.project?.key ?? payloadCtx?.extension?.project?.key;
+  const rawIssueKey = ctx.extension?.issue?.key ?? payloadCtx?.extension?.issue?.key;
+  const rawSpaceId = ctx.extension?.space?.id ?? payloadCtx?.extension?.space?.id;
+  const rawContentId = ctx.extension?.content?.id ?? payloadCtx?.extension?.content?.id;
+
+  const projectKey =
+    typeof rawProjectKey === 'string' && rawProjectKey.trim() !== ''
+      ? rawProjectKey.trim().toUpperCase()
+      : undefined;
+  if (projectKey && !JIRA_PROJECT_KEY_RE.test(projectKey)) {
+    throw new RovoAuthError('Forbidden: Invalid Jira projectKey in extension context.');
+  }
+
+  const issueKey =
+    typeof rawIssueKey === 'string' && rawIssueKey.trim() !== ''
+      ? rawIssueKey.trim().toUpperCase()
+      : undefined;
+  if (issueKey && !JIRA_ISSUE_KEY_RE.test(issueKey)) {
+    throw new RovoAuthError('Forbidden: Invalid Jira issueKey in extension context.');
+  }
+
+  const spaceId =
+    typeof rawSpaceId === 'string' && rawSpaceId.trim() !== '' ? rawSpaceId.trim() : undefined;
+  if (spaceId && !CONFLUENCE_ID_RE.test(spaceId)) {
+    throw new RovoAuthError('Forbidden: Invalid Confluence spaceId in extension context.');
+  }
+
+  const contentId =
+    typeof rawContentId === 'string' && rawContentId.trim() !== '' ? rawContentId.trim() : undefined;
+  if (contentId && !CONFLUENCE_ID_RE.test(contentId)) {
+    throw new RovoAuthError('Forbidden: Invalid Confluence contentId in extension context.');
+  }
+
+  return { extensionType, projectKey, issueKey, spaceId, contentId };
+}
+
+function extractProjectKeyFromJiraKey(key?: string): string | undefined {
+  if (typeof key !== 'string') return undefined;
+  const clean = key.trim().toUpperCase();
+  if (!JIRA_ISSUE_KEY_RE.test(clean)) return undefined;
+  return clean.split('-')[0];
+}
+
+async function checkJiraBrowsePermission(target?: {
+  issueKey?: string;
+  projectKey?: string;
+}): Promise<boolean> {
+  const permRoute = target?.issueKey
+    ? route`/rest/api/3/mypermissions?issueKey=${target.issueKey}&permissions=BROWSE_PROJECTS`
+    : target?.projectKey
+    ? route`/rest/api/3/mypermissions?projectKey=${target.projectKey}&permissions=BROWSE_PROJECTS`
+    : route`/rest/api/3/mypermissions?permissions=BROWSE_PROJECTS`;
+
+  const permResp = await api.asUser().requestJira(permRoute);
+  if (permResp.status !== 200) {
+    return false;
+  }
+
+  const permData = (await permResp.json().catch(() => null)) as {
+    active?: unknown;
+    permissions?: { BROWSE_PROJECTS?: { havePermission?: unknown } };
+  } | null;
+
+  if (permData?.active === false) {
+    throw new RovoAuthError('Forbidden: User account is inactive.');
+  }
+  return permData?.permissions?.BROWSE_PROJECTS?.havePermission === true;
+}
+
+async function assertRovoUserReadAccess(
+  accountId: string,
+  scope: RovoExtensionScope
+): Promise<void> {
+  if (scope.extensionType.toLowerCase().startsWith('confluence')) {
     const confResp = await api.asUser().requestConfluence(route`/wiki/rest/api/user/current`);
     if (confResp.status !== 200) {
       throw new RovoAuthError('Forbidden: Confluence user session lacks read access.');
     }
-    const userData = (await confResp.json()) as { accountId?: unknown } | null;
-    if (typeof userData?.accountId === 'string' && userData.accountId !== accountId) {
+    const userData = (await confResp.json().catch(() => null)) as {
+      accountId?: unknown;
+      type?: unknown;
+    } | null;
+    if (
+      userData?.type === 'anonymous' ||
+      typeof userData?.accountId !== 'string' ||
+      userData.accountId.trim() !== accountId
+    ) {
       throw new RovoAuthError('Forbidden: Authenticated Confluence user identity mismatch.');
     }
-    return;
-  }
-
-  const permResp = await api
-    .asUser()
-    .requestJira(route`/rest/api/3/mypermissions?permissions=BROWSE_PROJECTS`);
-
-  if (permResp.status === 200) {
-    const permData = (await permResp.json()) as {
-      active?: unknown;
-      permissions?: { BROWSE_PROJECTS?: { havePermission?: unknown } };
-    } | null;
-    if (permData?.active === false) {
-      throw new RovoAuthError('Forbidden: User account is inactive.');
-    }
-    if (permData?.permissions?.BROWSE_PROJECTS?.havePermission === false) {
-      throw new RovoAuthError('Forbidden: Requires Jira BROWSE_PROJECTS permission.');
-    }
-    return;
-  }
-
-  if (!extensionType) {
-    const confFallback = await api.asUser().requestConfluence(route`/wiki/rest/api/user/current`);
-    if (confFallback.status === 200) {
-      const userData = (await confFallback.json()) as { accountId?: unknown } | null;
-      if (typeof userData?.accountId === 'string' && userData.accountId !== accountId) {
-        throw new RovoAuthError('Forbidden: Authenticated Confluence user identity mismatch.');
+    if (scope.contentId) {
+      const pageResp = await api
+        .asUser()
+        .requestConfluence(route`/wiki/api/v2/pages/${scope.contentId}`);
+      if (pageResp.status !== 200) {
+        throw new RovoAuthError('Forbidden: Confluence user lacks read access to target page.');
       }
-      return;
+    } else if (scope.spaceId) {
+      const spaceResp = await api
+        .asUser()
+        .requestConfluence(route`/wiki/api/v2/spaces/${scope.spaceId}`);
+      if (spaceResp.status !== 200) {
+        throw new RovoAuthError('Forbidden: Confluence user lacks read access to target space.');
+      }
+    }
+    return;
+  }
+
+  const hasJiraRead = await checkJiraBrowsePermission({
+    issueKey: scope.issueKey,
+    projectKey: scope.projectKey,
+  });
+  if (!hasJiraRead) {
+    throw new RovoAuthError('Forbidden: Requires Jira BROWSE_PROJECTS permission.');
+  }
+}
+
+async function scopeSuiteForRovoCaller(
+  suite: ComplianceSummary,
+  inputs: RovoActionInputs,
+  scope: RovoExtensionScope
+): Promise<ComplianceSummary> {
+  if (suite.datasetMode !== 'LIVE' || suite.initialized === false) {
+    return suite;
+  }
+
+  const projectPermCache = new Map<string, boolean>();
+  const issuePermCache = new Map<string, boolean>();
+
+  const hasProjectAccess = async (projectKey: string): Promise<boolean> => {
+    const clean = projectKey.trim().toUpperCase();
+    if (scope.projectKey && clean !== scope.projectKey) {
+      return false;
+    }
+    if (projectPermCache.has(clean)) {
+      return projectPermCache.get(clean) === true;
+    }
+    const allowed = await checkJiraBrowsePermission({ projectKey: clean });
+    projectPermCache.set(clean, allowed);
+    return allowed;
+  };
+
+  const hasIssueAccess = async (issueKey: string): Promise<boolean> => {
+    const clean = issueKey.trim().toUpperCase();
+    const issueProj = extractProjectKeyFromJiraKey(clean);
+    if (scope.projectKey && issueProj && issueProj !== scope.projectKey) {
+      return false;
+    }
+    if (issuePermCache.has(clean)) {
+      return issuePermCache.get(clean) === true;
+    }
+    const allowed = await checkJiraBrowsePermission({ issueKey: clean });
+    issuePermCache.set(clean, allowed);
+    return allowed;
+  };
+
+  // Validate explicitly requested keys against target-level Jira permissions before returning or searching.
+  const lookupKeys: string[] = [];
+  if (inputs.issueKey && inputs.issueKey.trim() !== '') lookupKeys.push(inputs.issueKey.trim());
+  if (inputs.hazardKey && inputs.hazardKey.trim() !== '') lookupKeys.push(inputs.hazardKey.trim());
+  const textScan = `${inputs.prDiff || ''} ${inputs.componentName || ''} ${inputs.issueKey || ''}`;
+  for (const keyToken of textScan.match(/\b[A-Za-z][A-Za-z0-9_]{0,20}-\d+\b/g) || []) {
+    if (!lookupKeys.some((k) => k.toLowerCase() === keyToken.toLowerCase())) {
+      lookupKeys.push(keyToken);
     }
   }
 
-  throw new RovoAuthError('Forbidden: User session lacks Jira/Confluence read access.');
+  for (const key of lookupKeys) {
+    const lower = key.toLowerCase();
+    const matchedLinks = suite.traceLinks.filter((l) => collectCanonicalLinkKeys(l).includes(lower));
+    if (matchedLinks.length > 0) {
+      for (const link of matchedLinks) {
+        const workKey = link.work?.key?.trim().toUpperCase();
+        if (workKey && JIRA_ISSUE_KEY_RE.test(workKey)) {
+          if (!(await hasIssueAccess(workKey))) {
+            throw new RovoAuthError(
+              `Forbidden: Caller lacks Jira BROWSE_PROJECTS permission for target scope (${workKey}).`
+            );
+          }
+        } else {
+          const fallbackProj = extractProjectKeyFromJiraKey(link.hazard?.key);
+          if (fallbackProj && !(await hasProjectAccess(fallbackProj))) {
+            throw new RovoAuthError(
+              `Forbidden: Caller lacks Jira BROWSE_PROJECTS permission for project ${fallbackProj}.`
+            );
+          }
+        }
+      }
+    } else if (
+      inputs.issueKey &&
+      key.toLowerCase() === inputs.issueKey.trim().toLowerCase() &&
+      JIRA_ISSUE_KEY_RE.test(key.trim().toUpperCase())
+    ) {
+      const cleanInputIssue = key.trim().toUpperCase();
+      if (!(await hasIssueAccess(cleanInputIssue))) {
+        throw new RovoAuthError(
+          `Forbidden: Caller lacks Jira BROWSE_PROJECTS permission for requested issue ${cleanInputIssue}.`
+        );
+      }
+    }
+  }
+
+  const authorizedLinks: TraceLink[] = [];
+  for (const link of suite.traceLinks) {
+    const projKey =
+      extractProjectKeyFromJiraKey(link.work?.key) ??
+      extractProjectKeyFromJiraKey(link.hazard?.key);
+    if (!projKey) {
+      if (!scope.projectKey) {
+        authorizedLinks.push(link);
+      }
+      continue;
+    }
+    if (await hasProjectAccess(projKey)) {
+      authorizedLinks.push(link);
+    }
+  }
+
+  if (authorizedLinks.length === suite.traceLinks.length) {
+    return suite;
+  }
+
+  return ComplianceEngine.generateComplianceReport(
+    authorizedLinks,
+    suite.datasetMode,
+    scope.projectKey ? `${scope.projectKey} (${suite.projectName})` : suite.projectName,
+    {
+      storageFormat: suite.storageFormat,
+      auditEntryCount: suite.auditEntryCount,
+      auditHeadHash: suite.auditHeadHash,
+      initialized: suite.initialized,
+    }
+  );
 }
 
 /**
@@ -249,13 +462,16 @@ async function assertRovoUserReadAccess(accountId: string, extensionType: string
 export class McpToolService {
   /**
    * Tool: get-hazard-lineage-action
-   * Retrieves complete ISO 14971 hazard safety lineage for an issue/hazard/test/spec/signature key or full project.
+   * Retrieves a matching ISO 14971 hazard safety lineage or a reduced project summary.
    */
-  public static async getHazardLineage(inputs?: {
-    issueKey?: string;
-    hazardKey?: string;
-  }): Promise<HazardLineageResponse> {
-    const suite = await SeederService.getActiveComplianceSuite();
+  public static async getHazardLineage(
+    inputs?: {
+      issueKey?: string;
+      hazardKey?: string;
+    },
+    options?: { suite?: ComplianceSummary }
+  ): Promise<HazardLineageResponse> {
+    const suite = options?.suite ?? (await SeederService.getActiveComplianceSuite());
     const initialized = suite.initialized ?? suite.traceLinks.length > 0;
     const rawIssueKey = typeof inputs?.issueKey === 'string' ? inputs.issueKey : '';
     const rawHazardKey = typeof inputs?.hazardKey === 'string' ? inputs.hazardKey : '';
@@ -326,16 +542,19 @@ export class McpToolService {
 
   /**
    * Tool: verify-iec-compliance-action
-   * Audits active codebase/sprint against IEC 62304 and FDA 21 CFR Part 11 requirements.
+   * Audits active codebase/sprint against configured traceability rules and signature evidence.
    * Fails closed on uninitialized suites, restricts infusion-pump keyword fallbacks strictly to DEMO mode,
    * matches explicit keys + word-boundary tokens, and runs multi-trigger BFS blast-radius traversal.
    */
-  public static async verifyIecCompliance(inputs?: {
-    prDiff?: string;
-    componentName?: string;
-    issueKey?: string;
-  }): Promise<IecComplianceVerificationResponse> {
-    const suite = await SeederService.getActiveComplianceSuite();
+  public static async verifyIecCompliance(
+    inputs?: {
+      prDiff?: string;
+      componentName?: string;
+      issueKey?: string;
+    },
+    options?: { suite?: ComplianceSummary }
+  ): Promise<IecComplianceVerificationResponse> {
+    const suite = options?.suite ?? (await SeederService.getActiveComplianceSuite());
     const initialized = suite.initialized ?? suite.traceLinks.length > 0;
 
     if (!initialized || suite.traceLinks.length === 0) {
@@ -465,7 +684,7 @@ export class McpToolService {
         ];
       }
     } else {
-      guidance = ['All regulatory gates satisfied. Authorized for 510(k) release packaging.'];
+      guidance = ['Configured traceability checks passed; independent regulatory assessment is still required.'];
     }
 
     return {
@@ -476,7 +695,7 @@ export class McpToolService {
       verifiedCoveragePercentage: `${suite.verifiedPercentage}%`,
       classCSummary: {
         totalClassC: suite.classCCount,
-        status: suite.releaseBlocked ? 'BLOCKED_BY_SAFETY_GATE' : 'CERTIFIED_READY',
+        status: suite.releaseBlocked ? 'BLOCKED_BY_SAFETY_GATE' : 'CONFIGURED_CHECKS_PASSED',
       },
       signatureDriftDetected: suite.signatureDriftCount > 0,
       touchesSafetyCriticalCode: Boolean(isTargeted),
@@ -502,8 +721,9 @@ export class McpToolService {
 
 /**
  * Handler for manifest module: action (used by rovo:agent and rovo:mcp).
- * Enforces action allowlist, runs Jira/Confluence user read probes inside Forge when accountId is supplied,
- * sanitizes errors, and never logs raw PR diff payloads.
+ * Enforces action allowlist, fails closed on missing/empty Forge accountId, verifies target-scoped
+ * Jira/Confluence user read access, filters LIVE suites to authorized projects, sanitizes errors,
+ * and never logs raw PR diff payloads.
  */
 export async function rovoActionHandler(
   payload?: RovoActionPayload | Record<string, unknown>,
@@ -557,23 +777,37 @@ export async function rovoActionHandler(
     }
 
     const accountId = typeof rawAccountId === 'string' ? rawAccountId.trim() : undefined;
-    if (isForgeRuntime() && accountId) {
-      const extensionType = String(ctx.extension?.type || payloadCtx?.extension?.type || '').trim();
-      await assertRovoUserReadAccess(accountId, extensionType);
+    let scopedSuite: ComplianceSummary | undefined;
+    if (isForgeRuntime()) {
+      if (!accountId) {
+        throw new RovoAuthError(
+          'Unauthorized: Authenticated user accountId is required in Forge runtime.'
+        );
+      }
+      const extensionScope = extractRovoExtensionScope(ctx, payloadCtx);
+      await assertRovoUserReadAccess(accountId, extensionScope);
+      const rawSuite = await SeederService.getActiveComplianceSuite();
+      scopedSuite = await scopeSuiteForRovoCaller(rawSuite, sanitizedInputs, extensionScope);
     }
 
     if (actionKey === 'get-hazard-lineage-action' || actionKey === 'get-hazard-lineage') {
-      return await McpToolService.getHazardLineage({
-        issueKey: sanitizedInputs.issueKey,
-        hazardKey: sanitizedInputs.hazardKey,
-      });
+      return await McpToolService.getHazardLineage(
+        {
+          issueKey: sanitizedInputs.issueKey,
+          hazardKey: sanitizedInputs.hazardKey,
+        },
+        scopedSuite ? { suite: scopedSuite } : undefined
+      );
     }
 
-    return await McpToolService.verifyIecCompliance({
-      prDiff: sanitizedInputs.prDiff,
-      componentName: sanitizedInputs.componentName,
-      issueKey: sanitizedInputs.issueKey,
-    });
+    return await McpToolService.verifyIecCompliance(
+      {
+        prDiff: sanitizedInputs.prDiff,
+        componentName: sanitizedInputs.componentName,
+        issueKey: sanitizedInputs.issueKey,
+      },
+      scopedSuite ? { suite: scopedSuite } : undefined
+    );
   } catch (err: unknown) {
     if (err instanceof RovoAuthError) {
       return { error: err.message };

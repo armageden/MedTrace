@@ -38,10 +38,10 @@ function normalizeIssueKey(payload?: WorkflowValidatorPayload | null): string | 
  * - Blocks tracked non-`VERIFIED` issues and approves verified or untracked issues on initialized suites.
  * - Fails closed (`result: false`) on any unexpected runtime or storage exception.
  *
- * Platform Limitation (Atlassian `ECO-624`): Forge `jira:workflowValidator` does NOT intercept
- * Jira Automation rules or direct REST API status transitions, and cannot detect hazard tickets
- * that have not yet been synced or bound into MedTrace. Production releases MUST also enforce
- * `.github/workflows/medtrace-release-gate.yml` (`action: 'verify-release-gate'`, `requireLiveMode: true`).
+ * Atlassian issue `ECO-624` reports a Jira Automation case but is marked Invalid and does not establish
+ * direct REST API behavior. Unsynced or unbound hazard tickets are also outside this validator's view.
+ * The repository's release-gate workflow is manual, reusable, or published-release triggered; it is
+ * invoked by ci.yml on pull requests and pushes to main when release-gate secrets are configured.
  */
 export async function workflowValidatorHandler(
   payload?: WorkflowValidatorPayload | null

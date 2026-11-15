@@ -1218,15 +1218,85 @@ test.describe('SEC-01 & SEC-03: Resolver RBAC, Confused-Deputy, Part 11 & Webtri
         assert.ok(page2.length >= 1);
         assert.ok(page2.every((e) => e.seq < minSeqPage1));
 
-        // confirmOverwriteLive: true allows overwriting LIVE suite
+        // Project operator WITHOUT Jira ADMINISTER permission CANNOT overwrite initialized LIVE suite even with confirmOverwriteLive: true
+        await assert.rejects(
+          () =>
+            resolverHandler(
+              {
+                call: { functionKey: 'seedDemoSuite', payload: { confirmOverwriteLive: true } },
+                context: { extension: { type: 'jira:globalPage' } },
+              },
+              { principal: { accountId: 'op-1' } }
+            ),
+          /ADMINISTER/
+        );
+      }
+    );
+
+    // Verified Jira site administrator (ADMINISTER: true) CAN overwrite initialized LIVE suite with confirmOverwriteLive: true,
+    // and pre-overwrite LIVE backup + audit record are persisted.
+    await withForgeMocks(
+      {
+        requestJira: async (url) => {
+          if (url.startsWith('/rest/api/3/myself')) {
+            return makeHttpResponse(200, { accountId: 'site-admin-1', displayName: 'Site Admin', active: true });
+          }
+          if (url.startsWith('/rest/api/3/mypermissions')) {
+            return makeHttpResponse(200, {
+              permissions: {
+                BROWSE_PROJECTS: { havePermission: true },
+                EDIT_ISSUES: { havePermission: true },
+                ADMINISTER_PROJECTS: { havePermission: true },
+                ADMINISTER: { havePermission: true },
+              },
+            });
+          }
+          return makeHttpResponse(404, {});
+        },
+      },
+      async () => {
+        await SeederService.saveComplianceSuite(
+          {
+            projectName: 'Site Admin Live Suite',
+            datasetMode: 'LIVE',
+            initialized: true,
+            standards: ['IEC 62304'],
+            totalHazards: 1,
+            classCCount: 1,
+            classBCount: 0,
+            classACount: 0,
+            verifiedPercentage: 0,
+            releaseBlocked: true,
+            blockingReasons: ['Pending'],
+            signatureDriftCount: 0,
+            lastAuditTimestamp: new Date().toISOString(),
+            traceLinks: [
+              buildMinimalTraceLink({
+                id: 'link-live-1',
+                hazardKey: 'HAZ-101',
+                specId: 'srs-1',
+                workKey: 'MED-10',
+                testKey: 'TST-1',
+              }),
+            ],
+          },
+          0
+        );
+
         const overwriteRes = await resolverHandler(
           {
             call: { functionKey: 'seedDemoSuite', payload: { confirmOverwriteLive: true } },
             context: { extension: { type: 'jira:globalPage' } },
           },
-          { principal: { accountId: 'op-1' } }
+          { principal: { accountId: 'site-admin-1' } }
         );
         assert.strictEqual(overwriteRes.success, true);
+        assert.strictEqual(overwriteRes.summary.datasetMode, 'DEMO');
+
+        const backup = await SeederService.getLastLiveBackup();
+        assert.ok(backup, 'LIVE backup snapshot must be saved before DEMO overwrite');
+        assert.strictEqual(backup.backedUpBy, 'site-admin-1');
+        assert.strictEqual(backup.previousTraceLinkCount, 1);
       }
     );
   });
@@ -1370,7 +1440,7 @@ test.describe('SEC-01 & SEC-03: Resolver RBAC, Confused-Deputy, Part 11 & Webtri
     });
     assert.strictEqual(getWithBody.statusCode, 400);
 
-    // GET with ?action=seed -> 400; GET with ?action=status -> 200
+    // GET with ?action=seed -> 400; status reads never return trace links
     const getSeed = await mcpWebtriggerHandler({
       method: 'GET',
       headers: signWebtriggerHeaders(secret, '', 'n-get-seed'),
@@ -1384,6 +1454,23 @@ test.describe('SEC-01 & SEC-03: Resolver RBAC, Confused-Deputy, Part 11 & Webtri
       queryParameters: { action: ['status'] },
     });
     assert.strictEqual(getStatus.statusCode, 200);
+    assert.strictEqual(Object.hasOwn(JSON.parse(getStatus.body), 'traceLinks'), false);
+
+    const getSuite = await mcpWebtriggerHandler({
+      method: 'GET',
+      headers: signWebtriggerHeaders(secret, '', 'n-get-suite'),
+      queryParameters: { action: ['get-suite'] },
+    });
+    assert.strictEqual(getSuite.statusCode, 400);
+
+    const postStatusBody = JSON.stringify({ action: 'status' });
+    const postStatus = await mcpWebtriggerHandler({
+      method: 'POST',
+      headers: signWebtriggerHeaders(secret, postStatusBody, 'n-post-status'),
+      body: postStatusBody,
+    });
+    assert.strictEqual(postStatus.statusCode, 200);
+    assert.strictEqual(Object.hasOwn(JSON.parse(postStatus.body), 'traceLinks'), false);
 
     // Malformed JSON, JSON array, and unknown POST action -> 400
     for (const badBody of ['{not-json', '["seed"]', '123', JSON.stringify({ action: 'sync-status' })]) {
@@ -1425,6 +1512,18 @@ test.describe('SEC-01 & SEC-03: Resolver RBAC, Confused-Deputy, Part 11 & Webtri
       ],
     };
     await SeederService.saveComplianceSuite(liveCleanSuite, 0);
+
+    const lineageBody = JSON.stringify({ action: 'get-hazard-lineage', issueKey: 'MED-1' });
+    const lineageResponse = await mcpWebtriggerHandler({
+      method: 'POST',
+      headers: signWebtriggerHeaders(secret, lineageBody, 'n-lineage-query'),
+      body: lineageBody,
+    });
+    assert.strictEqual(lineageResponse.statusCode, 200);
+    const lineageResult = JSON.parse(lineageResponse.body);
+    assert.strictEqual(lineageResult.found, true);
+    assert.strictEqual(lineageResult.work.key, 'MED-1');
+    assert.strictEqual(Object.hasOwn(lineageResult, 'traceLinks'), false);
 
     for (const payload of [{ action: 'seed' }, { action: 'remediate', hazardKey: 'HAZ-101' }]) {
       const b = JSON.stringify(payload);

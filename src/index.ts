@@ -124,6 +124,7 @@ const ALLOWED_TEST_STATUSES: ReadonlySet<VerificationTest['status']> = new Set([
 
 const ALLOWED_WEBTRIGGER_POST_ACTIONS: ReadonlySet<string> = new Set([
   'status',
+  'get-hazard-lineage',
   'seed',
   'remediate',
   'verify',
@@ -334,6 +335,25 @@ async function assertJiraOperatorPermissions(projectKey?: string, issueKey?: str
   const canAdmin = data.permissions?.ADMINISTER_PROJECTS?.havePermission === true;
   if (!canEdit && !canAdmin) {
     throw new Error('Forbidden: Requires Jira EDIT_ISSUES or ADMINISTER_PROJECTS permission.');
+  }
+}
+
+async function assertJiraSiteAdminPermissions(expectedAccountId: string): Promise<void> {
+  if (!isForgeRuntime()) {
+    return;
+  }
+  await verifyJiraIdentity(expectedAccountId);
+  const res = await api
+    .asUser()
+    .requestJira(route`/rest/api/3/mypermissions?permissions=ADMINISTER`);
+  if (!isHttpOk(res)) {
+    throw new Error(`Forbidden: Jira site administrator permission check failed (${res.status}).`);
+  }
+  const data = (await res.json().catch(() => ({}))) as JiraPermissionsResponse;
+  if (data.permissions?.ADMINISTER?.havePermission !== true) {
+    throw new Error(
+      'Forbidden: Requires Jira site administrator (ADMINISTER) permission to overwrite an initialized LIVE compliance suite.'
+    );
   }
 }
 
@@ -632,8 +652,22 @@ defineTypedResolver('getComplianceSuite', async (req) => {
 defineTypedResolver('seedDemoSuite', async (req) => {
   const caller = await assertAuthorizedOperator(req);
   const confirmOverwriteLive = req.payload?.confirmOverwriteLive === true;
+  const existing = await SeederService.getSuiteWithVersion();
+  const isInitializedLive =
+    existing.summary.datasetMode === 'LIVE' && existing.summary.initialized;
+
+  if (isInitializedLive) {
+    if (!confirmOverwriteLive) {
+      throw new Error(
+        'Refusing to overwrite initialized LIVE compliance suite with DEMO data without explicit confirmOverwriteLive: true.'
+      );
+    }
+    await assertJiraSiteAdminPermissions(caller.accountId);
+  }
+
   return SeederService.seedEnterpriseDemoSuite(caller.accountId, 'FORGE_USER_SESSION', {
     confirmOverwriteLive,
+    authorizedSiteAdmin: isInitializedLive,
   });
 });
 
@@ -1231,19 +1265,16 @@ export async function mcpWebtriggerHandler(request: WebtriggerRequest): Promise<
         typeof rawQueryAction === 'string' && rawQueryAction.trim().length > 0
           ? rawQueryAction.trim()
           : undefined;
-      if (cleanQueryAction && cleanQueryAction !== 'status' && cleanQueryAction !== 'get-suite') {
+      if (cleanQueryAction && cleanQueryAction !== 'status') {
         throw new WebtriggerHttpError(
           400,
-          `Bad Request: Unsupported GET query action "${cleanQueryAction}". Use POST for mutations.`
+          `Bad Request: Unsupported GET query action "${cleanQueryAction}". Use POST for data queries.`
         );
       }
 
       const suite = await SeederService.getActiveComplianceSuite();
-      if (cleanQueryAction === 'status') {
-        const { traceLinks: _traceLinks, ...statusSummary } = suite;
-        return jsonResponse(200, statusSummary);
-      }
-      return jsonResponse(200, suite);
+      const { traceLinks: _traceLinks, ...statusSummary } = suite;
+      return jsonResponse(200, statusSummary);
     }
 
     if (rawBody.trim() === '') {
@@ -1273,7 +1304,16 @@ export async function mcpWebtriggerHandler(request: WebtriggerRequest): Promise<
     switch (action) {
       case 'status': {
         const suite = await SeederService.getActiveComplianceSuite();
-        return jsonResponse(200, suite);
+        const { traceLinks: _traceLinks, ...statusSummary } = suite;
+        return jsonResponse(200, statusSummary);
+      }
+
+      case 'get-hazard-lineage': {
+        const result = await McpToolService.getHazardLineage({
+          hazardKey: typeof body.hazardKey === 'string' ? body.hazardKey : undefined,
+          issueKey: typeof body.issueKey === 'string' ? body.issueKey : undefined,
+        });
+        return jsonResponse(200, result);
       }
 
       case 'seed': {

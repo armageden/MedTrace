@@ -364,7 +364,7 @@ test.describe('Task 1B-Seeder: Cold-Start LIVE Isolation, Migration & Overwrite 
     });
   });
 
-  test.it('refuses to overwrite initialized LIVE suite with DEMO data without confirmOverwriteLive: true', async () => {
+  test.it('refuses to overwrite initialized LIVE suite with DEMO data without confirmOverwriteLive and site-admin authorization, and records backup on authorized overwrite', async () => {
     const links = makeSyntheticLinks(1);
     const liveReport = ComplianceEngine.generateComplianceReport(links, 'LIVE', 'Production Project', {
       initialized: true,
@@ -377,13 +377,28 @@ test.describe('Task 1B-Seeder: Cold-Start LIVE Isolation, Migration & Overwrite 
       /confirmOverwriteLive/
     );
 
+    await assert.rejects(
+      () =>
+        SeederService.seedEnterpriseDemoSuite('acc-editor', 'FORGE_USER_SESSION', {
+          confirmOverwriteLive: true,
+        }),
+      /ADMINISTER/
+    );
+
     const allowed = await SeederService.seedEnterpriseDemoSuite('acc-admin', 'FORGE_USER_SESSION', {
       confirmOverwriteLive: true,
+      authorizedSiteAdmin: true,
     });
     assert.strictEqual(allowed.success, true);
     assert.strictEqual(allowed.summary.datasetMode, 'DEMO');
     assert.strictEqual(allowed.summary.initialized, true);
     assert.match(allowed.message, /simulated/i);
+
+    const backup = await SeederService.getLastLiveBackup();
+    assert.ok(backup, 'Pre-overwrite LIVE backup snapshot must be persisted');
+    assert.strictEqual(backup.backedUpBy, 'acc-admin');
+    assert.strictEqual(backup.previousTraceLinkCount, 1);
+    assert.strictEqual(backup.summary.datasetMode, 'LIVE');
   });
 
   test.it('remediateClassCGap requires non-empty targetHazardKey and sets simulated work Done in DEMO', async () => {

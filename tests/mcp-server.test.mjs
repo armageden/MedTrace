@@ -239,8 +239,9 @@ async function startAuthenticatedWebtriggerServer(secret) {
       }
 
       if (req.method === 'GET') {
+        const { traceLinks: _traceLinks, ...summary } = state.suite;
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify(state.suite));
+        res.end(JSON.stringify(summary));
         return;
       }
 
@@ -261,6 +262,94 @@ async function startAuthenticatedWebtriggerServer(secret) {
               affectedHazards: ['HAZ-101'],
             })
           );
+          return;
+        }
+        if (parsedBody.action === 'get-hazard-lineage') {
+          const suite = state.suite;
+          const initialized = suite.initialized ?? suite.traceLinks.length > 0;
+          const lookupKey = String(parsedBody.issueKey || parsedBody.hazardKey || '').trim().toLowerCase();
+          const links = suite.traceLinks;
+          const keys = (link) =>
+            [
+              link.hazard?.key,
+              link.hazard?.id,
+              link.work?.key,
+              link.work?.id,
+              link.test?.testKey,
+              link.test?.id,
+              link.spec?.id,
+              link.spec?.pageId,
+              link.signature?.id,
+            ]
+              .filter(Boolean)
+              .map((key) => String(key).toLowerCase());
+          const matches = lookupKey ? links.filter((link) => keys(link).includes(lookupKey)) : [];
+          let result;
+          if (lookupKey && matches.length > 0) {
+            const match = matches[0];
+            result = {
+              found: true,
+              datasetMode: suite.datasetMode,
+              initialized,
+              traceLink: match,
+              ...(matches.length > 1 ? { matchedLinks: matches } : {}),
+              regulatoryStatus: match.complianceState,
+              riskClass: match.hazard.riskClass,
+              safetyRequirement: match.spec.title,
+              testStatus: match.test.status,
+              part11Valid: match.signature.isValid,
+              hazard: match.hazard,
+              spec: match.spec,
+              work: match.work,
+              test: match.test,
+              signature: match.signature,
+              complianceState: match.complianceState,
+              violations: match.violations,
+            };
+          } else if (lookupKey) {
+            result = {
+              found: false,
+              datasetMode: suite.datasetMode,
+              initialized,
+              queriedKey: String(parsedBody.issueKey || parsedBody.hazardKey).trim(),
+              message: `No trace link found for key "${parsedBody.issueKey || parsedBody.hazardKey}" in project "${suite.projectName}".`,
+              availableKeys: links.map((link) => ({
+                hazardKey: link.hazard?.key,
+                workKey: link.work?.key,
+                specId: link.spec?.id,
+                testKey: link.test?.testKey,
+              })),
+            };
+          } else {
+            result = {
+              projectName: suite.projectName,
+              datasetMode: suite.datasetMode,
+              initialized,
+              totalHazards: suite.totalHazards,
+              verifiedPercentage: `${suite.verifiedPercentage ?? 0}%`,
+              releaseBlocked: suite.releaseBlocked,
+              traceLinks: links.map((link) => ({
+                id: link.id,
+                hazardKey: link.hazard?.key,
+                riskClass: link.hazard?.riskClass,
+                severity: link.hazard?.severity,
+                requirementSpec: link.spec?.title,
+                workKey: link.work?.key,
+                testKey: link.test?.testKey,
+                testStatus: link.test?.status,
+                complianceState: link.complianceState,
+                signatureValid: link.signature?.isValid,
+              })),
+            };
+          }
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(result));
+          return;
+        }
+        if (parsedBody.action === 'status') {
+          const { traceLinks: _traceLinks, ...summary } = state.suite;
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(summary));
           return;
         }
         if (parsedBody.action === 'remediate') {

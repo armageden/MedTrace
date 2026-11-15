@@ -2,7 +2,7 @@
 
 # Deploy to Production Atlassian Site
 
-Follow this runbook to deploy MedTrace to a production or staging Atlassian Cloud site with Jira and Confluence, configure both encrypted runtime secrets, bind the workflow gate (`ECO-624`-aware), enable CI release checks, and pass the pre-Marketplace listing gate.
+Follow this runbook to deploy MedTrace to a production or staging Atlassian Cloud site with Jira and Confluence, configure encrypted runtime secrets, bind the workflow validator, configure release checks, and pass the pre-Marketplace listing gate.
 
 ## Prerequisites
 
@@ -59,7 +59,7 @@ forge install -e production --site <your-site>.atlassian.net --product confluenc
 
 When updating scopes or manifest modules on an existing installation, pass `--upgrade` to `forge install`.
 
-## 4. Bind the Jira Workflow Safety Gate & `ECO-624` Boundary
+## 4. Bind the Jira Workflow Validator
 
 To enforce IEC 62304 checks on interactive Jira issue transitions:
 
@@ -68,8 +68,7 @@ To enforce IEC 62304 checks on interactive Jira issue transitions:
 3. Add a **Validator** and choose **MedTrace Safety Gate** (`medtrace-safety-validator` in [manifest.yml](../../manifest.yml), backed by `src/workflow-validator.ts`).
 4. Publish the workflow. Transitions on safety-tracked issues fail closed when the `LIVE` suite is uninitialized or when any matching trace link fails compliance evaluation (`requireTestEvidence: true` in `LIVE` mode).
 
-> **Atlassian Platform Limitation (`ECO-624` Defense-in-Depth):**
-> Per Atlassian ecosystem issue `ECO-624`, Jira `jira:workflowValidator` Forge modules are evaluated **only** on human-initiated UI transitions — Jira Automation rules and direct REST API transitions bypass Forge workflow validators. Always pair the Jira workflow validator with the CI release gate ([`.github/workflows/medtrace-release-gate.yml`](../../.github/workflows/medtrace-release-gate.yml) below) or authenticated `POST` probes (`"action": "verify-release-gate"` / `"action": "simulate_transition"`) at deployment boundaries.
+> **Validator boundary:** Atlassian issue [`ECO-624`](https://jira.atlassian.com/browse/ECO-624) reports an Automation case but is marked Invalid and does not establish direct REST API behavior. The repository's CI calls the release-gate workflow on pull requests and pushes to main when its secrets are configured. Validate deployment-specific automation paths on your site.
 
 ## 5. Obtain & Configure the MCP Webtrigger URL (Forge CLI v15)
 
@@ -91,8 +90,8 @@ Use [`.env.example`](../../.env.example) as a template for local MCP clients (`m
 
 MedTrace includes two workflows under `.github/workflows/`:
 
-- [.github/workflows/ci.yml](../../.github/workflows/ci.yml): Runs with `contents: read` permissions on `push` to `main` and `pull_request` using Node.js 22 (`package-lock.json` and `static/frontend/package-lock.json` caches). Runs `npm run typecheck`, `npm run build:all`, `npm run test:all`, `npm run docs:check`, syntax checks (`mcp-server/index.mjs`, `scripts/validate-manifest.mjs`, `scripts/docs-check.mjs`, `scripts/rotate-mcp-secret.sh`), offline `npm run lint:manifest`, root/frontend `npm audit` checks (now clean with 0 vulnerabilities via `overrides` in `package.json` and `static/frontend/package.json`), tracked-file secret/env-file hygiene checks, and `npx --yes @forge/cli@15.0.0 lint` when `FORGE_API_TOKEN` and `FORGE_EMAIL` secrets are set.
-- [.github/workflows/medtrace-release-gate.yml](../../.github/workflows/medtrace-release-gate.yml): `ECO-624` defense-in-depth release gate triggered via `workflow_dispatch`, `workflow_call`, and `release` (`published`). Accepts `issueKey` and `requireLiveMode` (`true` default, forced `true` on `release` events), enforces `https://` URL + `issueKey` validation, sends a single bounded `POST` request (`action: "verify-release-gate"`, no `--retry` to avoid `409` replay errors) signed with `MEDTRACE_MCP_SECRET`, and fails unless the webtrigger returns HTTP `200`, `result: true`, and `releaseBlocked !== true`.
+- [.github/workflows/ci.yml](../../.github/workflows/ci.yml): Runs with `contents: read` permissions on `push` to `main` and `pull_request` using Node.js 22 (`package-lock.json` and `static/frontend/package-lock.json` caches). Runs `npm run typecheck`, `npm run build:all`, `npm run test:all`, `npm run docs:check`, syntax checks (`mcp-server/index.mjs`, `scripts/validate-manifest.mjs`, `scripts/docs-check.mjs`, `scripts/rotate-mcp-secret.sh`), offline `npm run lint:manifest`, root/frontend `npm audit` checks (now clean with 0 vulnerabilities via `overrides` in `package.json` and `static/frontend/package.json`), tracked-file secret/env-file hygiene checks, and `npx --yes @forge/cli@15.0.0 lint` when `FORGE_API_TOKEN` and `FORGE_EMAIL` secrets are set. A `release-gate` job calls the release gate reusable workflow (`secrets: inherit`) under the same secret-presence condition.
+- [.github/workflows/medtrace-release-gate.yml](../../.github/workflows/medtrace-release-gate.yml): Separate gate triggered via `workflow_dispatch`, `workflow_call`, and published-release events. CI calls it on pull requests and pushes to main when `MEDTRACE_MCP_SECRET` and `MEDTRACE_WEBTRIGGER_URL` are configured (skipped otherwise, including fork PRs). It sends a signed `POST action: "verify-release-gate"` and fails unless the webtrigger returns HTTP `200`, `result: true`, and `releaseBlocked !== true`.
 
 ## 7. Secret Rotation
 
@@ -104,6 +103,7 @@ bash scripts/rotate-mcp-secret.sh --help
 
 Key flags and behavior in `scripts/rotate-mcp-secret.sh`:
 - `--skip-rotate` (`SKIP_ROTATE=1`): Read-only verification against existing endpoints without running `forge lint`, rotating secrets, deploying, or modifying `.env`.
+- Non-interactive shells: `forge webtrigger list` prompts for a site unless `FORGE_SITE` and `FORGE_PRODUCT` are set. Without them URL discovery fails and the script exits non-zero after it has already rotated secrets, so set `FORGE_SITE=<your-site>.atlassian.net` before running.
 - `--skip-deploy` (`SKIP_DEPLOY=1`): Updates Forge variables and `.env` without running `forge deploy`.
 - `--force`: Continues if a target environment has no deployed webtrigger URL yet, provided at least one valid target URL resolves.
 - `--approve-major` (`FORGE_APPROVE_MAJOR=1`): Opts into `--approve MAJOR_VERSION_RULE` on `forge lint` and `forge deploy`.

@@ -1,6 +1,6 @@
 # Design Decisions (ADRs)
 
-Architecture Decision Records documenting MedTrace's storage layout, zero-egress boundaries, cryptographic authentication, live ingestion, and audit tamper-evidence trade-offs.
+Architecture Decision Records documenting MedTrace's storage layout, Forge network/MCP data-return boundaries, cryptographic authentication, live ingestion, and audit tamper-evidence trade-offs.
 
 ## Files
 

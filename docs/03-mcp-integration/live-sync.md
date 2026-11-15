@@ -2,7 +2,7 @@
 
 # MCP Live Sync, Webtrigger Bridge & Tool Contracts
 
-MedTrace exposes compliance inspection and CI gate verification through two synchronized entrypoints:
+MedTrace exposes compliance inspection and CI gate verification through two entrypoints. Configured MCP/CI clients receive requested response data outside Atlassian; their retention policies are outside MedTrace's control.
 1. **Rovo MCP & Actions (In-Cloud):** Defined in [manifest.yml](../../manifest.yml) (`medtrace-mcp-server`, `medtrace-regulatory-auditor`, `get-hazard-lineage-action`, `verify-iec-compliance-action`) and handled by `rovoActionHandler` in [src/mcp-server.ts](../../src/mcp-server.ts).
 2. **Local MCP Stdio Bridge:** Implemented in [mcp-server/index.mjs](../../mcp-server/index.mjs) (`SERVER_NAME = 'medtrace-mcp-server'`, `SERVER_VERSION = '1.1.0'`), communicating over JSON-RPC 2.0 NDJSON `stdio` and forwarding HMAC-authenticated requests to `mcpWebtriggerHandler` in [src/index.ts](../../src/index.ts).
 
@@ -36,7 +36,7 @@ For local client JSON configuration (`mcpServers`), see [mcp-server/README.md](.
 
 ## Webtrigger HMAC-SHA256 & Nonce Replay Protection
 
-Requests sent by `signedCloudRequest()` in [mcp-server/index.mjs](../../mcp-server/index.mjs) use `GET` (for `medtrace_get_hazard_lineage`) or `POST` (for `verify`, `remediate`, `verify-release-gate`, etc.) with:
+Requests sent by `signedCloudRequest()` in [mcp-server/index.mjs](../../mcp-server/index.mjs) use `POST` for lineage, verification, demo-remediation, and release-gate actions. `GET` is limited to a status summary without `traceLinks`.
 - `x-medtrace-timestamp`: **Unix epoch milliseconds** (`Date.now().toString()`, digits only).
 - `x-medtrace-nonce`: Unique random UUID/string (1–256 chars; `mcpWebtriggerHandler` also accepts fallback `x-medtrace-event-id`).
 - `x-medtrace-signature`: `sha256=<hex>` HMAC-SHA256 over `${timestamp}.${nonce}.${rawBody}`, verified via `crypto.timingSafeEqual` in `verifyHmacSignature()` (fails closed on empty secrets or non-64-hex signatures).
@@ -61,8 +61,8 @@ Requests sent by `signedCloudRequest()` in [mcp-server/index.mjs](../../mcp-serv
 2. Unsupported HTTP method (anything other than `GET` or `POST`) -> HTTP `405` (`Allow: GET, POST`).
 3. Missing/malformed headers, non-digit/out-of-window timestamp (`[-300_000, +30_000]`), non-string body in Forge runtime, or HMAC mismatch -> HTTP `401`.
 4. Duplicate nonce -> HTTP `409`; nonce store failure -> HTTP `500`.
-5. `GET` with non-empty body or disallowed `?action=` (only omitted, `status`, or `get-suite` allowed) -> HTTP `400`.
-6. `POST` with empty/malformed/non-object JSON or missing/unknown `action` (allowlist: `status`, `seed`, `remediate`, `verify`, `verify-release-gate`, `validate`, `simulate_transition`) -> HTTP `400`.
+5. `GET` with non-empty body or unsupported `?action=` (only omitted or `status` allowed) -> HTTP `400`.
+6. `POST` with empty/malformed/non-object JSON or missing/unknown `action` (allowlist: `status`, `get-hazard-lineage`, `seed`, `remediate`, `verify`, `verify-release-gate`, `validate`, `simulate_transition`) -> HTTP `400`.
 7. `action: 'seed'` or `action: 'remediate'` when active suite `datasetMode === 'LIVE'` -> HTTP `403`.
 8. `action: 'remediate'` when `hazardKey` is not found in active `DEMO` suite -> HTTP `404`.
 9. Unhandled runtime exceptions -> sanitized HTTP `500` (`{ error, errorId }`). Responses set `Content-Type: application/json` without wildcard CORS headers.
@@ -80,14 +80,14 @@ Requests sent by `signedCloudRequest()` in [mcp-server/index.mjs](../../mcp-serv
 
 | MCP Tool | Rovo Action | Parameters (Required / Optional) | Behavior & Contracts |
 |---|---|---|---|
-| `medtrace_get_hazard_lineage` | `get-hazard-lineage-action` | **Required:** none<br>**Optional:** `hazardKey`, `issueKey` | Matches case-insensitively across 9 canonical fields (`hazard.key`, `hazard.id`, `work.key`, `work.id`, `test.testKey`, `test.id`, `spec.id`, `spec.pageId`, `signature.id`). Returns `{ found: true, datasetMode, initialized, traceLink, matchedLinks?, regulatoryStatus, riskClass, safetyRequirement, testStatus, part11Valid, hazard, spec, work, test, signature, complianceState, violations }`, `{ found: false, datasetMode, initialized, queriedKey, message, availableKeys }`, or full project summary (`traceLinks`) when both keys are omitted. |
+| `medtrace_get_hazard_lineage` | `get-hazard-lineage-action` | **Required:** none<br>**Optional:** `hazardKey`, `issueKey` | Sends signed `POST action: "get-hazard-lineage"`. Returns one matching lineage, available keys for a miss, or a reduced summary with selected status fields and projected link identifiers when no key is supplied; not the raw full suite. |
 | `medtrace_verify_iec_compliance` | `verify-iec-compliance-action` | **Required:** none<br>**Optional:** `prDiff`, `componentName`, `issueKey` | Fails closed on uninitialized suites (`initialized: false`, `canShipToClinicalProduction: false`). Extracts explicit canonical suite keys (`/\b[A-Za-z]{2,10}-\d+\b/g`) and dynamic word-boundary tokens (`findLinksMatchingTextTokens`). `DEMO_KEYWORD_FALLBACKS` (`bolus`, `clamp`, `motor`, `flow`, `pwm`, `droplet`, `sensor`, `stall`, `photodiode`, `oled`, `battery`, `voltage`, `spi`) apply **only** when `datasetMode === 'DEMO'`. Computes BFS blast radius via `ComplianceEngine.computeMultiBlastRadius`. `rovoActionHandler` never logs raw `prDiff` content. |
 | `medtrace_remediate_safety_gap` | — | **Required:** `hazardKey`, `simulate` (`true`), `attestationConfirmed` (`true`)<br>**Optional:** `meaning` | Local schema check rejects invalid args with `-32602` (0 HTTP calls). Calls `POST { action: 'remediate', ... }`. Hardcodes actor `'service:mcp-webtrigger'` (ignores any caller `accountId`). Demo-only: rejected with HTTP `403` when `datasetMode === 'LIVE'`. |
 
 ### Dynamic `source` Labels & Rovo Authorization
 
 - `formatSourceLabel(datasetMode)` in [mcp-server/index.mjs](../../mcp-server/index.mjs) emits `'Atlassian Cloud (Forge KVS - LIVE)'` for `'LIVE'`, `'Atlassian Forge KVS (DEMO Dataset)'` for `'DEMO'`, and `'Atlassian Forge KVS (UNSPECIFIED)'` otherwise.
-- `rovoActionHandler` in [src/mcp-server.ts](../../src/mcp-server.ts) restricts `actionKey` to `ALLOWED_ROVO_ACTIONS`, rejects empty `accountId` strings, and invokes `assertRovoUserReadAccess()` (`GET /wiki/rest/api/user/current` or `GET /rest/api/3/mypermissions?permissions=BROWSE_PROJECTS`) inside Forge when `accountId` is supplied.
+- `rovoActionHandler` in [src/mcp-server.ts](../../src/mcp-server.ts) restricts `actionKey` to `ALLOWED_ROVO_ACTIONS`, fails closed on missing or empty `accountId` inside Forge runtime, enforces `assertRovoUserReadAccess()` (requiring `BROWSE_PROJECTS.havePermission === true` or matching Confluence `/wiki/rest/api/user/current` + target page/space read), and invokes `scopeSuiteForRovoCaller()` to check target-scoped Jira permissions and filter `LIVE` suites to caller-authorized projects. `verifyIecCompliance` returns `'CONFIGURED_CHECKS_PASSED'` (not regulatory certification) with non-authoritative remediation guidance when configured checks pass.
 
 ### Webtrigger CI & Release Gate Actions
 

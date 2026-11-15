@@ -1,31 +1,27 @@
 1
 00:00:01,000 --> 00:00:06,000
-In medical device software, changing one firmware
-constant doesn't just change code.
+A software change can affect linked safety evidence.
 
 2
 00:00:06,000 --> 00:00:12,000
-A bolus clamp limit from 5.0 to 5.5 mL/hr
-invalidates a clinical hazard assessment,
+Hazards, specifications, work items, tests,
 
 3
 00:00:12,000 --> 00:00:18,000
-a safety requirement, a verification test,
-and an FDA electronic signature.
+and approval records need traceability.
 
 4
 00:00:18,000 --> 00:00:25,000
-IEC 62304 and ISO 14971 demand you prove
-that chain is intact.
+MedTrace helps inspect those links;
+it does not determine compliance.
 
 5
 00:00:25,000 --> 00:00:31,000
-MedTrace does it live, inside Jira and Confluence —
-with zero data leaving Atlassian.
+Forge-side checks run in Atlassian.
 
 6
 00:00:31,000 --> 00:00:37,000
-One click seeds a Smart Infusion Pump project.
+Configured MCP/CI clients receive requested results.
 
 7
 00:00:37,000 --> 00:00:44,000
@@ -39,7 +35,7 @@ that discipline is the product.
 
 9
 00:00:48,000 --> 00:00:55,000
-SRS-104 drifted after its Part 11 signature.
+SRS-104 drifted after its approval attestation.
 One click runs a breadth-first traversal
 
 10
@@ -74,18 +70,18 @@ while a Class C hazard is unverified. It fails closed.
 
 16
 00:01:34,000 --> 00:01:42,000
-Jira Automation bypasses transition validators —
-platform issue ECO-624 —
+ECO-624 reports an Automation case but is marked Invalid;
+it does not establish REST behavior.
 
 17
 00:01:42,000 --> 00:01:48,000
-so an identical gate runs in CI via an authenticated
-webtrigger. A working GitHub Actions workflow ships in the repo.
+the release gate is manual, reusable, or release-triggered,
+also runs on pull requests when secrets are configured.
 
 18
 00:01:48,000 --> 00:01:56,000
-Verification runs, the electronic signature re-certifies
-against the current SHA-256, and the release gate unlocks.
+This demo-only state change does not run hardware tests
+or certify a real device.
 
 19
 00:01:56,000 --> 00:02:02,000
@@ -94,13 +90,13 @@ error banner — never a simulated success.
 
 20
 00:02:02,000 --> 00:02:12,000
-Everything compiles into a printable 510(k) eSTAR-aligned
-traceability dossier — hashes, signatures, test evidence.
+The printable traceability report is not an official FDA
+eSTAR form or 510(k) submission.
 
 21
 00:02:12,000 --> 00:02:20,000
-No external fetch permissions exist in the manifest —
-clinical data never leaves the Atlassian tenant.
+The manifest grants no external backend-fetch permission.
+MCP/CI responses can return requested data to clients.
 
 22
 00:02:20,000 --> 00:02:30,000
@@ -114,8 +110,8 @@ Replay returns 409 —
 
 24
 00:02:38,000 --> 00:02:44,000
-our test suite proves it live:
-200, 409, 409, 200.
+automated tests cover replay handling.
+Show production results only if freshly verified.
 
 25
 00:02:44,000 --> 00:02:52,000
