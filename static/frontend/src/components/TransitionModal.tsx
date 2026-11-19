@@ -270,7 +270,7 @@ export const TransitionModal: React.FC<TransitionModalProps> = ({ isOpen, onClos
                 }}
               >
                 {result.errorMessage ||
-                  'Linked safety hazard lacks verified test coverage or has an invalidated 21 CFR Part 11 signature.'}
+                  'Linked safety hazard lacks verified test coverage or has an invalidated electronic attestation.'}
               </div>
               {blockingReasons.length > 0 && (
                 <div style={{ marginTop: 10 }}>
@@ -358,7 +358,7 @@ export const TransitionModal: React.FC<TransitionModalProps> = ({ isOpen, onClos
               <div style={{ fontSize: 12, color: 'var(--mt-text-secondary)', lineHeight: '18px' }}>
                 ✓ {matchedLinks.length} linked trace link(s) ({matchedLinks.map((l) => l.hazard.key).join(', ')}) verified with passing tests.
                 <br />
-                ✓ 21 CFR Part 11 electronic signatures match current Confluence SHA-256 digests.
+                ✓ Electronic attestation hashes match current Confluence SHA-256 digests.
                 <br />
                 ✓ Issue transition to <b>Done / Released</b> is authorized.
               </div>
@@ -385,7 +385,7 @@ export const TransitionModal: React.FC<TransitionModalProps> = ({ isOpen, onClos
               <div style={{ fontSize: 12, color: 'var(--mt-text-secondary)', lineHeight: '18px' }}>
                 ✓ All {summary.totalHazards} hazard trace links verified with passing test evidence.
                 <br />
-                ✓ 21 CFR Part 11 electronic signatures validated against current SHA-256 digests.
+                ✓ Electronic attestation hashes validated against current SHA-256 digests.
                 <br />
                 ✓ Global release transition to <b>Done / Released</b> is authorized.
               </div>

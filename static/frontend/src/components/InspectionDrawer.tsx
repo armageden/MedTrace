@@ -51,7 +51,7 @@ export interface InspectionDrawerProps {
     specId?: string;
     meaning: string;
     attestationConfirmed: boolean;
-    passwordConfirmed: boolean;
+    attestationChecked: boolean;
     attestationPhrase: string;
   }) => Promise<boolean> | Promise<void> | void;
   onRemediateDemo: (
@@ -122,11 +122,11 @@ export const InspectionDrawer: React.FC<InspectionDrawerProps> = ({
   const [testNotes, setTestNotes] = useState('');
   const [testValidationError, setTestValidationError] = useState<string | null>(null);
 
-  // 21 CFR Part 11 Sign-off form state (identity & role are derived server-side)
+  // Electronic Attestation Sign-off form state (identity & role are derived server-side)
   const [signMeaning, setSignMeaning] = useState('');
   const [attestationPhrase, setAttestationPhrase] = useState('');
   const [attestationConfirmed, setAttestationConfirmed] = useState(false);
-  const [passwordConfirmed, setPasswordConfirmed] = useState(false);
+  const [attestationChecked, setAttestationChecked] = useState(false);
 
   // Demo simulation consent state (decoupled from Part 11 signMeaning)
   const [demoSimConfirmed, setDemoSimConfirmed] = useState(false);
@@ -157,7 +157,7 @@ export const InspectionDrawer: React.FC<InspectionDrawerProps> = ({
     setSignMeaning(currentLink.signature.meaning || DEFAULT_SIGN_MEANING);
     setAttestationPhrase('');
     setAttestationConfirmed(false);
-    setPasswordConfirmed(false);
+    setAttestationChecked(false);
     setDemoSimConfirmed(false);
     setDemoSimMeaning('');
   }, [link?.id]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -238,7 +238,7 @@ export const InspectionDrawer: React.FC<InspectionDrawerProps> = ({
   const phraseMatches = trimmedPhrase === PART11_ATTESTATION_PHRASE;
   const canSubmitSignOff =
     attestationConfirmed &&
-    passwordConfirmed &&
+    attestationChecked &&
     phraseMatches &&
     signMeaning.trim().length >= 5 &&
     !isBusy;
@@ -296,13 +296,13 @@ export const InspectionDrawer: React.FC<InspectionDrawerProps> = ({
         specId: link.spec.id,
         meaning: signMeaning.trim(),
         attestationConfirmed: true,
-        passwordConfirmed: true,
+        attestationChecked: true,
         attestationPhrase: trimmedPhrase,
       });
       if (result !== false) {
         setAttestationPhrase('');
         setAttestationConfirmed(false);
-        setPasswordConfirmed(false);
+        setAttestationChecked(false);
       }
     } catch {
       // Preserve attestation fields if parent callback rejects
@@ -805,7 +805,7 @@ export const InspectionDrawer: React.FC<InspectionDrawerProps> = ({
                   link.signature.isValid ? 'var(--mt-success-text)' : 'var(--mt-danger-text)'
                 }
               />
-              <span>5. FDA 21 CFR Part 11 Audit Trail &amp; Sign-Off</span>
+              <span>5. Electronic Attestation &amp; Audit Trail</span>
             </div>
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
               <span style={{ fontWeight: 700, fontSize: 12, color: 'var(--mt-text-primary)' }}>
@@ -859,7 +859,7 @@ export const InspectionDrawer: React.FC<InspectionDrawerProps> = ({
                   gap: 5,
                 }}
               >
-                <PenTool size={13} color="var(--mt-brand-text)" /> Execute 21 CFR Part 11 Sign-Off
+                <PenTool size={13} color="var(--mt-brand-text)" /> Execute Electronic Attestation Sign-Off
               </div>
               <div
                 style={{
@@ -874,7 +874,7 @@ export const InspectionDrawer: React.FC<InspectionDrawerProps> = ({
               </div>
               <div>
                 <label htmlFor="signoff-meaning" style={labelStyle}>
-                  Signature Meaning (§11.50, min 5 chars)
+                  Attestation Meaning (min 5 chars)
                 </label>
                 <input
                   id="signoff-meaning"
@@ -917,8 +917,8 @@ export const InspectionDrawer: React.FC<InspectionDrawerProps> = ({
               >
                 <input
                   type="checkbox"
-                  checked={passwordConfirmed}
-                  onChange={(e) => setPasswordConfirmed(e.target.checked)}
+                  checked={attestationChecked}
+                  onChange={(e) => setAttestationChecked(e.target.checked)}
                   style={{ marginTop: 2 }}
                 />
                 <span>
@@ -942,9 +942,8 @@ export const InspectionDrawer: React.FC<InspectionDrawerProps> = ({
                   style={{ marginTop: 2 }}
                 />
                 <span>
-                  I attest under 21 CFR Part 11 that this electronic signature is the legally binding
-                  equivalent of my handwritten signature and certifies SHA-256 hash{' '}
-                  <code>{link.spec.sha256Hash.slice(0, 10)}...</code>.
+                  I attest that this electronic attestation is my deliberate approval record and
+                  certifies SHA-256 hash <code>{link.spec.sha256Hash.slice(0, 10)}...</code>.
                 </span>
               </label>
               <button
@@ -958,7 +957,7 @@ export const InspectionDrawer: React.FC<InspectionDrawerProps> = ({
                   color: '#ffffff',
                 }}
               >
-                <PenTool size={14} /> Sign Off Spec (21 CFR Part 11)
+                <PenTool size={14} /> Sign Off Spec (Attestation)
               </button>
             </div>
           </div>
@@ -1250,8 +1249,8 @@ export const InspectionDrawer: React.FC<InspectionDrawerProps> = ({
                 fontWeight: 600,
               }}
             >
-              LIVE mode active: record real test evidence and execute 21 CFR Part 11 sign-off above
-              to clear this gate.
+              LIVE mode active: record real test evidence and execute electronic attestation sign-off
+              above to clear this gate.
             </div>
           )}
         </div>

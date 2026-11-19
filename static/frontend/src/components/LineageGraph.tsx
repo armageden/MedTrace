@@ -34,7 +34,7 @@ const STAGE_COLUMNS = [
   { key: 'spec', label: '2. CONFLUENCE SRS SPEC', x: 340, width: 220 },
   { key: 'work', label: '3. JIRA WORK & PR', x: 640, width: 210 },
   { key: 'test', label: '4. IEC 62304 VERIFICATION', x: 920, width: 220 },
-  { key: 'signature', label: '5. 21 CFR PART 11 SIGN-OFF', x: 1210, width: 220 },
+  { key: 'signature', label: '5. ELECTRONIC ATTESTATION', x: 1210, width: 220 },
 ] as const;
 
 function minimapNodeColor(node: Node): string {

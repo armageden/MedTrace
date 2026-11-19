@@ -262,7 +262,7 @@ describe('FE-01..FE-04 & FE-07: App races, bridge errors, confirm seed, and tran
       screen.getByLabelText(/I confirm I am the signer and intend this electronic attestation/i)
     );
     await user.click(
-      screen.getByLabelText(/I attest under 21 CFR Part 11/i)
+      screen.getByLabelText(/I attest that this electronic attestation/i)
     );
     await user.click(screen.getByRole('button', { name: /Sign Off Spec/i }));
 
@@ -412,7 +412,7 @@ describe('FE-01..FE-04 & FE-07: App races, bridge errors, confirm seed, and tran
     // Test signOffPart11 returning null retains drawer attestation inputs
     const phraseInput = screen.getByLabelText(/Required Attestation Phrase/i);
     const pwdBox = screen.getByLabelText(/I confirm I am the signer and intend this electronic attestation/i);
-    const attBox = screen.getByLabelText(/I attest under 21 CFR Part 11/i);
+    const attBox = screen.getByLabelText(/I attest that this electronic attestation/i);
 
     await user.type(phraseInput, PART11_ATTESTATION_PHRASE);
     await user.click(pwdBox);
@@ -420,7 +420,7 @@ describe('FE-01..FE-04 & FE-07: App races, bridge errors, confirm seed, and tran
     await user.click(screen.getByRole('button', { name: /Sign Off Spec/i }));
 
     await waitFor(() => {
-      expect(screen.getByRole('alert')).toHaveTextContent(/Part 11 electronic signature/i);
+      expect(screen.getByRole('alert')).toHaveTextContent(/Electronic attestation/i);
     });
     expect(phraseInput).toHaveValue(PART11_ATTESTATION_PHRASE);
     expect(pwdBox).toBeChecked();
@@ -684,7 +684,7 @@ describe('FE-01..FE-04 & FE-07: App races, bridge errors, confirm seed, and tran
     await user.click(
       screen.getByLabelText(/I confirm I am the signer and intend this electronic attestation/i)
     );
-    await user.click(screen.getByLabelText(/I attest under 21 CFR Part 11/i));
+    await user.click(screen.getByLabelText(/I attest that this electronic attestation/i));
     await user.click(screen.getByRole('button', { name: /Sign Off Spec/i }));
 
     await waitFor(() => {
@@ -694,7 +694,7 @@ describe('FE-01..FE-04 & FE-07: App races, bridge errors, confirm seed, and tran
         specId: 'spec-link-1',
         meaning: 'Safety verification sign-off',
         attestationConfirmed: true,
-        passwordConfirmed: true,
+        attestationChecked: true,
         attestationPhrase: PART11_ATTESTATION_PHRASE,
       });
     });

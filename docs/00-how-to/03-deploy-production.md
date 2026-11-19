@@ -66,7 +66,7 @@ To enforce IEC 62304 checks on interactive Jira issue transitions:
 1. Open **Jira Project Settings -> Workflows** and edit the target release workflow.
 2. Select the release transition (for example, `In Review -> Done` or `Ready for Release`).
 3. Add a **Validator** and choose **MedTrace Safety Gate** (`medtrace-safety-validator` in [manifest.yml](../../manifest.yml), backed by `src/workflow-validator.ts`).
-4. Publish the workflow. Transitions on safety-tracked issues fail closed when the `LIVE` suite is uninitialized or when any matching trace link fails compliance evaluation (`requireTestEvidence: true` in `LIVE` mode).
+4. Publish the workflow. Transitions on safety-tracked issues fail closed when the `LIVE` suite is uninitialized, when any matching trace link fails compliance evaluation (`requireTestEvidence: true` in `LIVE` mode), or when an unsynced issue carries a safety label or Hazard issue type (`probeUnsyncedSafetyIssue`).
 
 > **Validator boundary:** Atlassian issue [`ECO-624`](https://jira.atlassian.com/browse/ECO-624) reports an Automation case but is marked Invalid and does not establish direct REST API behavior. The repository's CI calls the release-gate workflow on pull requests and pushes to main when its secrets are configured. Validate deployment-specific automation paths on your site.
 

@@ -180,7 +180,7 @@ export const AuditHeader: React.FC<AuditHeaderProps> = ({
               MedTrace{' '}
               {!compact && (
                 <span style={{ fontSize: 13, fontWeight: 500, color: 'var(--mt-text-muted)' }}>
-                  | IEC 62304 &amp; FDA 21 CFR Part 11 Living Traceability Engine
+                  | IEC 62304 &amp; ISO 14971 Living Traceability Engine
                 </span>
               )}
             </div>
@@ -594,7 +594,7 @@ export const AuditHeader: React.FC<AuditHeaderProps> = ({
                 All Valid
               </span>
             )}
-            <span style={{ fontSize: 11, color: 'var(--mt-text-muted)' }}>21 CFR Part 11 SHA-256</span>
+            <span style={{ fontSize: 11, color: 'var(--mt-text-muted)' }}>SHA-256 Attestation</span>
           </div>
         </div>
       </div>

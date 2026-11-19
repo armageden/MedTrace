@@ -8,10 +8,8 @@ Deterministic IEC 62304 & ISO 14971 traceability for Jira, Rovo, and MCP, with a
 ## Track & Category Nominations
 * **Primary Category:** Apps for Specialized Industries (Medical Devices & Healthcare Engineering)
 * **Target Bonus Prize (select 1 per official rules; do NOT enter Best Marketplace Published App on this same App ID, as Marketplace listing disables shareable installation links):**
-  * Best Agents — Rovo / Assignable agents (`rovo:agent` MedTrace Regulatory Auditor + `get-hazard-lineage-action` / `verify-iec-compliance-action`)
-  * Best App with Atlassian MCP (`rovo:mcp` server exposing both actions through the Atlassian-hosted MCP endpoint)
-  * Best Apps with Teamwork Graph Integration (`confluencePageOwners` curated query via `api.asUser().requestTeamworkGraph`, surfacing Confluence spec owners for review in the Inspection Drawer and Rovo hazard lineage)
-  * *Per the rules, a submission can win at most one bonus prize (and one main-category prize).*
+  * **Primary pick — Best App with Atlassian MCP:** `rovo:mcp` server (`medtrace-mcp-server`) exposing `get-hazard-lineage-action` and `verify-iec-compliance-action` through `https://mcp.atlassian.com/forge/5e49c10e-696f-4984-9d00-4a47d0a5dd99` (site/org admin must enable external MCP exposure under **Atlassian Administration → Apps → Sites → site → Connected apps → MedTrace**).
+  * *Alternative eligible module (pick only 1 bonus per rules):* Best Agents (`rovo:agent` MedTrace Auditor + both deterministic actions). Do not select Teamwork Graph (curated owner read only) or Marketplace Published App (breaks shareable installation links).
 
 ---
 
@@ -66,9 +64,9 @@ For developer convenience during implementation, MedTrace provides:
 * **Atlassian-hosted MCP (`rovo:mcp`) — primary path:** The `medtrace-mcp-server` module exposes `get-hazard-lineage-action` and `verify-iec-compliance-action` through Atlassian's MCP server at `https://mcp.atlassian.com/forge/5e49c10e-696f-4984-9d00-4a47d0a5dd99`. External MCP exposure is disabled by default; a site or org admin enables it per app installation in Atlassian Administration → Apps → Sites → site → Connected apps → MedTrace. MCP clients connect over OAuth 2.1 (the user picks the site and approves), and tools run subject to the invoking user's own permissions.
 * **Local stdio MCP bridge (`mcp-server/`) — optional secondary:** A standalone stdio bridge for local IDE clients, forwarding signed requests to the app's HMAC-authenticated Forge webtrigger. Requested response data is returned to that client; the client may retain it under its own policies.
 
-*Example IDE Interaction:*
-> **Developer in Cursor:** *"I am modifying `pump_motor.c` to change bolus flow-rate threshold to 5.5 mL/hr. Does this touch any IEC 62304 hazard?"*  
-> **MedTrace MCP Response:** *"⚠️ CRITICAL: Diff modifies bolus delivery logic governed by ISO 14971 Class C Hazard HAZ-101. IEC 62304 verification test TEST-88 is UNTESTED and Confluence spec SRS-104 has signature drift. Release is BLOCKED until remediated."*
+* **Example IDE Interaction:**
+> **Developer in Cursor:** *"I am modifying `SRS-201` / `MED-42` bolus rate clamp to 5.5 mL/hr. Does this touch any IEC 62304 hazard?"*  
+> **MedTrace MCP Response:** *"⚠️ CRITICAL: Change references bolus delivery logic governed by ISO 14971 Class C Hazard HAZ-101. IEC 62304 verification test TEST-88 is UNTESTED and Confluence spec SRS-104 has signature drift (`configuredChecksPassed: false`)."*
 
 *Data and Regulatory Boundary:* MedTrace is intended for non-PHI engineering metadata, but does not detect or redact PHI in source fields. Do not ingest patient information. MCP/CI responses may transmit requested tenant data to the configured client. The assistant is not connected to device runtime and does not make regulatory determinations.
 
@@ -152,7 +150,7 @@ To ensure transparent evaluation by technical judges, we explicitly document Med
 ---
 
 ## Try it out
-* **Installation Link:** `[[INSTALL_LINK — paste from Developer Console → Distribution]]`
+* **Installation Link (Jira + Confluence):** https://developer.atlassian.com/console/install/5e49c10e-696f-4984-9d00-4a47d0a5dd99?signature=AYABeMiP1zS%2Fqyhad83bC8PeCZcAAAADAAdhd3Mta21zAEthcm46YXdzOmttczp1cy13ZXN0LTI6NzA5NTg3ODM1MjQzOmtleS83MDVlZDY3MC1mNTdjLTQxYjUtOWY5Yi1lM2YyZGNjMTQ2ZTcAuAECAQB4CxqLTo9l4lqXuFjNim1xJM%2Bp%2F3TVP9xHS2BrU5DRRucB1BD8mEv4t3Ljf3OukSd5eQAAAH4wfAYJKoZIhvcNAQcGoG8wbQIBADBoBgkqhkiG9w0BBwEwHgYJYIZIAWUDBAEuMBEEDEh%2BKItDcqUwro%2BHrQIBEIA7MA0KHRf%2BF3YuTEAMovFxVALBMAXOWvXwcePSrlXd8eWbO0Gu4PlzXePH9QGutTzgsBB7obWKVcKw55kAB2F3cy1rbXMAS2Fybjphd3M6a21zOmV1LXdlc3QtMTo3MDk1ODc4MzUyNDM6a2V5LzQ2MzBjZTZiLTAwYzMtNGRlMi04NzdiLTYyN2UyMDYwZTVjYwC4AQICAHi9bVMAkme4qVQX1fQHo6ePw3H40A7cGfz7yrmSfBWMXgHlW5ynSsuhZ7zbqiK2sh%2B2AAAAfjB8BgkqhkiG9w0BBwagbzBtAgEAMGgGCSqGSIb3DQEHATAeBglghkgBZQMEAS4wEQQMkPcTbpchY2MsayhfAgEQgDuWokoIpYBa88xi5ggk1L1JkcZBleXY2Fhu75VlWDzfTq%2FPjQu2HTJqqUvWAGr3gQmwdhbGrdneGDgHcgAHYXdzLWttcwBLYXJuOmF3czprbXM6dXMtZWFzdC0xOjcwOTU4NzgzNTI0MzprZXkvNmMxMjBiYTAtNGNkNS00OTg1LWI4MmUtNDBhMDQ5NTJjYzU3ALgBAgIAeDYASx0XCjkny4iLV6vz%2BKtEGSGT6kdt0QRpkn6D%2FlVEAbLrick3%2FS2k9TO8wl7jjBMAAAB%2BMHwGCSqGSIb3DQEHBqBvMG0CAQAwaAYJKoZIhvcNAQcBMB4GCWCGSAFlAwQBLjARBAwPyU3UXZLk3LyqQEcCARCAO2LkZ1%2FqLnWR7RJ5bJnJymaVMNymPTqxgHoTlttTyoG0WExeUn7yicWSDKcF1uBOEDJRq0D%2Frh397b4AAgAAAAAMAAAQAAAAAAAAAAAAAAAAAJAZ9eb6OkPjsbTya19Mcjb%2F%2F%2F%2F%2FAAAAAQAAAAAAAAAAAAAAAQAAADKY080GlKheizYgeQ7j1hfyCGMz%2B3h70XeCt2x8c9Wb68RhMMKY2K8hrL3MNvyTxR4UAv7xImuhzOVtv0ziWd4qqF4%3D&product=jira&product=confluence
 * **Demo Video (< 5:00):** `[[YOUTUBE_URL]]`
 * **GitHub Repository:** [https://github.com/armageden/MedTrace](https://github.com/armageden/MedTrace) (Public, Apache-2.0, with automated test suite)
 

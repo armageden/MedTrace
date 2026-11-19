@@ -689,11 +689,16 @@ export class ComplianceEngine {
 
   /**
    * Shared issue/global release gate policy used identically by Jira Workflow Validator
-   * and the CI/CD HMAC Webtrigger (`verify-release-gate`). Fails closed on uninitialized suites.
+   * and the CI/CD HMAC Webtrigger (`verify-release-gate`). Fails closed on uninitialized suites
+   * and on unsynced issues carrying a safety label or hazard issue type.
    */
   public static evaluateIssueReleaseGate(
     issueKey: string | undefined,
-    suite: ComplianceSummary
+    suite: ComplianceSummary,
+    options?: {
+      isSafetyTaggedIssue?: boolean;
+      unsyncedSafetyReason?: string;
+    }
   ): ReleaseGateOutcome {
     const cleanIssueKey = (issueKey || '').trim().toUpperCase();
     const isEmptyOrUninitialized =
@@ -715,6 +720,16 @@ export class ComplianceEngine {
           (l.work?.key || '').toUpperCase() === cleanIssueKey ||
           (l.hazard?.key || '').toUpperCase() === cleanIssueKey
       );
+
+      if (matchedLinks.length === 0 && options?.isSafetyTaggedIssue === true) {
+        const detail =
+          options.unsyncedSafetyReason ||
+          `Safety-classified issue ${cleanIssueKey} is not synced in the active compliance suite.`;
+        return {
+          result: false,
+          errorMessage: `❌ [MedTrace Safety Gate] Human-initiated transition blocked for ${cleanIssueKey}!\n• ${detail}\n\nRun Live Sync and complete verification evidence + attestation before releasing.`,
+        };
+      }
 
       const blocking = matchedLinks.find((l) => l.complianceState !== 'VERIFIED');
       if (blocking) {

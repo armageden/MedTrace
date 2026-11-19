@@ -376,7 +376,7 @@ test.describe('Workflow Validator Handler - Typed Release Gate & Fail-Closed Beh
     }
   });
 
-  test.it('approves tracked verified issues and untracked issues when suite is initialized', async () => {
+  test.it('approves tracked verified issues and unsynced non-safety issues when suite is initialized, while blocking unsynced safety-labeled issues', async () => {
     const { blockedLink, verifiedLink } = buildSampleLinks();
     const blockedSuite = ComplianceEngine.generateComplianceReport([blockedLink, verifiedLink], 'LIVE', 'Prod Pump');
     SeederService.getActiveComplianceSuite = async () => blockedSuite;
@@ -386,11 +386,59 @@ test.describe('Workflow Validator Handler - Typed Release Gate & Fail-Closed Beh
       { issue: { key: 'MED-43' }, transition: { name: 'Done' } },
       { issue: { key: 'HAZ-102' } },
       { issue: { key: 'DOCS-10' } },
+      { issue: { key: 'DOCS-11', fields: { labels: ['docs'], issuetype: { name: 'Task' } } } },
     ]) {
       const res = await workflowValidatorHandler(payload);
       assert.strictEqual(res.result, true);
       assert.strictEqual(res.errorMessage, undefined);
     }
+
+    // Inline safety label or Hazard issue type on an unsynced issue MUST fail closed
+    for (const payload of [
+      { issue: { key: 'MED-99', fields: { labels: ['class-c'], issuetype: { name: 'Story' } } } },
+      { issue: { key: 'MED-100', fields: { labels: ['iec-62304'], issuetype: { name: 'Task' } } } },
+      { issue: { key: 'MED-101', fields: { labels: [], issuetype: { name: 'Hazard' } } } },
+    ]) {
+      const res = await workflowValidatorHandler(payload);
+      assert.strictEqual(res.result, false);
+      assert.match(res.errorMessage || '', /not synced in the active compliance suite/i);
+    }
+
+    // Forge runtime Jira REST lookup blocks unsynced safety-labeled issues and fails closed on Jira errors, while passing everyday Tasks
+    await withForgeMocks(
+      {
+        asAppImpl: () => ({
+          requestJira: async (url) => {
+            const urlStr = url && typeof url.value_ === 'string' ? url.value_ : String(url || '');
+            if (urlStr.includes('NEW-1')) {
+              return makeJsonResponse(200, {
+                key: 'NEW-1',
+                fields: { labels: ['class-c', 'iec-62304'], issuetype: { name: 'Story' } },
+              });
+            }
+            if (urlStr.includes('ERR-1')) {
+              return makeJsonResponse(500, { error: 'Jira unavailable' });
+            }
+            return makeJsonResponse(200, {
+              key: 'DOCS-20',
+              fields: { labels: ['chore'], issuetype: { name: 'Task' } },
+            });
+          },
+        }),
+      },
+      async () => {
+        const unsyncedSafetyRes = await workflowValidatorHandler({ issue: { key: 'NEW-1' } });
+        assert.strictEqual(unsyncedSafetyRes.result, false);
+        assert.match(unsyncedSafetyRes.errorMessage || '', /NEW-1.*not synced/i);
+
+        const jiraErrRes = await workflowValidatorHandler({ issue: { key: 'ERR-1' } });
+        assert.strictEqual(jiraErrRes.result, false);
+        assert.match(jiraErrRes.errorMessage || '', /Unable to verify safety labels.*ERR-1/i);
+
+        const everydayTaskRes = await workflowValidatorHandler({ issue: { key: 'DOCS-20' } });
+        assert.strictEqual(everydayTaskRes.result, true);
+      }
+    );
   });
 
   test.it('blocks untracked and empty issue keys on uninitialized LIVE suite (fail-closed)', async () => {
@@ -626,9 +674,9 @@ test.describe('McpToolService & rovoActionHandler Integration Tests', () => {
     const uninitSuite = await SeederService.getUninitializedLiveSuite();
     SeederService.getActiveComplianceSuite = async () => uninitSuite;
 
-    const uninitVerify = await McpToolService.verifyIecCompliance({ componentName: 'bolus clamp', issueKey: 'MED-42' });
+    const uninitVerify = await McpToolService.verifyIecCompliance({ componentName: 'bolus clamp' });
     assert.strictEqual(uninitVerify.initialized, false);
-    assert.strictEqual(uninitVerify.canShipToClinicalProduction, false);
+    assert.strictEqual(uninitVerify.configuredChecksPassed, false);
     assert.strictEqual(uninitVerify.touchesSafetyCriticalCode, false);
     assert.strictEqual(uninitVerify.classCSummary.status, 'BLOCKED_BY_SAFETY_GATE');
     assert.strictEqual(uninitVerify.graphBlastRadius, undefined);
@@ -645,7 +693,7 @@ test.describe('McpToolService & rovoActionHandler Integration Tests', () => {
     // Multi-key diff: clean link first, blocked link second -> must block without "no remediation required"
     const multiKeyRes = await McpToolService.verifyIecCompliance({ prDiff: 'diff updating MED-43 and MED-42' });
     assert.strictEqual(multiKeyRes.touchesSafetyCriticalCode, true);
-    assert.strictEqual(multiKeyRes.canShipToClinicalProduction, false);
+    assert.strictEqual(multiKeyRes.configuredChecksPassed, false);
     assert.ok(multiKeyRes.affectedHazards.some((h) => h.includes('HAZ-101')));
     assert.ok(
       !multiKeyRes.remediationGuidance.some((g) => /no remediation required|All traversed artifacts are verified/i.test(g))
@@ -654,7 +702,7 @@ test.describe('McpToolService & rovoActionHandler Integration Tests', () => {
     // M:N shared hazard: targeting verified MED-501 catches unverified sibling MED-502
     const sharedHazardRes = await McpToolService.verifyIecCompliance({ issueKey: 'MED-501' });
     assert.strictEqual(sharedHazardRes.touchesSafetyCriticalCode, true);
-    assert.strictEqual(sharedHazardRes.canShipToClinicalProduction, false);
+    assert.strictEqual(sharedHazardRes.configuredChecksPassed, false);
     assert.ok(sharedHazardRes.graphBlastRadius.blockedWorkItems.includes('MED-502'));
     assert.ok(
       !sharedHazardRes.remediationGuidance.some((g) => /no remediation required|All traversed artifacts are verified/i.test(g))
@@ -663,32 +711,38 @@ test.describe('McpToolService & rovoActionHandler Integration Tests', () => {
     // Isolated verified link MED-43 remains shippable
     const cleanRes = await McpToolService.verifyIecCompliance({ issueKey: 'MED-43' });
     assert.strictEqual(cleanRes.touchesSafetyCriticalCode, true);
-    assert.strictEqual(cleanRes.canShipToClinicalProduction, true);
+    assert.strictEqual(cleanRes.configuredChecksPassed, true);
     assert.deepStrictEqual(cleanRes.graphBlastRadius.blockedWorkItems, []);
     assert.match(cleanRes.remediationGuidance[0], /Configured traceability checks passed/);
     assert.doesNotMatch(cleanRes.remediationGuidance[0], /Authorized for 510\(k\)|CERTIFIED_READY/i);
 
-    // LIVE mode disables DEMO infusion-pump fallbacks ('oled', 'droplet') and avoids substring matches ('generated' != 'rate')
+    // Neither LIVE nor DEMO mode matches hardcoded keyword fallbacks ('oled', 'battery', 'voltage', 'flow', 'motor')
     const liveKeywordBlocked = await McpToolService.verifyIecCompliance({
       prDiff: 'generated oled battery spi voltage',
     });
     assert.strictEqual(liveKeywordBlocked.touchesSafetyCriticalCode, false);
-    assert.strictEqual(liveKeywordBlocked.canShipToClinicalProduction, false);
+    assert.strictEqual(liveKeywordBlocked.configuredChecksPassed, false);
 
     // Word-boundary token matching works dynamically in LIVE mode for actual spec tokens
     const tokenMatch = await McpToolService.verifyIecCompliance({
       componentName: 'photodiode calibration routine',
     });
     assert.strictEqual(tokenMatch.touchesSafetyCriticalCode, true);
-    assert.strictEqual(tokenMatch.canShipToClinicalProduction, true);
+    assert.strictEqual(tokenMatch.configuredChecksPassed, true);
 
-    // DEMO mode enables infusion-pump keyword fallback
+    // DEMO mode matches only real suite artifact keys/tokens (no hardcoded DEMO_KEYWORD_FALLBACKS)
     const demoSuite = ComplianceEngine.generateComplianceReport([blockedLink, verifiedLink], 'DEMO', 'Demo Pump');
     SeederService.getActiveComplianceSuite = async () => demoSuite;
-    const demoFallbackRes = await McpToolService.verifyIecCompliance({ componentName: 'bolus motor' });
-    assert.strictEqual(demoFallbackRes.touchesSafetyCriticalCode, true);
-    assert.ok(demoFallbackRes.graphBlastRadius);
-    assert.match(demoFallbackRes.graphBlastRadius.trigger, /SRS-104/);
+    const demoRandomWords = await McpToolService.verifyIecCompliance({
+      prDiff: 'adjust battery voltage and flow motor pwm',
+    });
+    assert.strictEqual(demoRandomWords.touchesSafetyCriticalCode, false);
+    assert.strictEqual(demoRandomWords.graphBlastRadius, undefined);
+
+    const demoRealTokenRes = await McpToolService.verifyIecCompliance({ componentName: 'bolus clamp' });
+    assert.strictEqual(demoRealTokenRes.touchesSafetyCriticalCode, true);
+    assert.ok(demoRealTokenRes.graphBlastRadius);
+    assert.match(demoRealTokenRes.graphBlastRadius.trigger, /SRS-104/);
   });
 
   test.it('rovoActionHandler enforces action allowlist, user read probes in Forge runtime, and sanitized errors', async () => {
@@ -715,7 +769,7 @@ test.describe('McpToolService & rovoActionHandler Integration Tests', () => {
       context: { moduleKey: 'verify-iec-compliance' },
       inputs: { issueKey: 'MED-42' },
     });
-    assert.strictEqual(verifyAliasRes.canShipToClinicalProduction, false);
+    assert.strictEqual(verifyAliasRes.configuredChecksPassed, false);
     assert.strictEqual(verifyAliasRes.touchesSafetyCriticalCode, true);
 
     const kvsMock = createLocalMockKvs();
@@ -870,7 +924,7 @@ test.describe('McpToolService & rovoActionHandler Integration Tests', () => {
           { issueKey: 'ALPHA-1' },
           { moduleKey: 'verify-iec-compliance-action', accountId: 'acc-alpha', extension: { type: 'jira:projectPage' } }
         );
-        assert.strictEqual(cleanVerify.canShipToClinicalProduction, true);
+        assert.strictEqual(cleanVerify.configuredChecksPassed, true);
         assert.strictEqual(cleanVerify.classCSummary.status, 'CONFIGURED_CHECKS_PASSED');
         assert.doesNotMatch(cleanVerify.remediationGuidance.join(' '), /Authorized for 510\(k\)|CERTIFIED_READY/i);
       }
@@ -903,7 +957,7 @@ test.describe('McpToolService & rovoActionHandler Integration Tests', () => {
           { issueKey: 'MED-42' },
           { moduleKey: 'verify-iec-compliance-action', accountId: 'acc-authorized', extension: { type: 'confluence:globalPage' } }
         );
-        assert.strictEqual(confOk.canShipToClinicalProduction, false);
+        assert.strictEqual(confOk.configuredChecksPassed, false);
         assert.strictEqual(confOk.touchesSafetyCriticalCode, true);
       }
     );

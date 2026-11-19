@@ -329,7 +329,7 @@ export const TOOLS = [
   {
     name: 'medtrace_verify_iec_compliance',
     description:
-      'Audits the active sprint or PR diff against IEC 62304 and FDA 21 CFR Part 11 requirements via the live Forge BFS compliance engine.',
+      'Audits the active sprint or PR diff against configured IEC 62304 traceability rules and approval hashes via the live Forge BFS compliance engine.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -365,7 +365,7 @@ export const TOOLS = [
         },
         attestationConfirmed: {
           type: 'boolean',
-          description: 'Must be true to confirm 21 CFR Part 11 attestation meaning.',
+          description: 'Must be true to confirm electronic attestation meaning.',
         },
         meaning: {
           type: 'string',

@@ -78,7 +78,7 @@ MEDTRACE_MCP_SECRET="<your-32-byte-hex-secret>"
 ## Available Tools
 
 - `medtrace_get_hazard_lineage`: Queries the 5-stage trace chain (`HAZARD <-> SPEC <-> WORK <-> TEST <-> SIGNATURE`) via signed `POST action: "get-hazard-lineage"`. Matches case-insensitively across 9 canonical identifiers (`hazard.key`, `hazard.id`, `work.key`, `work.id`, `test.testKey`, `test.id`, `spec.id`, `spec.pageId`, `signature.id`).
-  - Returns one matching lineage, available keys for a miss, or a reduced project summary with selected status fields and projected link identifiers. It does not return the raw full suite.
+  - Returns one matching lineage or `availableKeys` for a miss when a lookup key is provided; when no key is supplied, returns only the status summary without `traceLinks` (preventing full-suite dumps over the shared perimeter secret).
   - Sets `source` dynamically via `formatSourceLabel`:
     - `'Atlassian Cloud (Forge KVS - LIVE)'` (`LIVE`)
     - `'Atlassian Forge KVS (DEMO Dataset)'` (`DEMO`)
@@ -100,6 +100,6 @@ Tool-level webtrigger errors return MCP `{ isError: true }` with structured JSON
 ## Security Posture (HMAC-SHA256 & Forge KVS Honesty)
 
 - Every request signs `${timestamp}.${nonce}.${rawBody}` with HMAC-SHA256 (`x-medtrace-timestamp` in epoch milliseconds bounded to `-300s`..`+30s`, `x-medtrace-nonce` claimed atomically in `@forge/kvs` with a 7-minute TTL, verified with `crypto.timingSafeEqual`).
-- **Platform and Attestation Disclosure:** `@forge/kvs` is not hardware WORM or HSM storage. MedTrace records tamper-evident electronic attestations; it does not claim 21 CFR Part 11 conformance. `passwordConfirmed: true` is an attestation field, not password re-authentication. MCP responses may transmit requested tenant data to the configured client.
+- **Platform and Attestation Disclosure:** `@forge/kvs` is not hardware WORM or HSM storage. MedTrace records tamper-evident electronic attestations; it does not claim 21 CFR Part 11 conformance. `attestationChecked: true` is a session attestation checkbox, not password re-authentication. MCP responses may transmit requested tenant data to the configured client.
 
 For full webtrigger and Rovo integration contracts, see [docs/03-mcp-integration/live-sync.md](../docs/03-mcp-integration/live-sync.md).

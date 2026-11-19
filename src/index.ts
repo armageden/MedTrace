@@ -12,7 +12,7 @@ import {
 import { AuditLogService, MAX_AUDIT_LOG_PAGE_LIMIT } from './audit-log';
 import { TeamworkGraphService } from './teamwork-graph';
 import { McpToolService, rovoActionHandler } from './mcp-server';
-import { workflowValidatorHandler } from './workflow-validator';
+import { probeUnsyncedSafetyIssue, workflowValidatorHandler } from './workflow-validator';
 import { isForgeRuntime } from './runtime';
 import { validateHttpsUrl } from './crypto-utils';
 import {
@@ -950,11 +950,13 @@ defineTypedResolver('signOffPart11', async (req) => {
   const attestationPhrase =
     typeof req.payload?.attestationPhrase === 'string' ? req.payload.attestationPhrase.trim() : '';
   const attestationConfirmed = req.payload?.attestationConfirmed === true;
-  const passwordConfirmed = req.payload?.passwordConfirmed === true;
+  const rawPayload = req.payload as Record<string, unknown> | undefined;
+  const attestationChecked =
+    req.payload?.attestationChecked === true || rawPayload?.passwordConfirmed === true;
 
-  if (!attestationConfirmed || !passwordConfirmed) {
+  if (!attestationConfirmed || !attestationChecked) {
     throw new Error(
-      'Part 11 attestation: Both attestationConfirmed and passwordConfirmed confirmation flags must be true.'
+      'Part 11 attestation: Both attestationConfirmed and attestationChecked confirmation flags must be true.'
     );
   }
   if (attestationPhrase !== PART11_ATTESTATION_PHRASE) {
@@ -993,7 +995,7 @@ defineTypedResolver('signOffPart11', async (req) => {
       meaning,
       attestationPhrase,
       attestationConfirmed: true,
-      passwordConfirmed: true,
+      attestationChecked: true,
       ...(clientPublicKeySpki ? { clientPublicKeySpki } : {}),
       ...(clientSignatureBase64 ? { clientSignatureBase64 } : {}),
     },
@@ -1463,9 +1465,16 @@ export async function mcpWebtriggerHandler(request: WebtriggerRequest): Promise<
       }
 
       case 'get-hazard-lineage': {
+        const hazardKey = typeof body.hazardKey === 'string' ? body.hazardKey.trim() : '';
+        const issueKey = typeof body.issueKey === 'string' ? body.issueKey.trim() : '';
+        if (!hazardKey && !issueKey) {
+          const suite = await SeederService.getActiveComplianceSuite();
+          const { traceLinks: _traceLinks, ...statusSummary } = suite;
+          return jsonResponse(200, statusSummary);
+        }
         const result = await McpToolService.getHazardLineage({
-          hazardKey: typeof body.hazardKey === 'string' ? body.hazardKey : undefined,
-          issueKey: typeof body.issueKey === 'string' ? body.issueKey : undefined,
+          hazardKey: hazardKey || undefined,
+          issueKey: issueKey || undefined,
         });
         return jsonResponse(200, result);
       }
@@ -1551,7 +1560,24 @@ export async function mcpWebtriggerHandler(request: WebtriggerRequest): Promise<
           });
         }
 
-        const gate = ComplianceEngine.evaluateIssueReleaseGate(issueKey, suite);
+        const isInitialized =
+          suite.initialized !== false &&
+          Array.isArray(suite.traceLinks) &&
+          !(suite.traceLinks.length === 0 && (!issueKey || (suite.totalHazards ?? 0) === 0));
+        const cleanUpper = issueKey ? issueKey.toUpperCase() : '';
+        const matchedInSuite =
+          Boolean(cleanUpper) &&
+          suite.traceLinks.some(
+            (l) =>
+              (l.work?.key || '').toUpperCase() === cleanUpper ||
+              (l.hazard?.key || '').toUpperCase() === cleanUpper
+          );
+        const safetyProbe =
+          issueKey && isInitialized && !matchedInSuite
+            ? await probeUnsyncedSafetyIssue(issueKey)
+            : undefined;
+
+        const gate = ComplianceEngine.evaluateIssueReleaseGate(issueKey, suite, safetyProbe);
         return jsonResponse(gate.result ? 200 : 403, {
           ...gate,
           evaluatedIssueKey: issueKey,

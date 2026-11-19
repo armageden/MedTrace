@@ -586,7 +586,7 @@ test.describe('McpToolService & Rovo Agent - Dynamic Graph Traversal', () => {
       issueKey: 'MED-42',
     });
     assert.strictEqual(res.touchesSafetyCriticalCode, true);
-    assert.strictEqual(res.canShipToClinicalProduction, false);
+    assert.strictEqual(res.configuredChecksPassed, false);
   });
 
   test.it('allows shipping for Class A non-critical change when suite has no blocking violations for that component', async () => {
@@ -616,7 +616,7 @@ test.describe('McpToolService & Rovo Agent - Dynamic Graph Traversal', () => {
         componentName: 'oled backlight display',
       });
       assert.strictEqual(res.touchesSafetyCriticalCode, true);
-      assert.strictEqual(res.canShipToClinicalProduction, true);
+      assert.strictEqual(res.configuredChecksPassed, true);
     } finally {
       SeederService.getActiveComplianceSuite = originalGet;
     }
@@ -1619,7 +1619,7 @@ test.describe('SeederService - Sharded KVS Persistence, Test Recording, Part 11 
           attestation: {
             meaning: 'Approved',
             attestationConfirmed: false,
-            passwordConfirmed: true,
+            attestationChecked: true,
             attestationPhrase: PART11_ATTESTATION_PHRASE,
           },
           actorAccountId: 'cmo-1',
@@ -1633,7 +1633,7 @@ test.describe('SeederService - Sharded KVS Persistence, Test Recording, Part 11 
           attestation: {
             meaning: 'OK',
             attestationConfirmed: true,
-            passwordConfirmed: true,
+            attestationChecked: true,
             attestationPhrase: PART11_ATTESTATION_PHRASE,
           },
           actorAccountId: 'cmo-1',
@@ -1647,7 +1647,7 @@ test.describe('SeederService - Sharded KVS Persistence, Test Recording, Part 11 
       attestation: {
         meaning: 'Clinical Safety Approval for v3 Bolus Clamp',
         attestationConfirmed: true,
-        passwordConfirmed: true,
+        attestationChecked: true,
         attestationPhrase: PART11_ATTESTATION_PHRASE,
         signedBy: 'Spoofed Display Name',
         role: 'Spoofed Role',
@@ -1951,7 +1951,7 @@ test.describe('resolverHandler & RBAC Enforcement', () => {
               hazardKey: 'HAZ-101',
               meaning: 'Clinical safety release sign-off',
               attestationConfirmed: true,
-              passwordConfirmed: true,
+              attestationChecked: true,
               attestationPhrase: PART11_ATTESTATION_PHRASE,
             },
           },
@@ -2361,7 +2361,7 @@ test.describe('Task 1A-Engine: Compliance Rules, Cryptographic Seals, Blast Radi
 
       const uninitVerify = await McpToolService.verifyIecCompliance({ componentName: 'bolus clamp' });
       assert.strictEqual(uninitVerify.initialized, false);
-      assert.strictEqual(uninitVerify.canShipToClinicalProduction, false);
+      assert.strictEqual(uninitVerify.configuredChecksPassed, false);
       assert.strictEqual(uninitVerify.touchesSafetyCriticalCode, false);
       assert.match(uninitVerify.activeViolations[0], /uninitialized/i);
 
@@ -2421,7 +2421,7 @@ test.describe('Task 1A-Engine: Compliance Rules, Cryptographic Seals, Blast Radi
       assert.strictEqual(sharedHazardRes.touchesSafetyCriticalCode, true);
       assert.ok(sharedHazardRes.graphBlastRadius);
       assert.ok(sharedHazardRes.graphBlastRadius.blockedWorkItems.includes('MED-502'));
-      assert.strictEqual(sharedHazardRes.canShipToClinicalProduction, false);
+      assert.strictEqual(sharedHazardRes.configuredChecksPassed, false);
       assert.ok(
         !sharedHazardRes.remediationGuidance.some((g) => /no remediation required|All traversed artifacts are verified/i.test(g)),
         'Shared hazard sibling gap must never emit clean remediation guidance'
@@ -2433,13 +2433,13 @@ test.describe('Task 1A-Engine: Compliance Rules, Cryptographic Seals, Blast Radi
       });
       assert.strictEqual(isolatedCleanRes.touchesSafetyCriticalCode, true);
       assert.deepStrictEqual(isolatedCleanRes.graphBlastRadius.blockedWorkItems, []);
-      assert.strictEqual(isolatedCleanRes.canShipToClinicalProduction, true);
+      assert.strictEqual(isolatedCleanRes.configuredChecksPassed, true);
 
       // Multi-key diff with clean key first, blocked key second
       const multiDiffRes = await McpToolService.verifyIecCompliance({
         prDiff: 'Touches MED-43 and MED-42',
       });
-      assert.strictEqual(multiDiffRes.canShipToClinicalProduction, false);
+      assert.strictEqual(multiDiffRes.configuredChecksPassed, false);
       assert.strictEqual(multiDiffRes.touchesSafetyCriticalCode, true);
       assert.ok(multiDiffRes.affectedHazards.some((h) => h.includes('HAZ-101')));
       assert.ok(
@@ -2447,11 +2447,22 @@ test.describe('Task 1A-Engine: Compliance Rules, Cryptographic Seals, Blast Radi
         'Must never emit contradictory clean guidance when blocking gaps exist'
       );
 
-      // LIVE mode suppresses infusion-pump keyword fallbacks (bolus/clamp/motor/droplet/oled) and avoids substring matches ("generated" != "rate")
+      // Neither LIVE nor DEMO mode matches hardcoded keyword fallbacks when no real artifact key/token matches
       const liveFallbackBlocked = await McpToolService.verifyIecCompliance({
         prDiff: 'generated bolus clamp motor flow pwm droplet sensor oled battery',
       });
       assert.strictEqual(liveFallbackBlocked.touchesSafetyCriticalCode, false);
+
+      const demoSuite = ComplianceEngine.generateComplianceReport(
+        [cleanLink, blockedLink],
+        'DEMO',
+        'Demo Mode No Hardcoded Fallbacks'
+      );
+      SeederService.getActiveComplianceSuite = async () => demoSuite;
+      const demoRandomDiff = await McpToolService.verifyIecCompliance({
+        prDiff: 'update battery voltage spi pwm motor flow',
+      });
+      assert.strictEqual(demoRandomDiff.touchesSafetyCriticalCode, false);
     } finally {
       SeederService.getActiveComplianceSuite = originalGet;
     }

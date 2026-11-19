@@ -208,7 +208,7 @@ const SpecNodeInner: React.FC<NodeProps<Node<FlowNodePayload<ConfluenceSpec>>>> 
             gap: 4,
           }}
         >
-          <AlertOctagon size={12} aria-hidden="true" /> Spec drift vs. Part 11 sign-off
+          <AlertOctagon size={12} aria-hidden="true" /> Spec drift vs. signed hash
         </div>
       )}
       <Handle type="source" position={Position.Right} style={handleStyle} />
@@ -361,7 +361,7 @@ const SignatureNodeInner: React.FC<NodeProps<Node<FlowNodePayload<Part11Signatur
     <div
       role="button"
       tabIndex={0}
-      aria-label={`21 CFR Part 11 Signature: ${sig.isValid ? 'Certified' : 'Invalidated'} by ${signerLabel}`}
+      aria-label={`Electronic Attestation: ${sig.isValid ? 'Certified' : 'Invalidated'} by ${signerLabel}`}
       onKeyDown={(e) => handleNodeKeyDown(e, data)}
       style={{
         padding: '12px 14px',
@@ -388,7 +388,7 @@ const SignatureNodeInner: React.FC<NodeProps<Node<FlowNodePayload<Part11Signatur
             <Unlock size={15} color="var(--mt-danger-text, #bf2600)" aria-hidden="true" />
           )}
           <span style={{ fontWeight: 700, fontSize: 13, color: 'var(--mt-text-primary, #172b4d)' }}>
-            21 CFR Part 11
+            Attestation
           </span>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>

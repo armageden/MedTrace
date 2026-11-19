@@ -476,7 +476,7 @@ describe('FE-08..FE-10: Dialog a11y stack/focus trap/restore, table semantics, a
         screen.getByText('2. CONFLUENCE SRS SPEC'),
         screen.getByText('3. JIRA WORK & PR'),
         screen.getByText('4. IEC 62304 VERIFICATION'),
-        screen.getByText('5. 21 CFR PART 11 SIGN-OFF'),
+        screen.getByText('5. ELECTRONIC ATTESTATION'),
       ];
       for (let i = 0; i < headerEls.length - 1; i++) {
         const curLeft = parseFloat((headerEls[i] as HTMLElement).style.left);

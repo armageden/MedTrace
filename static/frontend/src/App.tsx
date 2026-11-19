@@ -676,7 +676,7 @@ export const App: React.FC = () => {
     specId?: string;
     meaning: string;
     attestationConfirmed: boolean;
-    passwordConfirmed: boolean;
+    attestationChecked: boolean;
     attestationPhrase: string;
   }): Promise<boolean> => {
     if (activeMutationRef.current) return false;
@@ -687,7 +687,7 @@ export const App: React.FC = () => {
 
     try {
       const raw: unknown = await invokeResolver('signOffPart11', params);
-      const outcome = resolveMutationSummaryResponse(raw, 'Part 11 electronic signature');
+      const outcome = resolveMutationSummaryResponse(raw, 'Electronic attestation');
       if (outcome.ok) {
         suiteRequestSeqRef.current += 1;
         commitSummary(outcome.summary);
@@ -698,15 +698,15 @@ export const App: React.FC = () => {
       setNotice({
         kind: 'error',
         source: 'mutation',
-        message: `Part 11 electronic signature failed (${outcome.error}).`,
+        message: `Electronic attestation failed (${outcome.error}).`,
       });
       return false;
     } catch (err) {
-      const msg = err instanceof Error ? err.message : '21 CFR Part 11 sign-off failed';
+      const msg = err instanceof Error ? err.message : 'Electronic attestation failed';
       setNotice({
         kind: 'error',
         source: 'mutation',
-        message: `Part 11 electronic signature failed (${msg}).`,
+        message: `Electronic attestation failed (${msg}).`,
       });
       return false;
     } finally {

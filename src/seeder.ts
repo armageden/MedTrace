@@ -1420,9 +1420,12 @@ export class SeederService {
         '21 CFR Part 11 Violation: Explicit attestation confirmation (attestationConfirmed: true) is required.'
       );
     }
-    if (params.attestation?.passwordConfirmed !== true) {
+    if (
+      params.attestation?.attestationChecked !== true &&
+      params.attestation?.passwordConfirmed !== true
+    ) {
       throw new Error(
-        'Part 11 attestation: Explicit signer confirmation (passwordConfirmed: true) is required.'
+        'Part 11 attestation: Explicit signer confirmation (attestationChecked: true) is required.'
       );
     }
     const normalizedPhrase = (params.attestation?.attestationPhrase || '').trim();

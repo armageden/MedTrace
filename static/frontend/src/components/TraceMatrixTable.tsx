@@ -94,7 +94,7 @@ export const TraceMatrixTable: React.FC<TraceMatrixTableProps> = ({ summary, onS
               <th style={{ padding: '10px 14px' }}>CONFLUENCE SRS SPEC</th>
               <th style={{ padding: '10px 14px' }}>JIRA WORK ITEM</th>
               <th style={{ padding: '10px 14px' }}>IEC 62304 VERIFICATION</th>
-              <th style={{ padding: '10px 14px' }}>21 CFR PART 11 STATUS</th>
+              <th style={{ padding: '10px 14px' }}>ATTESTATION STATUS</th>
               <th style={{ padding: '10px 14px' }}>AUDIT STATE</th>
             </tr>
           </thead>

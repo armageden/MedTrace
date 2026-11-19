@@ -39,12 +39,6 @@ const ALLOWED_ROVO_ACTIONS = new Set([
   'verify-iec-compliance',
 ]);
 
-const DEMO_KEYWORD_FALLBACKS: ReadonlyArray<{ specId: string; keywords: readonly string[] }> = [
-  { specId: 'srs-104', keywords: ['bolus', 'clamp', 'motor', 'flow', 'pwm'] },
-  { specId: 'srs-105', keywords: ['droplet', 'sensor', 'stall', 'photodiode'] },
-  { specId: 'srs-106', keywords: ['oled', 'battery', 'voltage', 'spi'] },
-];
-
 export interface HazardLineageFoundResponse {
   found: true;
   datasetMode: 'DEMO' | 'LIVE';
@@ -111,7 +105,7 @@ export interface IecComplianceVerificationResponse {
   standards: string[];
   datasetMode: 'DEMO' | 'LIVE';
   initialized: boolean;
-  canShipToClinicalProduction: boolean;
+  configuredChecksPassed: boolean;
   verifiedCoveragePercentage: string;
   classCSummary: {
     totalClassC: number;
@@ -569,8 +563,8 @@ export class McpToolService {
   /**
    * Tool: verify-iec-compliance-action
    * Audits active codebase/sprint against configured traceability rules and signature evidence.
-   * Fails closed on uninitialized suites, restricts infusion-pump keyword fallbacks strictly to DEMO mode,
-   * matches explicit keys + word-boundary tokens, and runs multi-trigger BFS blast-radius traversal.
+   * Fails closed on uninitialized suites, matches explicit canonical suite keys + word-boundary tokens,
+   * and runs multi-trigger BFS blast-radius traversal.
    */
   public static async verifyIecCompliance(
     inputs?: {
@@ -588,7 +582,7 @@ export class McpToolService {
         standards: suite.standards,
         datasetMode: suite.datasetMode,
         initialized: false,
-        canShipToClinicalProduction: false,
+        configuredChecksPassed: false,
         verifiedCoveragePercentage: `${suite.verifiedPercentage}%`,
         classCSummary: {
           totalClassC: suite.classCCount,
@@ -623,7 +617,7 @@ export class McpToolService {
       keyMatches.push(directIssueKey);
     }
 
-    // 2. Dynamic word-boundary token matching + DEMO-only infusion-pump fallback keywords
+    // 2. Dynamic word-boundary token matching against real suite artifacts
     let triggerKeys: string[] = keyMatches;
     let tokenMatchedLinks: TraceLink[] = [];
     if (triggerKeys.length === 0) {
@@ -632,13 +626,6 @@ export class McpToolService {
         triggerKeys = Array.from(
           new Set(tokenMatchedLinks.map((l) => l.spec?.id || l.hazard.key).filter(Boolean))
         );
-      } else if (suite.datasetMode === 'DEMO') {
-        const inputWordSet = new Set(fullText.toLowerCase().match(/\b[a-z0-9]+\b/g) || []);
-        triggerKeys = DEMO_KEYWORD_FALLBACKS.filter(
-          (entry) =>
-            entry.keywords.some((kw) => inputWordSet.has(kw)) &&
-            suite.traceLinks.some((l) => l.spec?.id?.toLowerCase() === entry.specId)
-        ).map((entry) => entry.specId);
       }
     }
 
@@ -717,7 +704,7 @@ export class McpToolService {
       standards: suite.standards,
       datasetMode: suite.datasetMode,
       initialized: true,
-      canShipToClinicalProduction: canShip,
+      configuredChecksPassed: canShip,
       verifiedCoveragePercentage: `${suite.verifiedPercentage}%`,
       classCSummary: {
         totalClassC: suite.classCCount,

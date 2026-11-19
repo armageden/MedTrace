@@ -1255,7 +1255,7 @@ test.describe('Task 1C-Ingestion: Confluence Revert Non-Resurrection & 3-Attempt
             attestation: {
               meaning: 'Approved for production',
               attestationConfirmed: true,
-              passwordConfirmed: true,
+              attestationChecked: true,
               attestationPhrase: PART11_ATTESTATION_PHRASE,
             },
             actorAccountId: 'acc-cmo',
@@ -1329,7 +1329,7 @@ test.describe('Task 1C-Ingestion: Confluence Revert Non-Resurrection & 3-Attempt
           attestation: {
             meaning: 'Re-approved after revert review',
             attestationConfirmed: true,
-            passwordConfirmed: true,
+            attestationChecked: true,
             attestationPhrase: PART11_ATTESTATION_PHRASE,
           },
           actorAccountId: 'acc-cmo',

@@ -481,7 +481,7 @@ test.describe('SEC-01 & SEC-03: Resolver RBAC, Confused-Deputy, Part 11 & Webtri
             hazardKey: 'HAZ-101',
             meaning: 'Clinical Safety Approval',
             attestationConfirmed: true,
-            passwordConfirmed: true,
+            attestationChecked: true,
             attestationPhrase: PART11_ATTESTATION_PHRASE,
           },
           bindIssueToHazard: { hazardKey: 'HAZ-101', issueKey: 'MED-200' },
@@ -868,7 +868,7 @@ test.describe('SEC-01 & SEC-03: Resolver RBAC, Confused-Deputy, Part 11 & Webtri
                       hazardKey: '',
                       meaning: 'Valid clinical meaning',
                       attestationConfirmed: true,
-                      passwordConfirmed: true,
+                      attestationChecked: true,
                       attestationPhrase: PART11_ATTESTATION_PHRASE,
                     },
                   },
@@ -1121,7 +1121,7 @@ test.describe('SEC-01 & SEC-03: Resolver RBAC, Confused-Deputy, Part 11 & Webtri
         assert.strictEqual(recorded.traceLinks.find((l) => l.id === 'link-1').test.status, 'UNTESTED');
         assert.strictEqual(recorded.traceLinks.find((l) => l.id === 'link-2').test.status, 'PASSED');
 
-        // signOffPart11 requires passwordConfirmed & exact phrase (trimmed), and ignores spoofed signedBy/role
+        // signOffPart11 requires attestationChecked & exact phrase (trimmed), and ignores spoofed signedBy/role
         await assert.rejects(
           () =>
             resolverHandler(
@@ -1133,7 +1133,7 @@ test.describe('SEC-01 & SEC-03: Resolver RBAC, Confused-Deputy, Part 11 & Webtri
                     linkId: 'link-2',
                     meaning: 'QA Safety Sign-off',
                     attestationConfirmed: true,
-                    passwordConfirmed: false,
+                    attestationChecked: false,
                     attestationPhrase: PART11_ATTESTATION_PHRASE,
                   },
                 },
@@ -1141,7 +1141,7 @@ test.describe('SEC-01 & SEC-03: Resolver RBAC, Confused-Deputy, Part 11 & Webtri
               },
               { principal: { accountId: 'op-1' } }
             ),
-          /passwordConfirmed/
+          /attestationChecked/
         );
 
         const signed = await resolverHandler(
@@ -1155,7 +1155,7 @@ test.describe('SEC-01 & SEC-03: Resolver RBAC, Confused-Deputy, Part 11 & Webtri
                 role: 'Chief Medical Officer',
                 meaning: 'QA Safety Sign-off',
                 attestationConfirmed: true,
-                passwordConfirmed: true,
+                attestationChecked: true,
                 attestationPhrase: `  ${PART11_ATTESTATION_PHRASE}  `,
               },
             },
@@ -1525,6 +1525,21 @@ test.describe('SEC-01 & SEC-03: Resolver RBAC, Confused-Deputy, Part 11 & Webtri
     assert.strictEqual(lineageResult.work.key, 'MED-1');
     assert.strictEqual(Object.hasOwn(lineageResult, 'traceLinks'), false);
 
+    // Webtrigger get-hazard-lineage with empty/omitted lookup keys MUST NOT dump full traceLinks
+    for (const emptyQuery of [{ action: 'get-hazard-lineage' }, { action: 'get-hazard-lineage', hazardKey: '   ', issueKey: '' }]) {
+      const emptyBody = JSON.stringify(emptyQuery);
+      const emptyResp = await mcpWebtriggerHandler({
+        method: 'POST',
+        headers: signWebtriggerHeaders(secret, emptyBody, `n-lineage-empty-${crypto.randomUUID()}`),
+        body: emptyBody,
+      });
+      assert.strictEqual(emptyResp.statusCode, 200);
+      const emptyResult = JSON.parse(emptyResp.body);
+      assert.strictEqual(Object.hasOwn(emptyResult, 'traceLinks'), false);
+      assert.strictEqual(emptyResult.totalHazards, 1);
+      assert.strictEqual(emptyResult.datasetMode, 'LIVE');
+    }
+
     for (const payload of [{ action: 'seed' }, { action: 'remediate', hazardKey: 'HAZ-101' }]) {
       const b = JSON.stringify(payload);
       const r = await mcpWebtriggerHandler({
@@ -1771,7 +1786,7 @@ test.describe('SEC-01 & SEC-03: Resolver RBAC, Confused-Deputy, Part 11 & Webtri
                     specId: 'spec-med',
                     meaning: 'Unauthorized cross-project approval',
                     attestationConfirmed: true,
-                    passwordConfirmed: true,
+                    attestationChecked: true,
                     attestationPhrase: PART11_ATTESTATION_PHRASE,
                   },
                 },
@@ -2065,7 +2080,7 @@ test.describe('SEC-01 & SEC-03: Resolver RBAC, Confused-Deputy, Part 11 & Webtri
                     hazardKey: 'HAZ-UNBOUND',
                     meaning: 'Unauthorized Confluence-only signoff',
                     attestationConfirmed: true,
-                    passwordConfirmed: true,
+                    attestationChecked: true,
                     attestationPhrase: PART11_ATTESTATION_PHRASE,
                   },
                 },

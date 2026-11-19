@@ -21,7 +21,7 @@ platform; public YouTube link.
 (four SRS pages) — real tenant artifacts, synthetic content. Open the MedTrace project page in
 `MEDTRACE`: empty uninitialized `LIVE` state. Click `Sync Live Atlassian`; watch links populate.
 Point out the SRS-201…204 links, MEDTRACE-5 flagged with no linked SRS, MEDTRACE-6 skipped as
-untagged, and the release `BLOCKED` state.
+untagged, and the `RELEASE BLOCKED` state.
 > **NARRATION:** "This is a real Jira project and a real Confluence space — the specifications
 > are synthetic, but they are live tenant artifacts. MedTrace opens empty: LIVE mode starts
 > fail-closed with zero hazards. One click on Sync Live Atlassian ingests the project's labelled
@@ -29,14 +29,14 @@ untagged, and the release `BLOCKED` state.
 > safety-labelled but has no linked specification — flagged as a gap. MEDTRACE-6 is untagged and
 > skipped. Every test starts UNTESTED and unsigned, so the release is BLOCKED."
 
-**Overlay:** `LIVE` dataset badge; zoom on the MEDTRACE-5 no-linked-SRS flag and the
-`BLOCKED` release chip.
+**Overlay:** `LIVE ATLASSIAN DATA` dataset badge; zoom on the MEDTRACE-5 no-linked-SRS flag and the
+`RELEASE BLOCKED` chip.
 
 ### Shot 3 — Closing the loop on MEDTRACE-1 (1:05–1:35) · screen: inspection drawer
 **Action:** On the MEDTRACE-1 link, open `Record Test Result`, submit `PASSED` with an
-`https://` evidence URL, then `Execute 21 CFR Part 11 Sign-Off`. The link flips to verified.
+`https://` evidence URL, then `Execute Electronic Attestation Sign-Off`. The link flips to verified.
 > **NARRATION:** "Closing the loop on MEDTRACE-1: record a PASSED verification result with a
-> real evidence URL, then execute the 21 CFR Part 11 sign-off — an attested electronic signature
+> real evidence URL, then execute the electronic attestation sign-off — a cryptographic approval
 > over the spec's content hash. The trace link turns verified."
 
 ### Shot 4 — Drift + blast radius (1:35–2:05) · screen: Confluence SRS-201 edit → MedTrace graph
@@ -66,10 +66,10 @@ returns the lineage card; follow with "verify IEC 62304 compliance" → `verify-
 ### Shot 7 — Atlassian MCP (2:55–3:20) · screen: MCP client (Claude Desktop / VS Code / Cursor — whichever supports remote MCP with OAuth)
 **Action:** Show the client connected to
 `https://mcp.atlassian.com/forge/5e49c10e-696f-4984-9d00-4a47d0a5dd99`; run
-`verify-iec-compliance-action` with the 5.0 → 5.5 diff → response: blocked.
+`verify-iec-compliance-action` with `issueKey: "MEDTRACE-1"` (or a diff referencing `SRS-201`) → response: `configuredChecksPassed: false`.
 > **NARRATION:** "The same two actions are exposed through the Atlassian MCP server at
 > mcp.atlassian.com — a site admin enables external MCP exposure under Connected apps, and the
-> client connects over OAuth. Here verify-iec-compliance answers the bolus-rate diff: release
+> client connects over OAuth. Here verify-iec-compliance answers for SRS-201 / MEDTRACE-1: configured checks failed, release
 > blocked." *(Optional extra: the local stdio MCP bridge in `mcp-server/` — not part of this demo.)*
 
 ### Shot 8 — Evidence & boundaries (3:20–3:38) · screen: `Export Dossier` + audit log
@@ -97,7 +97,7 @@ returns the lineage card; follow with "verify IEC 62304 compliance" → `verify-
    click `Sync Live Atlassian` → confirm hazards, tests, and the four SRS links populate,
    MEDTRACE-5 shows the missing-SRS flag, and MEDTRACE-6 is skipped.
 2. **Close-the-loop path (10 min):** on MEDTRACE-1 use `Record Test Result` (`PASSED` + an
-   `https://` evidence URL) → `Execute 21 CFR Part 11 Sign-Off` → link verified and the release
+   `https://` evidence URL) → `Execute Electronic Attestation Sign-Off` → link verified and the release
    state updates.
 3. **Confluence drift trigger (10 min):** edit SRS-201 (`5.0` → `5.5` mL/hr) and publish →
    confirm `avi:confluence:updated:page` fires and the signature is revoked → run `Blast Radius`.
@@ -110,8 +110,8 @@ returns the lineage card; follow with "verify IEC 62304 compliance" → `verify-
 5. **Atlassian MCP (10 min):** a site or org admin enables external MCP exposure (Atlassian
    Administration → Apps → Sites → site → Connected apps → MedTrace → turn on tools). Connect an
    MCP client to `https://mcp.atlassian.com/forge/5e49c10e-696f-4984-9d00-4a47d0a5dd99` via the
-   OAuth consent screen, then run `verify-iec-compliance-action` with the 5.0 → 5.5 diff → expect
-   blocked.
+   OAuth consent screen, then run `verify-iec-compliance-action` referencing `MEDTRACE-1` / `SRS-201` → expect
+   `configuredChecksPassed: false`.
 6. **Demo fallback + install smoke (10 min):** on a scratch site, install via the judge-facing
    link → `Seed Demo Suite` → confirm the `DEMO DATASET` badge path still works for evaluators
    with no tenant data.

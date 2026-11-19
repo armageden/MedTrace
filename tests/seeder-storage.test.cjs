@@ -467,7 +467,7 @@ test.describe('Task 1B-Seeder: Part 11 Identity Binding, Signer Confirmation & H
     else process.env.MEDTRACE_PART11_SECRET = origPart11Secret;
   });
 
-  test.it('enforces MEDTRACE_PART11_SECRET, passwordConfirmed, attestationConfirmed, exact phrase, and meaning length', async () => {
+  test.it('enforces MEDTRACE_PART11_SECRET, attestationChecked, attestationConfirmed, exact phrase, and meaning length', async () => {
     await SeederService.seedEnterpriseDemoSuite('acc-init', 'SYSTEM_INIT');
     const current = await SeederService.getActiveComplianceSuite();
     current.traceLinks[0].work.status = 'Done';
@@ -483,7 +483,7 @@ test.describe('Task 1B-Seeder: Part 11 Identity Binding, Signer Confirmation & H
           attestation: {
             meaning: 'Clinical safety approval',
             attestationConfirmed: true,
-            passwordConfirmed: true,
+            attestationChecked: true,
             attestationPhrase: PART11_ATTESTATION_PHRASE,
           },
           actorAccountId: 'acc-cmo',
@@ -492,7 +492,7 @@ test.describe('Task 1B-Seeder: Part 11 Identity Binding, Signer Confirmation & H
     );
     process.env.MEDTRACE_PART11_SECRET = 'part11-test-hmac-secret';
 
-    // 2. Missing passwordConfirmed
+    // 2. Missing attestationChecked
     await assert.rejects(
       () =>
         SeederService.signOffPart11({
@@ -500,12 +500,12 @@ test.describe('Task 1B-Seeder: Part 11 Identity Binding, Signer Confirmation & H
           attestation: {
             meaning: 'Clinical safety approval',
             attestationConfirmed: true,
-            passwordConfirmed: false,
+            attestationChecked: false,
             attestationPhrase: PART11_ATTESTATION_PHRASE,
           },
           actorAccountId: 'acc-cmo',
         }),
-      /passwordConfirmed/
+      /attestationChecked/
     );
 
     // 3. Wrong attestationPhrase
@@ -516,7 +516,7 @@ test.describe('Task 1B-Seeder: Part 11 Identity Binding, Signer Confirmation & H
           attestation: {
             meaning: 'Clinical safety approval',
             attestationConfirmed: true,
-            passwordConfirmed: true,
+            attestationChecked: true,
             attestationPhrase: 'WRONG PHRASE',
           },
           actorAccountId: 'acc-cmo',
@@ -532,7 +532,7 @@ test.describe('Task 1B-Seeder: Part 11 Identity Binding, Signer Confirmation & H
           attestation: {
             meaning: 'OK',
             attestationConfirmed: true,
-            passwordConfirmed: true,
+            attestationChecked: true,
             attestationPhrase: PART11_ATTESTATION_PHRASE,
           },
           actorAccountId: 'acc-cmo',
@@ -578,7 +578,7 @@ test.describe('Task 1B-Seeder: Part 11 Identity Binding, Signer Confirmation & H
         attestation: {
           meaning: 'Approved for clinical release',
           attestationConfirmed: true,
-          passwordConfirmed: true,
+          attestationChecked: true,
           attestationPhrase: PART11_ATTESTATION_PHRASE,
           signedBy: 'Spoofed Super Admin',
           role: 'Spoofed Chief Medical Officer',
@@ -699,7 +699,7 @@ test.describe('Task 1B-Seeder: Part 11 Identity Binding, Signer Confirmation & H
               attestation: {
                 meaning: 'Attempted viewer sign-off',
                 attestationConfirmed: true,
-                passwordConfirmed: true,
+                attestationChecked: true,
                 attestationPhrase: PART11_ATTESTATION_PHRASE,
               },
               actorAccountId: 'conf-viewer',
@@ -745,7 +745,7 @@ test.describe('Task 1B-Seeder: Part 11 Identity Binding, Signer Confirmation & H
           attestation: {
             meaning: 'Verified Jira admin Part 11 sign-off',
             attestationConfirmed: true,
-            passwordConfirmed: true,
+            attestationChecked: true,
             attestationPhrase: PART11_ATTESTATION_PHRASE,
             signedBy: 'Evil Spoofer',
             role: 'Evil Role',
@@ -904,7 +904,7 @@ test.describe('Task 1B-Seeder: Atomic KVS Transactions, 60-Link Sharding, GC, vl
               attestation: {
                 meaning: 'Approval that must roll back',
                 attestationConfirmed: true,
-                passwordConfirmed: true,
+                attestationChecked: true,
                 attestationPhrase: PART11_ATTESTATION_PHRASE,
               },
               actorAccountId: 'acc-qa-rollback',
@@ -1205,7 +1205,7 @@ test.describe('Task 1B-Seeder: bindIssueToHazard & recordTestResult Hardening (C
           attestation: {
             meaning: 'Hybrid ECDSA P-256 clinical sign-off',
             attestationConfirmed: true,
-            passwordConfirmed: true,
+            attestationChecked: true,
             attestationPhrase: PART11_ATTESTATION_PHRASE,
             clientPublicKeySpki: kp.publicKeySpkiBase64,
             clientSignatureBase64: wrongClientSig,
@@ -1222,7 +1222,7 @@ test.describe('Task 1B-Seeder: bindIssueToHazard & recordTestResult Hardening (C
       attestation: {
         meaning: 'Hybrid ECDSA P-256 clinical sign-off',
         attestationConfirmed: true,
-        passwordConfirmed: true,
+        attestationChecked: true,
         attestationPhrase: PART11_ATTESTATION_PHRASE,
         clientPublicKeySpki: kp.publicKeySpkiBase64,
         clientSignatureBase64: validClientSig,
@@ -1264,7 +1264,7 @@ test.describe('Task 1B-Seeder: bindIssueToHazard & recordTestResult Hardening (C
       attestation: {
         meaning: 'Standard HMAC re-certification',
         attestationConfirmed: true,
-        passwordConfirmed: true,
+        attestationChecked: true,
         attestationPhrase: PART11_ATTESTATION_PHRASE,
       },
       actorAccountId: 'acc-hmac-signer',
@@ -1377,7 +1377,7 @@ test.describe('Task 1B-Seeder: bindIssueToHazard & recordTestResult Hardening (C
           attestation: {
             meaning: 'Attempting to sign missing SRS',
             attestationConfirmed: true,
-            passwordConfirmed: true,
+            attestationChecked: true,
             attestationPhrase: PART11_ATTESTATION_PHRASE,
           },
           actorAccountId: 'acc-qa',
@@ -1397,7 +1397,7 @@ test.describe('Task 1B-Seeder: bindIssueToHazard & recordTestResult Hardening (C
           attestation: {
             meaning: 'Attempting to sign empty SHA-256 spec',
             attestationConfirmed: true,
-            passwordConfirmed: true,
+            attestationChecked: true,
             attestationPhrase: PART11_ATTESTATION_PHRASE,
           },
           actorAccountId: 'acc-qa',
@@ -1411,7 +1411,7 @@ test.describe('Task 1B-Seeder: bindIssueToHazard & recordTestResult Hardening (C
       attestation: {
         meaning: 'Valid SRS approval despite missing test evidence URL',
         attestationConfirmed: true,
-        passwordConfirmed: true,
+        attestationChecked: true,
         attestationPhrase: PART11_ATTESTATION_PHRASE,
       },
       actorAccountId: 'acc-qa',

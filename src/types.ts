@@ -198,6 +198,7 @@ export interface Part11Attestation {
   meaning: string;
   attestationConfirmed: boolean;
   attestationPhrase?: string;
+  attestationChecked?: boolean;
   passwordConfirmed?: boolean;
   signedBy?: string;
   signedAt?: string;
@@ -319,7 +320,7 @@ export interface MedTraceResolverMap {
       specId?: string;
       meaning: string;
       attestationConfirmed: boolean;
-      passwordConfirmed: boolean;
+      attestationChecked: boolean;
       attestationPhrase: string;
       clientPublicKeySpki?: string;
       clientSignatureBase64?: string;

@@ -130,7 +130,7 @@ describe('FE-05: InspectionDrawer form persistence, error surfacing, and attesta
     const bindInput = screen.getByLabelText(/Bind Jira Issue Key/i);
     const evidenceInput = screen.getByLabelText('Evidence URL');
     const notesInput = screen.getByLabelText('Test execution notes');
-    const meaningInput = screen.getByLabelText(/Signature Meaning/i);
+    const meaningInput = screen.getByLabelText(/Attestation Meaning/i);
     const phraseInput = screen.getByLabelText(/Required Attestation Phrase/i);
     const demoMeaningInput = screen.getByLabelText('Demo simulation meaning');
 
@@ -173,7 +173,7 @@ describe('FE-05: InspectionDrawer form persistence, error surfacing, and attesta
     expect(screen.getByLabelText(/Bind Jira Issue Key/i)).toHaveValue('PUMP-77');
     expect(screen.getByLabelText('Evidence URL')).toHaveValue('https://ci.example.com/run/100');
     expect(screen.getByLabelText('Test execution notes')).toHaveValue('Draft uncommitted note');
-    expect(screen.getByLabelText(/Signature Meaning/i)).toHaveValue('Draft meaning text');
+    expect(screen.getByLabelText(/Attestation Meaning/i)).toHaveValue('Draft meaning text');
     expect(screen.getByLabelText(/Required Attestation Phrase/i)).toHaveValue(
       PART11_ATTESTATION_PHRASE
     );
@@ -380,10 +380,10 @@ describe('FE-05: InspectionDrawer form persistence, error surfacing, and attesta
 
     const user = userEvent.setup();
     const signBtn = screen.getByRole('button', { name: /Sign Off Spec/i });
-    const meaningInput = screen.getByLabelText(/Signature Meaning/i);
+    const meaningInput = screen.getByLabelText(/Attestation Meaning/i);
     const phraseInput = screen.getByLabelText(/Required Attestation Phrase/i);
     const pwdBox = screen.getByLabelText(/I confirm I am the signer and intend this electronic attestation/i);
-    const attBox = screen.getByLabelText(/I attest under 21 CFR Part 11/i);
+    const attBox = screen.getByLabelText(/I attest that this electronic attestation/i);
 
     expect(signBtn).toBeDisabled();
 
@@ -417,7 +417,7 @@ describe('FE-05: InspectionDrawer form persistence, error surfacing, and attesta
       specId: 'spec-201',
       meaning: 'Clinical safety approval v4',
       attestationConfirmed: true,
-      passwordConfirmed: true,
+      attestationChecked: true,
       attestationPhrase: PART11_ATTESTATION_PHRASE,
     });
     expect('signedBy' in submittedPayload).toBe(false);
@@ -480,7 +480,7 @@ describe('FE-05: InspectionDrawer form persistence, error surfacing, and attesta
     );
 
     const user = userEvent.setup();
-    const signMeaning = screen.getByLabelText(/Signature Meaning/i);
+    const signMeaning = screen.getByLabelText(/Attestation Meaning/i);
     await user.clear(signMeaning);
     await user.type(signMeaning, 'Official Part 11 Meaning');
 

@@ -257,7 +257,7 @@ async function startAuthenticatedWebtriggerServer(secret) {
             JSON.stringify({
               datasetMode: state.suite.datasetMode,
               initialized: state.suite.initialized,
-              canShipToClinicalProduction: false,
+              configuredChecksPassed: false,
               touchesSafetyCriticalCode: true,
               affectedHazards: ['HAZ-101'],
             })
@@ -321,25 +321,10 @@ async function startAuthenticatedWebtriggerServer(secret) {
               })),
             };
           } else {
+            const { traceLinks: _traceLinks, ...statusSummary } = suite;
             result = {
-              projectName: suite.projectName,
-              datasetMode: suite.datasetMode,
+              ...statusSummary,
               initialized,
-              totalHazards: suite.totalHazards,
-              verifiedPercentage: `${suite.verifiedPercentage ?? 0}%`,
-              releaseBlocked: suite.releaseBlocked,
-              traceLinks: links.map((link) => ({
-                id: link.id,
-                hazardKey: link.hazard?.key,
-                riskClass: link.hazard?.riskClass,
-                severity: link.hazard?.severity,
-                requirementSpec: link.spec?.title,
-                workKey: link.work?.key,
-                testKey: link.test?.testKey,
-                testStatus: link.test?.status,
-                complianceState: link.complianceState,
-                signatureValid: link.signature?.isValid,
-              })),
             };
           }
           res.writeHead(200, { 'Content-Type': 'application/json' });

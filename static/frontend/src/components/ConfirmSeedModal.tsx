@@ -152,7 +152,7 @@ export const ConfirmSeedModal: React.FC<ConfirmSeedModalProps> = ({
                 ) : (
                   'your active LIVE compliance state'
                 )}{' '}
-                in Forge KVS, including live test evidence references and 21 CFR Part 11 signature
+                in Forge KVS, including live test evidence references and electronic attestation
                 records, and switch the workspace to <strong>DEMO</strong> mode.
                 <div style={{ marginTop: 8, color: 'var(--mt-text-muted)' }}>
                   Overwriting an initialized LIVE suite requires Jira Site Administrator (

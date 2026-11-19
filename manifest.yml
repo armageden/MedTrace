@@ -15,11 +15,11 @@ modules:
   jira:workflowValidator:
     - key: medtrace-safety-validator
       name: MedTrace IEC 62304 Safety Gate
-      description: Validates full bidirectional verification and 21 CFR Part 11 signatures before transitioning Jira issues to Done.
+      description: Validates full bidirectional verification and cryptographic approval attestations before transitioning Jira issues to Done.
       function: workflow-validator-fn
   confluence:contentBylineItem:
     - key: medtrace-confluence-byline
-      title: MedTrace Part 11 Status
+      title: MedTrace Attestation Status
       icon: resource:icons;medtrace-icon.svg
       resource: main
       resolver:
@@ -69,7 +69,7 @@ modules:
           description: Optional Jira issue key, hazard key, or test key to inspect (e.g. MED-42, HAZ-101, TEST-88). Omit to retrieve the full project lineage.
     - key: verify-iec-compliance-action
       name: Verify IEC Compliance
-      description: Checks compliance status against IEC 62304 and FDA 21 CFR Part 11 rules, returning broken links or signature drift.
+      description: Checks compliance status against configured IEC 62304 traceability rules and approval hashes, returning broken links or signature drift.
       actionVerb: GET
       function: rovo-action-fn
       inputs:

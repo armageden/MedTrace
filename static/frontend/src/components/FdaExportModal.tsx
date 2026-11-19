@@ -594,7 +594,7 @@ export const FdaExportModal: React.FC<FdaExportModalProps> = ({
                 <th style={{ padding: '8px 10px' }}>SRS Specification</th>
                 <th style={{ padding: '8px 10px' }}>Jira Implementation</th>
                 <th style={{ padding: '8px 10px' }}>Verification Test</th>
-                <th style={{ padding: '8px 10px' }}>Part 11 Signature</th>
+                <th style={{ padding: '8px 10px' }}>Electronic Attestation</th>
               </tr>
             </thead>
             <tbody>
