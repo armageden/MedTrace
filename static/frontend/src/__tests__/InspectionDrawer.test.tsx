@@ -87,7 +87,7 @@ const LIVE_PANEL_CONTEXT: ForgePanelContext = {
   projectKey: 'PUMP',
 };
 
-describe('FE-05: InspectionDrawer form persistence, error surfacing, and §11.200 enforcement', () => {
+describe('FE-05: InspectionDrawer form persistence, error surfacing, and attestation enforcement', () => {
   const mockedInvokeResolver = vi.mocked(bridgeModule.invokeResolver);
 
   beforeEach(() => {
@@ -122,7 +122,7 @@ describe('FE-05: InspectionDrawer form persistence, error surfacing, and §11.20
 
     await waitFor(() => {
       expect(
-        screen.getByText(/No live AGG\/REST issue context returned for PUMP-19/i)
+        screen.getByText(/No live Jira REST issue context returned for PUMP-19/i)
       ).toBeInTheDocument();
     });
 
@@ -203,13 +203,13 @@ describe('FE-05: InspectionDrawer form persistence, error surfacing, and §11.20
 
     await waitFor(() => {
       expect(
-        screen.getByText(/No live AGG\/REST issue context returned for PUMP-20/i)
+        screen.getByText(/No live Jira REST issue context returned for PUMP-20/i)
       ).toBeInTheDocument();
     });
   });
 
   it('surfaces queryGraphContext rejections as role="alert" and renders edgeType metadata', async () => {
-    mockedInvokeResolver.mockRejectedValueOnce(new Error('AGG network timeout'));
+    mockedInvokeResolver.mockRejectedValueOnce(new Error('Jira REST network timeout'));
     const link = makeLink();
 
     render(
@@ -229,8 +229,78 @@ describe('FE-05: InspectionDrawer form persistence, error surfacing, and §11.20
 
     expect(screen.getByText('REST:jira-remotelink')).toBeInTheDocument();
     const alert = await screen.findByRole('alert');
-    expect(alert).toHaveTextContent('Live Jira/AGG context query failed: AGG network timeout');
+    expect(alert).toHaveTextContent('Live Jira REST context query failed: Jira REST network timeout');
     expect(screen.queryByText(/offline\/unlinked demo fixtures/i)).not.toBeInTheDocument();
+  });
+
+  it('renders Teamwork Graph spec owners on OK and the EMPTY-status message', async () => {
+    const graphContext = {
+      source: 'JIRA_REST' as const,
+      confluenceSource: 'JIRA_REMOTELINK_REST' as const,
+      issueKey: 'PUMP-19',
+      issueId: '10901',
+      issuelinks: [],
+      confluenceLinks: [
+        {
+          pageId: '81001',
+          title: 'SRS-81001: Watchdog',
+          url: 'https://example.atlassian.net/wiki/pages/81001',
+        },
+      ],
+    };
+    mockedInvokeResolver.mockResolvedValueOnce({
+      ...graphContext,
+      specOwners: [{ pageId: '81001', accountId: 'acc-1', name: 'Ada Lovelace' }],
+      teamworkGraphStatus: 'OK',
+    });
+
+    const { unmount } = render(
+      <InspectionDrawer
+        link={makeLink()}
+        datasetMode="LIVE"
+        panelContext={LIVE_PANEL_CONTEXT}
+        blastRadius={null}
+        onClose={() => {}}
+        onBindIssue={async () => true}
+        onRecordTestResult={async () => true}
+        onSignOffPart11={async () => true}
+        onRemediateDemo={async () => true}
+        isMutating={false}
+      />
+    );
+
+    await waitFor(() => {
+      expect(
+        screen.getByText(/Spec owners to re-review \(Teamwork Graph\): Ada Lovelace/)
+      ).toBeInTheDocument();
+    });
+    unmount();
+
+    mockedInvokeResolver.mockResolvedValueOnce({
+      ...graphContext,
+      specOwners: [],
+      teamworkGraphStatus: 'EMPTY',
+    });
+    render(
+      <InspectionDrawer
+        link={makeLink()}
+        datasetMode="LIVE"
+        panelContext={LIVE_PANEL_CONTEXT}
+        blastRadius={null}
+        onClose={() => {}}
+        onBindIssue={async () => true}
+        onRecordTestResult={async () => true}
+        onSignOffPart11={async () => true}
+        onRemediateDemo={async () => true}
+        isMutating={false}
+      />
+    );
+
+    await waitFor(() => {
+      expect(
+        screen.getByText(/Teamwork Graph returned no page owners/i)
+      ).toBeInTheDocument();
+    });
   });
 
   it('validates https:// evidenceUrl and sends explicit empty strings when clearing evidenceUrl and notes', async () => {
@@ -281,7 +351,7 @@ describe('FE-05: InspectionDrawer form persistence, error surfacing, and §11.20
     });
   });
 
-  it('enforces Part 11 §11.200 attestation fields, clears only on true, retains on false, and omits signedBy/role', async () => {
+  it('enforces Part 11 attestation fields, clears only on true, retains on false, and omits signedBy/role', async () => {
     const link = makeLink();
     const onSignOffPart11 = vi
       .fn()
@@ -312,7 +382,7 @@ describe('FE-05: InspectionDrawer form persistence, error surfacing, and §11.20
     const signBtn = screen.getByRole('button', { name: /Sign Off Spec/i });
     const meaningInput = screen.getByLabelText(/Signature Meaning/i);
     const phraseInput = screen.getByLabelText(/Required Attestation Phrase/i);
-    const pwdBox = screen.getByLabelText(/I confirm my active Atlassian user session re-attestation/i);
+    const pwdBox = screen.getByLabelText(/I confirm I am the signer and intend this electronic attestation/i);
     const attBox = screen.getByLabelText(/I attest under 21 CFR Part 11/i);
 
     expect(signBtn).toBeDisabled();
@@ -454,7 +524,7 @@ describe('FE-05: InspectionDrawer form persistence, error surfacing, and §11.20
     );
 
     expect(
-      screen.getByText(/No live AGG\/REST issue context returned for MED-42/i)
+      screen.getByText(/No live Jira REST issue context returned for MED-42/i)
     ).toBeInTheDocument();
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
     expect(mockedInvokeResolver).not.toHaveBeenCalledWith('queryGraphContext', expect.anything());

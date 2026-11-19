@@ -31,9 +31,9 @@ Executing a common task? Start at [docs/00-how-to/](docs/00-how-to/00-overview.m
 ## Working Rules
 
 0. **Git is read-only.** Never run `git add`, `commit`, `push`, `stash`, `checkout`, `reset`, `branch`, `tag`, `rebase`, or `merge`. Read-only inspection only (`status`, `diff`, `log`, `show`, `ls-files`). User stages and commits manually.
-1. **Docs stay in sync.** After ANY change to code, config, or scripts, run the docs-sync pass (`docs/00-how-to/sync-docs-runbook.md`) and end your response with:
+1. **Docs stay in sync.** After ANY change to code, config, manifest scopes, or tests, follow [docs/00-how-to/sync-docs-runbook.md](docs/00-how-to/sync-docs-runbook.md) (update affected docs under `docs/`, `README.md`, and `devpost_*.md` when present — never rely on `npm run docs:check` alone for prose accuracy) and end your response with:
    `Docs checked/updated: <files or "none required (reason)">`.
-2. **Verify before claiming.** Run verification commands (`npm run build`, `forge lint`, `npm run docs:check`) after changes; never report success without output.
+2. **Verify before claiming.** Run verification commands (`npm run build:all`, `forge lint`, `npm run docs:check`) after changes; never report success without output.
 3. **Zero hallucination.** Read a file before citing its path, symbol, flag, or behavior.
 4. **In place.** Upgrade existing files instead of creating parallel trees.
 5. **Preserve production manifests.** Keep `manifest.yml` clean and synchronized across both `jira` and `confluence` contexts.

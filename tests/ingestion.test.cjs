@@ -239,23 +239,9 @@ test.describe('TeamworkGraphService Unit Tests (CS-08)', () => {
           },
         });
       },
-      requestGraph: async () =>
-        makeJsonResponse(200, {
-          data: {
-            jira: {
-              issue: {
-                id: 'ari:cloud:jira:12345678-1234-1234-1234-1234567890ab:issue/10901',
-                key: 'MED-901',
-                summary: 'Watchdog Clamp (AGG)',
-                status: { name: 'Done', category: 'Done' },
-                links: [
-                  { id: 'agg-1', type: { name: 'Blocks', inward: 'is blocked by', outward: 'blocks' } },
-                  { id: 42, type: { name: 'Relates' } },
-                ],
-              },
-            },
-          },
-        }),
+      requestTeamworkGraph: async () => {
+        throw new Error('requestTeamworkGraph must not be called without includeSpecOwners');
+      },
     });
 
     await withForgeMocks(
@@ -267,12 +253,8 @@ test.describe('TeamworkGraphService Unit Tests (CS-08)', () => {
         const defaultRes = await TeamworkGraphService.queryIssueGraphContext('MED-901');
         assert.ok(asUserCalls > 0, 'Default callerMode must use api.asUser()');
         assert.strictEqual(asAppCalls, 0, 'Default callerMode must not call api.asApp()');
-        assert.strictEqual(defaultRes.source, 'JIRA_AGG_AND_REST');
+        assert.strictEqual(defaultRes.source, 'JIRA_REST');
         assert.strictEqual(defaultRes.confluenceSource, 'JIRA_REMOTELINK_REST');
-        assert.deepStrictEqual(defaultRes.aggIssueLinks, [
-          { id: 'agg-1', type: { name: 'Blocks', inward: 'is blocked by', outward: 'blocks' } },
-          { id: '42', type: { name: 'Relates' } },
-        ]);
 
         asUserCalls = 0;
         asAppCalls = 0;
@@ -286,7 +268,163 @@ test.describe('TeamworkGraphService Unit Tests (CS-08)', () => {
         const appRes = await TeamworkGraphService.queryIssueGraphContext('MED-901', { callerMode: 'APP' });
         assert.strictEqual(asUserCalls, 0, 'APP callerMode must not call api.asUser()');
         assert.ok(asAppCalls > 0, 'APP callerMode must use api.asApp()');
-        assert.strictEqual(appRes.source, 'JIRA_AGG_AND_REST');
+        assert.strictEqual(appRes.source, 'JIRA_REST');
+      }
+    );
+  });
+
+  test.it('includeSpecOwners queries Teamwork Graph confluencePageOwners (USER only, opt-in)', async () => {
+    const twgCalls = [];
+    const makeClient = (twgImpl) => ({
+      requestJira: async (routeObj) => {
+        const r = String(routeObj?.value || routeObj);
+        if (r.includes('/remotelink')) {
+          return makeJsonResponse(200, [
+            {
+              application: { type: 'com.atlassian.confluence' },
+              globalId: 'appId=c1&pageId=81001',
+              relationship: 'relates to',
+              object: { title: 'SRS-81001: Watchdog', url: 'https://example.atlassian.net/wiki/pages/81001' },
+            },
+          ]);
+        }
+        return makeJsonResponse(200, {
+          id: '10901',
+          key: 'MED-901',
+          self: 'https://api.atlassian.com/ex/jira/12345678-1234-1234-1234-1234567890ab/rest/api/3/issue/10901',
+          fields: {
+            summary: 'Watchdog Clamp',
+            status: { name: 'In Progress', statusCategory: { name: 'In Progress' } },
+            issuelinks: [],
+          },
+        });
+      },
+      requestTeamworkGraph: twgImpl,
+    });
+    const ownersResponse = () =>
+      makeJsonResponse(200, {
+        data: {
+          confluencePageOwners: {
+            edges: [{ node: { __typename: 'AtlassianUser', accountId: 'acc-1', name: 'Ada' } }],
+          },
+        },
+      });
+
+    // (a) USER + includeSpecOwners: one TWG call per pageId, owners parsed
+    await withForgeMocks(
+      {
+        asUserImpl: () =>
+          makeClient(async (query, variables, operationName) => {
+            twgCalls.push({ query, variables, operationName });
+            return ownersResponse();
+          }),
+      },
+      async () => {
+        const res = await TeamworkGraphService.queryIssueGraphContext('MED-901', {
+          includeSpecOwners: true,
+        });
+        assert.strictEqual(twgCalls.length, 1);
+        assert.strictEqual(twgCalls[0].operationName, 'medtrace_specPageOwners');
+        assert.strictEqual(
+          twgCalls[0].variables.id,
+          'ari:cloud:confluence:12345678-1234-1234-1234-1234567890ab:page/81001'
+        );
+        assert.ok(twgCalls[0].query.includes('confluencePageOwners'));
+        assert.ok(!twgCalls[0].query.includes('email'), 'query must not request email');
+        assert.deepStrictEqual(res.specOwners, [{ pageId: '81001', accountId: 'acc-1', name: 'Ada' }]);
+        assert.strictEqual(res.teamworkGraphStatus, 'OK');
+      }
+    );
+
+        // (b) GraphQL errors array with no valid data -> ERROR status, no throw
+    twgCalls.length = 0;
+    await withForgeMocks(
+      {
+        asUserImpl: () =>
+          makeClient(async (query, variables, operationName) => {
+            twgCalls.push({ query, variables, operationName });
+            return makeJsonResponse(200, { errors: [{ message: 'x' }] });
+          }),
+      },
+      async () => {
+        const res = await TeamworkGraphService.queryIssueGraphContext('MED-901', {
+          includeSpecOwners: true,
+        });
+        assert.strictEqual(twgCalls.length, 1);
+        assert.strictEqual(res.teamworkGraphStatus, 'ERROR');
+        assert.deepStrictEqual(res.specOwners, []);
+      }
+    );
+
+    // (b2) Partial GraphQL errors alongside valid AtlassianUser edges -> keeps owners & OK status
+    twgCalls.length = 0;
+    await withForgeMocks(
+      {
+        asUserImpl: () =>
+          makeClient(async (query, variables, operationName) => {
+            twgCalls.push({ query, variables, operationName });
+            return makeJsonResponse(200, {
+              errors: [{ message: 'AppUser cannot be resolved (thread 103766)' }],
+              data: {
+                confluencePageOwners: {
+                  edges: [
+                    { node: null },
+                    { node: { __typename: 'AppUser', id: 'app-1' } },
+                    { node: { __typename: 'AtlassianUser', accountId: 'acc-real', name: 'farhan tanvir' } },
+                  ],
+                },
+              },
+            });
+          }),
+      },
+      async () => {
+        const res = await TeamworkGraphService.queryIssueGraphContext('MED-901', {
+          includeSpecOwners: true,
+        });
+        assert.strictEqual(twgCalls.length, 1);
+        assert.strictEqual(res.teamworkGraphStatus, 'OK');
+        assert.deepStrictEqual(res.specOwners, [
+          { pageId: '81001', accountId: 'acc-real', name: 'farhan tanvir' },
+        ]);
+      }
+    );
+
+    // (c) APP mode -> TWG never called, SKIPPED_APP_MODE
+    twgCalls.length = 0;
+    await withForgeMocks(
+      {
+        asAppImpl: () =>
+          makeClient(async (query, variables, operationName) => {
+            twgCalls.push({ query, variables, operationName });
+            return ownersResponse();
+          }),
+      },
+      async () => {
+        const res = await TeamworkGraphService.queryIssueGraphContext('MED-901', {
+          callerMode: 'APP',
+          includeSpecOwners: true,
+        });
+        assert.strictEqual(twgCalls.length, 0, 'APP mode must not call requestTeamworkGraph');
+        assert.strictEqual(res.teamworkGraphStatus, 'SKIPPED_APP_MODE');
+        assert.strictEqual(res.specOwners, undefined);
+      }
+    );
+
+    // (d) includeSpecOwners omitted -> TWG never called, fields absent
+    twgCalls.length = 0;
+    await withForgeMocks(
+      {
+        asUserImpl: () =>
+          makeClient(async (query, variables, operationName) => {
+            twgCalls.push({ query, variables, operationName });
+            return ownersResponse();
+          }),
+      },
+      async () => {
+        const res = await TeamworkGraphService.queryIssueGraphContext('MED-901');
+        assert.strictEqual(twgCalls.length, 0);
+        assert.strictEqual(res.specOwners, undefined);
+        assert.strictEqual(res.teamworkGraphStatus, undefined);
       }
     );
   });
@@ -439,7 +577,6 @@ test.describe('Task 1C-Ingestion: Pagination, Filtering, M:N Specs, Concurrency 
         }
         return makeJsonResponse(404, {});
       },
-      requestGraph: async () => makeJsonResponse(500, {}),
     });
 
     await withForgeMocks(
@@ -503,7 +640,6 @@ test.describe('Task 1C-Ingestion: Pagination, Filtering, M:N Specs, Concurrency 
         });
       },
       requestConfluence: async () => makeJsonResponse(200, { results: [] }),
-      requestGraph: async () => makeJsonResponse(500, {}),
     });
 
     await withForgeMocks({ kvsMock, asUserImpl: mockClient }, async () => {
@@ -541,8 +677,7 @@ test.describe('Task 1C-Ingestion: Pagination, Filtering, M:N Specs, Concurrency 
           });
         },
         requestConfluence: async () => makeJsonResponse(200, { results: [] }),
-        requestGraph: async () => makeJsonResponse(500, {}),
-      });
+        });
 
       await withForgeMocks({ kvsMock: kvsBudget, asUserImpl: budgetClient }, async () => {
         const resBudget = await LiveIngestionService.syncFromAtlassian(
@@ -703,10 +838,10 @@ test.describe('Task 1C-Ingestion: Pagination, Filtering, M:N Specs, Concurrency 
         }
         return makeJsonResponse(404, {});
       },
-      requestGraph: async () =>
-        makeJsonResponse(200, {
-          data: { jira: { issue: { id: 'ari:1', key: 'MN-1', summary: 'x', status: { name: 'Done' }, links: [] } } },
-        }),
+      // Live sync must never call Teamwork Graph (spec owners are interactive-only, off the sync budget)
+      requestTeamworkGraph: async () => {
+        throw new Error('requestTeamworkGraph must not be called by live sync');
+      },
     });
 
     await withForgeMocks(
@@ -737,7 +872,7 @@ test.describe('Task 1C-Ingestion: Pagination, Filtering, M:N Specs, Concurrency 
           ComplianceEngine.buildTraceLinkId('HAZ-MN-1', 'srs-6002', 'MN-1')
         );
         assert.strictEqual(mn1Links[0].graphMetadata.edgeType, 'REST:jira-remotelink');
-        assert.strictEqual(mn1Links[0].graphMetadata.aggTraversalStatus, 'LIVE (JIRA_AGG_AND_REST)');
+        assert.strictEqual(mn1Links[0].graphMetadata.aggTraversalStatus, 'LIVE (JIRA_REST)');
 
         // Confluence page 6001 shared by MN-1 and MN-2 must only be fetched ONCE
         assert.strictEqual(singlePageFetchCounts.get('6001'), 1, 'Confluence page 6001 must be cached across batch');
@@ -839,7 +974,6 @@ test.describe('Task 1C-Ingestion: Pagination, Filtering, M:N Specs, Concurrency 
         }
         return makeJsonResponse(200, { results: [] });
       },
-      requestGraph: async () => makeJsonResponse(500, {}),
     });
 
     await withForgeMocks({ kvsMock, asUserImpl: mockClient }, async () => {
@@ -941,11 +1075,13 @@ test.describe('Task 1C-Ingestion: Pagination, Filtering, M:N Specs, Concurrency 
         }
         return makeJsonResponse(403, { message: 'Forbidden' });
       },
-      requestGraph: async () => makeJsonResponse(500, {}),
     });
 
     await withForgeMocks({ kvsMock, asUserImpl: warnClient }, async () => {
-      const res = await LiveIngestionService.syncFromAtlassian({ projectKey: 'WARN' }, 'acc-warn');
+      const res = await LiveIngestionService.syncFromAtlassian(
+        { projectKey: 'WARN', spaceId: 'WARNSPACE' },
+        'acc-warn'
+      );
       assert.strictEqual(res.success, true);
       assert.ok(res.warnings.some((w) => /403/.test(w)));
       assert.ok(res.warnings.some((w) => /404404.*404|404/.test(w)));
@@ -1087,7 +1223,6 @@ test.describe('Task 1C-Ingestion: Confluence Revert Non-Resurrection & 3-Attempt
         }
         return makeJsonResponse(404, {});
       },
-      requestGraph: async () => makeJsonResponse(500, {}),
     });
 
     await withForgeMocks(
@@ -1358,10 +1493,9 @@ test.describe('Task 1C-Ingestion: Confluence Revert Non-Resurrection & 3-Attempt
     });
   });
 
-  test.it('short-circuits /issue and AGG calls on untagged issues without Confluence links and preserves unreached/other-project LIVE links', async () => {
+  test.it('short-circuits /issue fetch on untagged issues without Confluence links and preserves unreached/other-project LIVE links', async () => {
     const kvsMock = createFullMockForgeKvs();
     const issueDetailCalls = [];
-    const graphCalls = [];
 
     const existingOtherProjectLink = ComplianceEngine.evaluateTraceLink(
       {
@@ -1458,7 +1592,7 @@ test.describe('Task 1C-Ingestion: Confluence Revert Non-Resurrection & 3-Attempt
               },
             ]);
           }
-          // Untagged ALFA-2 has no Confluence links -> should short-circuit /issue and AGG calls
+          // Untagged ALFA-2 has no Confluence links -> should short-circuit the /issue call
           return makeJsonResponse(200, []);
         }
         if (r.includes('/rest/api/3/issue/')) {
@@ -1484,10 +1618,6 @@ test.describe('Task 1C-Ingestion: Confluence Revert Non-Resurrection & 3-Attempt
         }
         return makeJsonResponse(200, { results: [] });
       },
-      requestGraph: async () => {
-        graphCalls.push('called');
-        return makeJsonResponse(200, { data: {} });
-      },
     });
 
     await withForgeMocks({ kvsMock, asAppImpl: mockClient }, async () => {
@@ -1509,12 +1639,11 @@ test.describe('Task 1C-Ingestion: Confluence Revert Non-Resurrection & 3-Attempt
       assert.strictEqual(syncRes.success, true);
       assert.strictEqual(syncRes.skippedUntaggedCount, 1);
 
-      // ALFA-2 short-circuited: neither /rest/api/3/issue/ALFA-2 nor AGG requestGraph was called
+      // ALFA-2 short-circuited: /rest/api/3/issue/ALFA-2 was never called
       assert.ok(
         !issueDetailCalls.some((u) => u.includes('ALFA-2')),
         `Untagged ALFA-2 should short-circuit /issue fetch, saw: ${JSON.stringify(issueDetailCalls)}`
       );
-      assert.strictEqual(graphCalls.length, 1, 'Only ALFA-1 should hit AGG requestGraph');
 
       // Synced HAZ-ALFA-1 (work ALFA-1) + preserved BETA-1 (other project) + preserved ALFA-99 (unreached before truncation)
       const hazKeys = syncRes.summary.traceLinks.map((l) => l.hazard.key).sort();
@@ -1627,7 +1756,6 @@ test.describe('Task 1C-Ingestion: Confluence Revert Non-Resurrection & 3-Attempt
         }
         return makeJsonResponse(200, { results: [] });
       },
-      requestGraph: async () => makeJsonResponse(200, { data: {} }),
     });
 
     try {
@@ -1774,7 +1902,6 @@ test.describe('Task 1C-Ingestion: Confluence Revert Non-Resurrection & 3-Attempt
         }
         return makeJsonResponse(200, { results: [] });
       },
-      requestGraph: async () => makeJsonResponse(200, { data: {} }),
     };
 
     await withForgeMocks({ kvsMock, asAppImpl: () => mockClient }, async () => {
@@ -1796,6 +1923,299 @@ test.describe('Task 1C-Ingestion: Confluence Revert Non-Resurrection & 3-Attempt
       assert.strictEqual(liveMed43.hazard.key, 'HAZ-MED-43');
       assert.strictEqual(liveMed43.test.status, 'UNTESTED');
       assert.strictEqual(liveMed43.signature.isValid, false);
+    });
+  });
+
+  test.it('infers software safety class from labels only, fails closed on unlabelled tracked issues, and ignores Jira priority', async () => {
+    const kvsMock = createFullMockForgeKvs();
+    const mockClient = {
+      requestJira: async (routeObj) => {
+        const r = String(routeObj?.value || routeObj);
+        if (r.includes('/rest/api/3/search/jql')) {
+          return makeJsonResponse(200, {
+            issues: [
+              {
+                id: '6101',
+                key: 'CLS-1',
+                fields: {
+                  summary: 'Tracked hazard without a class label',
+                  status: { name: 'Done', statusCategory: { name: 'Done' } },
+                  labels: ['iec-62304'],
+                  issuetype: { name: 'Hazard' },
+                  priority: { name: 'Low' },
+                  project: { name: 'Class Project' },
+                },
+              },
+              {
+                id: '6102',
+                key: 'CLS-2',
+                fields: {
+                  summary: 'Class A hazard with Highest priority',
+                  status: { name: 'Done', statusCategory: { name: 'Done' } },
+                  labels: ['class-a'],
+                  issuetype: { name: 'Hazard' },
+                  priority: { name: 'Highest' },
+                  project: { name: 'Class Project' },
+                },
+              },
+              {
+                id: '6103',
+                key: 'CLS-3',
+                fields: {
+                  summary: 'Class B hazard',
+                  status: { name: 'Done', statusCategory: { name: 'Done' } },
+                  labels: ['class-b'],
+                  issuetype: { name: 'Hazard' },
+                  project: { name: 'Class Project' },
+                },
+              },
+            ],
+            isLast: true,
+          });
+        }
+        if (r.includes('/remotelink')) {
+          const key = r.match(/issue\/(CLS-\d+)\/remotelink/)?.[1] || 'CLS-1';
+          const pageId = { 'CLS-1': '96101', 'CLS-2': '96102', 'CLS-3': '96103' }[key];
+          return makeJsonResponse(200, [
+            {
+              application: { type: 'com.atlassian.confluence' },
+              globalId: `pageId=${pageId}`,
+              object: { title: `SRS-${key}`, url: `https://example.atlassian.net/wiki/pages/${pageId}` },
+            },
+          ]);
+        }
+        if (r.includes('/rest/api/3/issue/')) {
+          const key = r.split('/rest/api/3/issue/')[1].split('?')[0];
+          return makeJsonResponse(200, {
+            id: key,
+            key,
+            self: 'https://api.atlassian.com/ex/jira/11111111-2222-3333-4444-555555555555/rest/api/3/issue/' + key,
+            fields: { summary: key, issuelinks: [] },
+          });
+        }
+        return makeJsonResponse(404, {});
+      },
+      requestConfluence: async (routeObj) => {
+        const r = String(routeObj?.value || routeObj);
+        const pageMatch = r.match(/\/wiki\/api\/v2\/pages\/(\d+)/);
+        if (pageMatch) {
+          const pid = pageMatch[1];
+          return makeJsonResponse(200, {
+            id: pid,
+            title: `SRS-PAGE-${pid}`,
+            version: { number: 1 },
+            body: { storage: { value: `<p>srs body for ${pid}</p>` } },
+          });
+        }
+        return makeJsonResponse(200, { results: [] });
+      },
+    };
+
+    await withForgeMocks({ kvsMock, asAppImpl: () => mockClient }, async () => {
+      const syncRes = await LiveIngestionService.syncFromAtlassian(
+        { projectKey: 'CLS', maxIssues: 10, callerMode: 'APP' },
+        'acc-cls'
+      );
+      assert.strictEqual(syncRes.success, true);
+
+      // 1. iec-62304 label only -> treated as CLASS_C, marked unassigned, flagged with a Classification Gap
+      const cls1 = syncRes.summary.traceLinks.find((l) => l.work.key === 'CLS-1');
+      assert.ok(cls1, 'Expected CLS-1 link in synced suite');
+      assert.strictEqual(cls1.hazard.riskClass, 'CLASS_C');
+      assert.strictEqual(cls1.hazard.safetyClassAssigned, false);
+      assert.ok(
+        cls1.violations.some((v) =>
+          v.includes('IEC 62304 Classification Gap: Hazard [HAZ-CLS-1] has no software safety class label')
+        ),
+        `Expected Classification Gap violation, saw: ${JSON.stringify(cls1.violations)}`
+      );
+      assert.notStrictEqual(cls1.complianceState, 'VERIFIED');
+
+      // 2. priority Highest + class-a label -> CLASS_A (priority is ignored)
+      const cls2 = syncRes.summary.traceLinks.find((l) => l.work.key === 'CLS-2');
+      assert.ok(cls2, 'Expected CLS-2 link in synced suite');
+      assert.strictEqual(cls2.hazard.riskClass, 'CLASS_A');
+      assert.strictEqual('safetyClassAssigned' in cls2.hazard, false);
+
+      // 3. class-b label -> CLASS_B with no safetyClassAssigned field and no Classification Gap
+      const cls3 = syncRes.summary.traceLinks.find((l) => l.work.key === 'CLS-3');
+      assert.ok(cls3, 'Expected CLS-3 link in synced suite');
+      assert.strictEqual(cls3.hazard.riskClass, 'CLASS_B');
+      assert.strictEqual('safetyClassAssigned' in cls3.hazard, false);
+      assert.ok(
+        !cls3.violations.some((v) => v.includes('Classification Gap')),
+        `Expected no Classification Gap violation, saw: ${JSON.stringify(cls3.violations)}`
+      );
+    });
+  });
+
+  test.it('skips full-tenant Confluence pagination when spaceId is unset, preserves filtered-JQL links, and hardens persistOrClearCursor', async () => {
+    const kvsMock = createFullMockForgeKvs();
+    const confluenceListCalls = [];
+    let activeIssues = [
+      {
+        id: '901',
+        key: 'JQL-1',
+        fields: {
+          summary: 'Bolus Clamp Hazard',
+          status: { name: 'Done', statusCategory: { key: 'done', name: 'Done' } },
+          labels: ['class-c'],
+          issuetype: { name: 'Hazard' },
+          project: { name: 'JQL Project' },
+        },
+      },
+      {
+        id: '902',
+        key: 'JQL-2',
+        fields: {
+          summary: 'Sensor Hazard',
+          status: { name: 'Done', statusCategory: { key: 'done', name: 'Done' } },
+          labels: ['class-b'],
+          issuetype: { name: 'Hazard' },
+          project: { name: 'JQL Project' },
+        },
+      },
+    ];
+
+    const makeClient = () => ({
+      requestJira: async (routeObj) => {
+        const r = String(routeObj?.value || routeObj);
+        if (r.includes('/rest/api/3/search/jql')) {
+          const parsed = new URL(`https://mock.local${r}`);
+          const jqlParam = parsed.searchParams.get('jql') || '';
+          if (jqlParam.includes('labels = "class-c"')) {
+            return makeJsonResponse(200, { issues: [activeIssues[0]], isLast: true });
+          }
+          return makeJsonResponse(200, { issues: activeIssues, isLast: true });
+        }
+        if (r.includes('/remotelink')) {
+          const m = r.match(/issue\/(JQL-\d+)\/remotelink/);
+          const key = m?.[1] || 'JQL-1';
+          const pid = key === 'JQL-1' ? '5001' : '5002';
+          return makeJsonResponse(200, [
+            {
+              application: { type: 'com.atlassian.confluence' },
+              globalId: `pageId=${pid}`,
+              object: { title: `SRS-${pid}`, url: `https://example.atlassian.net/wiki/pages/${pid}` },
+            },
+          ]);
+        }
+        if (r.includes('/rest/api/3/issue/')) {
+          const key = r.split('/rest/api/3/issue/')[1].split('?')[0];
+          return makeJsonResponse(200, {
+            id: key,
+            key,
+            self: `https://api.atlassian.com/ex/jira/11111111-2222-3333-4444-555555555555/rest/api/3/issue/${key}`,
+            fields: { summary: key, issuelinks: [] },
+          });
+        }
+        return makeJsonResponse(404, {});
+      },
+      requestConfluence: async (routeObj) => {
+        const r = String(routeObj?.value || routeObj);
+        const pageMatch = r.match(/\/wiki\/api\/v2\/pages\/(\d+)/);
+        if (pageMatch) {
+          const pid = pageMatch[1];
+          return makeJsonResponse(200, {
+            id: pid,
+            title: `SRS-${pid}`,
+            version: { number: 1 },
+            body: { storage: { value: `<p>Spec ${pid}</p>` } },
+          });
+        }
+        confluenceListCalls.push(r);
+        return makeJsonResponse(200, { results: [] });
+      },
+    });
+
+    await withForgeMocks({ kvsMock, asUserImpl: makeClient }, async () => {
+      // 1. Jira-project mode without spaceId skips /wiki/api/v2/pages list pagination
+      const fullRes = await LiveIngestionService.syncFromAtlassian(
+        { projectKey: 'JQL', callerMode: 'USER' },
+        'acc-jql'
+      );
+      assert.strictEqual(confluenceListCalls.length, 0, 'Must not paginate Confluence pages when spaceId is unset');
+      assert.strictEqual(fullRes.confluencePagesScanned, 2);
+      assert.deepStrictEqual(
+        fullRes.summary.traceLinks.map((l) => l.work.key).sort(),
+        ['JQL-1', 'JQL-2']
+      );
+
+      // 2. Filtered custom JQL preserves JQL-2 even when truncated=false
+      const filteredRes = await LiveIngestionService.syncFromAtlassian(
+        { projectKey: 'JQL', jql: 'project = "JQL" AND labels = "class-c"', callerMode: 'USER' },
+        'acc-jql'
+      );
+      assert.strictEqual(filteredRes.truncated, false);
+      assert.deepStrictEqual(
+        filteredRes.summary.traceLinks.map((l) => l.work.key).sort(),
+        ['JQL-1', 'JQL-2']
+      );
+      assert.ok(
+        filteredRes.warnings.some((w) => /filtered JQL query scope/i.test(w)),
+        `Expected filtered JQL preservation warning, saw: ${JSON.stringify(filteredRes.warnings)}`
+      );
+
+      // 3. persistOrClearCursor: if resumedFromCursor=true and enrichment truncates after Jira finished,
+      // cursor is retained; if non-resumed sync truncates without nextPageToken, stale cursor is deleted.
+      const cursorKey = 'medtrace:ingestion:cursor:JQL';
+      await kvsMock.set(cursorKey, {
+        nextPageToken: 'tok-resume-1',
+        jql: 'project = "JQL" ORDER BY updated DESC',
+        projectKey: 'JQL',
+        updatedAt: new Date().toISOString(),
+      });
+
+      const origDateNow = Date.now;
+      let fakeNow = 1_700_000_000_000;
+      let searchDone = false;
+      Date.now = () => {
+        if (searchDone) {
+          fakeNow += 20_000; // exceed LIVE_SYNC_BUDGET_MS right when enrichment starts
+        }
+        return fakeNow;
+      };
+      try {
+        const enrichTruncClient = () => ({
+          requestJira: async (routeObj) => {
+            const r = String(routeObj?.value || routeObj);
+            if (r.includes('/rest/api/3/search/jql')) {
+              searchDone = true;
+              return makeJsonResponse(200, { issues: activeIssues, isLast: true });
+            }
+            return makeJsonResponse(200, []);
+          },
+          requestConfluence: async () => makeJsonResponse(200, { results: [] }),
+        });
+
+        await withForgeMocks({ kvsMock, asUserImpl: enrichTruncClient }, async () => {
+          const resumedTrunc = await LiveIngestionService.syncFromAtlassian(
+            { projectKey: 'JQL', resumeFromCursor: true, callerMode: 'USER' },
+            'acc-jql'
+          );
+          assert.strictEqual(resumedTrunc.truncated, true);
+          assert.strictEqual(
+            kvsMock.store.get(cursorKey)?.nextPageToken,
+            'tok-resume-1',
+            'Cursor must be retained when enrichment truncates after resuming'
+          );
+        });
+      } finally {
+        Date.now = origDateNow;
+      }
+
+      // Non-resumed truncation without nextPageToken (maxIssues: 1 when Jira returns 2 issues in one page) clears stale cursor
+      const freshTrunc = await LiveIngestionService.syncFromAtlassian(
+        { projectKey: 'JQL', maxIssues: 1, callerMode: 'USER' },
+        'acc-jql'
+      );
+      assert.strictEqual(freshTrunc.truncated, true);
+      assert.strictEqual(freshTrunc.nextPageToken, undefined);
+      assert.strictEqual(
+        kvsMock.store.has(cursorKey),
+        false,
+        'Stale cursor must be cleared when a fresh sync truncates without a nextPageToken'
+      );
     });
   });
 });

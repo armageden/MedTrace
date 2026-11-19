@@ -27,7 +27,7 @@
     "mcp": "node mcp-server/index.mjs"
   },
   "dependencies": {
-    "@forge/api": "^5.1.0",
+    "@forge/api": "8.5.0",
     "@forge/kvs": "^2.1.1",
     "@forge/resolver": "^1.6.0"
   },

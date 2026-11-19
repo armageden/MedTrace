@@ -33,11 +33,14 @@ npm run docs:check      # Mechanical links, headings, backtick paths, and revers
 node scripts/docs-check.mjs --strict-listing  # Pre-Marketplace gate failing on [CONFIGURE BEFORE LISTING]
 ```
 
-## Commit Message Hook ([.githooks/commit-msg](../../.githooks/commit-msg))
+## Git Hooks ([.githooks/](../../.githooks/commit-msg))
 
-`npm install` / `npm ci` runs the root `prepare` script, which sets `core.hooksPath=.githooks`. The hook validates the **subject line only** (first non-comment, non-blank line) against `^(feat|fix|chore|docs|test|refactor|ci)(\(scope\))?: .{10,}$`. Git-generated `Merge …` and `Revert …` subjects are exempt. A conventional-style line in the commit body cannot satisfy the check on the subject's behalf.
+`npm install` / `npm ci` runs the root `prepare` script, which sets `core.hooksPath=.githooks`. Two hooks are active:
 
-Enable it immediately in an existing clone (the `prepare` hook only applies on the next install):
+- **[.githooks/commit-msg](../../.githooks/commit-msg):** Validates the **subject line only** (first non-comment, non-blank line) against `^(feat|fix|chore|docs|test|refactor|ci)(\(scope\))?: .{10,}$`. Git-generated `Merge …` and `Revert …` subjects are exempt. A conventional-style line in the commit body cannot satisfy the check on the subject's behalf.
+- **[.githooks/pre-commit](../../.githooks/pre-commit):** Runs `node scripts/docs-check.mjs` (blocking broken links, missing paths, reverse-coverage gaps, and active `sync-consistency` drift) and prints an advisory note if code, manifest, or test files are staged without any `.md` update.
+
+Enable the hooks immediately in an existing clone (the `prepare` hook only applies on the next install):
 
 ```bash
 git config core.hooksPath .githooks

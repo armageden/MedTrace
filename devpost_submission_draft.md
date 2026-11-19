@@ -7,10 +7,11 @@ Deterministic IEC 62304 & ISO 14971 traceability for Jira, Rovo, and MCP, with a
 
 ## Track & Category Nominations
 * **Primary Category:** Apps for Specialized Industries (Medical Devices & Healthcare Engineering)
-* **Target Bonus Prizes:**
+* **Target Bonus Prize (select 1 per official rules; do NOT enter Best Marketplace Published App on this same App ID, as Marketplace listing disables shareable installation links):**
   * Best Agents — Rovo / Assignable agents (`rovo:agent` MedTrace Regulatory Auditor + `get-hazard-lineage-action` / `verify-iec-compliance-action`)
-  * Best App with Atlassian MCP (`rovo:mcp` server + local stdio MCP bridge for Cursor / Claude Desktop)
-  * Best Marketplace published app *(Contingent on completing Marketplace publish before deadline; full legal & support package prepared under `marketplace/`)*
+  * Best App with Atlassian MCP (`rovo:mcp` server exposing both actions through the Atlassian-hosted MCP endpoint)
+  * Best Apps with Teamwork Graph Integration (`confluencePageOwners` curated query via `api.asUser().requestTeamworkGraph`, surfacing Confluence spec owners for review in the Inspection Drawer and Rovo hazard lineage)
+  * *Per the rules, a submission can win at most one bonus prize (and one main-category prize).*
 
 ---
 
@@ -62,7 +63,8 @@ Provides JSON, CSV, and printable traceability reports with linked artifacts, st
 
 For developer convenience during implementation, MedTrace provides:
 * **Atlassian Rovo Agent (`rovo:agent`):** An assistive agent that runs deterministic graph checks and returns affected hazards and blocked Jira items.
-* **Model Context Protocol (MCP) Server:** Allows configured local IDE clients to request a reduced project summary, a matching lineage, or a compliance check through an HMAC-authenticated Forge webtrigger. Requested response data is returned to that client; the client may retain it under its own policies.
+* **Atlassian-hosted MCP (`rovo:mcp`) — primary path:** The `medtrace-mcp-server` module exposes `get-hazard-lineage-action` and `verify-iec-compliance-action` through Atlassian's MCP server at `https://mcp.atlassian.com/forge/5e49c10e-696f-4984-9d00-4a47d0a5dd99`. External MCP exposure is disabled by default; a site or org admin enables it per app installation in Atlassian Administration → Apps → Sites → site → Connected apps → MedTrace. MCP clients connect over OAuth 2.1 (the user picks the site and approves), and tools run subject to the invoking user's own permissions.
+* **Local stdio MCP bridge (`mcp-server/`) — optional secondary:** A standalone stdio bridge for local IDE clients, forwarding signed requests to the app's HMAC-authenticated Forge webtrigger. Requested response data is returned to that client; the client may retain it under its own policies.
 
 *Example IDE Interaction:*
 > **Developer in Cursor:** *"I am modifying `pump_motor.c` to change bolus flow-rate threshold to 5.5 mL/hr. Does this touch any IEC 62304 hazard?"*  
@@ -78,7 +80,7 @@ MedTrace was built natively on the Atlassian Forge platform using TypeScript, Re
 * **Atlassian Forge Custom UI:** React frontend running inside Jira Cloud (issue panel + project page) providing interactive traceability graphs (`@xyflow/react`), real-time blast radius inspection, and safety gate status.
 * **Deterministic BFS Traversal Engine (`src/compliance-engine.ts`):** In-memory adjacency-list graph engine engineered with cycle detection, pre-computed edge sets, and zero external database round-trips.
 * **Jira Workflow Validator (`src/workflow-validator.ts`):** Native Forge workflow validator applying MedTrace's configured release rules and approval-hash checks to transitions where Jira invokes the validator.
-* **Cross-Product Context Resolution (`src/teamwork-graph.ts`):** Resolves Jira issue links, remote links, and linked Confluence safety specifications through Jira REST API v3 and Confluence REST v2 (with guarded AGG fallback, declaring zero `read:graph:*` scopes).
+* **Cross-Product Context Resolution (`src/teamwork-graph.ts`):** Resolves Jira issue links, remote links, and linked Confluence safety specifications through Jira REST API v3 and Confluence REST v2 (`JIRA_REST` + `JIRA_REMOTELINK_REST`), plus user-context Teamwork Graph `confluencePageOwners` curated queries (`api.asUser().requestTeamworkGraph` under `read:graph:page:confluence` and `read:graph:user:atlassian`) to surface Confluence spec owners for re-review in the Inspection Drawer and Rovo hazard lineage.
 * **Secure Webtrigger Gateway (`src/index.ts`, `src/nonce-store.ts`):**
   * **HMAC-SHA256 Auth:** Cryptographic HMAC-SHA256 signature verification (`x-medtrace-signature`) over `${timestamp}.${nonce}.${rawBody}`, with a required nonce and 5-minute replay window. The shared secret is never transmitted.
   * **Anti-Replay Defense:** Enforces a 300-second timestamp validity window and atomic single-operation nonce reservation via `@forge/kvs` with `keyPolicy: 'FAIL_IF_EXISTS'` and TTL, eliminating race conditions across serverless micro-VMs.
@@ -97,7 +99,7 @@ MedTrace was built natively on the Atlassian Forge platform using TypeScript, Re
 * **Circular Regulatory Traceability:** Real-world engineering requirements frequently contain circular references (e.g., Hazard -> Spec -> Sub-Hazard -> Spec). We implemented visited-set cycle prevention in our BFS engine to guarantee deterministic termination on circular trace links.
 * **Workflow Validator Boundary:** Atlassian issue [ECO-624](https://jira.atlassian.com/browse/ECO-624) reports a Jira Automation case but is marked Invalid; it does not establish direct REST API behavior. The repository's release-gate workflow runs on pull requests and pushes to main when its secrets are configured, plus manual and published-release triggers.
 * **Cryptographic Timing Defenses:** Ensuring HMAC validation was protected against timing side-channel attacks required validating signature buffer lengths prior to executing constant-time `crypto.timingSafeEqual`.
-* **Prior Credential Exposure:** A previously committed MCP secret was rotated on 2026-11-15; the old value is rejected (HTTP 401) by the production and development webtrigger endpoints. Removal of the value from Git history is still pending. Do not distribute a production MCP secret to judges; use the Atlassian MCP authorization flow or a demo-only deployment and secret.
+* **Prior Credential Exposure:** A previously committed MCP secret was rotated on 2026-11-15; the old value is rejected (HTTP 401) by the production and development webtrigger endpoints. Removal of the value from Git history is still pending.
 
 ---
 
@@ -105,7 +107,7 @@ MedTrace was built natively on the Atlassian Forge platform using TypeScript, Re
 To ensure transparent evaluation by technical judges, we explicitly document MedTrace's architectural boundaries:
 * **Workflow Validator Attachment Requires Jira Site-Admin:** The release gate is implemented as a native Forge `jira:workflowValidator` declared in `manifest.yml`. Attaching it to a live Jira workflow transition requires Jira site-administration permissions; for non-admin evaluators, the app includes an interactive in-app simulation harness invoking the exact same validator handler.
 * **Validator Scope:** Atlassian issue [ECO-624](https://jira.atlassian.com/browse/ECO-624) reports an Automation case but is marked Invalid and does not establish direct REST API behavior. The included release-gate workflow runs from CI on pull requests and pushes to main when its secrets are configured.
-* **Cross-Product Context Resolution (Zero `read:graph:*` Scopes):** `manifest.yml` does not request Developer Preview `read:graph:*` scopes; `src/teamwork-graph.ts` primarily resolves Jira REST v3 issue/remote links and Confluence v2 pages with guarded AGG handling so evaluations never crash on missing graph scopes.
+* **Cross-Product Context & Teamwork Graph Scope (`read:graph:*` Preview Fallback):** `manifest.yml` declares `read:graph:page:confluence` and `read:graph:user:atlassian` for the `confluencePageOwners` curated query (`api.asUser().requestTeamworkGraph`, `@forge/api` `8.5.0`). Jira REST v3 + Confluence v2 REST links remain primary; if Preview graph scopes are not granted by a tenant admin or return GraphQL errors, evaluations degrade gracefully (`teamworkGraphStatus: 'EMPTY' | 'ERROR'`) without blocking core traceability.
 * **Forge KVS Storage & Sharded Persistence (`SHARDED_V2`):** Forge KVS enforces per-entity and transaction limits (`<= 25` ops per `kvs.transact()`). MedTrace ships `SHARDED_V2` entity-scoped sharding (`medtrace:compliance:link:...`) with content-hash shard reuse, bounded 128 KiB `ShardedSuiteMetaV2` metadata (`medtrace:compliance:suite_meta`), overflowing `meta_index` O(1) lookup shards (`issueKeyIndex`), and resumable `nextPageToken` live sync pagination (`MAX_SYNC_MAX_ISSUES = 500`, `LIVE_SYNC_BUDGET_MS = 15_000` per invocation).
 * **Non-PHI Intended Use:** MedTrace is intended for engineering metadata and has no PHI detection or redaction. Customers must not put PHI in fields MedTrace ingests. This is not a HIPAA compliance or BAA determination.
 * **Demo vs. Live:** A deterministic demo fixture is labeled `DEMO DATASET: MODELED RECORDS`. Demo records are not evidence about a real device or customer system.
@@ -117,7 +119,7 @@ To ensure transparent evaluation by technical judges, we explicitly document Med
 * **Test-Enforced Deterministic Traversal:** Blast-radius BFS over the artifact-node graph completes the 500-node synthetic benchmark in under 20ms (a ceiling asserted by the automated test suite itself), delivering instant transitive impact analysis inside Jira.
 * **Defensible Regulatory Framing:** Grounded MedTrace strictly in formal IEC 62304 software verification clauses (Clause 5.7 system testing and Clause 5.8 software release) and ISO 14971 risk classifications, avoiding ungrounded marketing claims.
 * **Replay Defense Tests:** Automated tests cover HMAC validation and nonce replay behavior. They do not establish a current production deployment result.
-* **Automated Test Suite:** 191 automated tests (158 backend/MCP/script tests across 29 suites + 33 React/Vitest frontend tests), covering `verify-release-gate` CI semantics (HTTP 403-on-block), cross-project RBAC and target-issue IDOR guards, `SHARDED_V2` storage + rollback, Forge `rovo:action` payload contracts, Part 11 cryptographic seals, and transitive blast-radius propagation, accompanied by zero-warning docs-sync checks.
+* **Automated Test Suite:** 200 automated tests (166 backend/MCP/script tests across 29 suites + 34 React/Vitest frontend tests), covering `verify-release-gate` CI semantics (HTTP 403-on-block), cross-project RBAC, Confluence-to-Jira `LIVE` read isolation, unbound-hazard operator guards and target-issue IDOR guards, `SHARDED_V2` storage + rollback, Forge `rovo:action` payload contracts, fail-closed `safetyClassAssigned: false` hazard classification, Teamwork Graph `confluencePageOwners` parsing (including partial GraphQL error tolerance), Part 11 cryptographic seals, and transitive blast-radius propagation, accompanied by zero-warning docs-sync checks.
 * **Honest-Failure UX as a Feature:** Every backend failure path renders an explicit error banner or a "no verdict rendered" state: the UI and MCP tools never fabricate compliance evidence, remediation success, or Teamwork Graph traversals, and demo records carry a persistent `DEMO DATASET: MODELED RECORDS` badge.
 
 ---
@@ -131,7 +133,7 @@ To ensure transparent evaluation by technical judges, we explicitly document Med
 ---
 
 ## What's next for MedTrace
-* **Atlassian Teamwork Graph API Expansion:** Extending our read-only traversal with optional `read:graph:*` scopes as Atlassian promotes additional Teamwork Graph edge schemas out of preview.
+* **Atlassian Teamwork Graph API Expansion:** Extending beyond `confluencePageOwners` to additional `read:graph:*` curated queries (page contributors, cross-product issue/deployment edges) as Atlassian promotes Teamwork Graph schemas out of preview.
 * **Jira Service Management Clinical Change Requests:** Connecting customer-reported medical device post-market surveillance issues directly into ISO 14971 risk mitigations.
 
 ---
@@ -150,14 +152,16 @@ To ensure transparent evaluation by technical judges, we explicitly document Med
 ---
 
 ## Try it out
-* **Jira Installation Link:** The current shared link is Jira-only. Add a separately tested Confluence installation link and judge-facing installation instructions before submission. Do not ask judges to run Forge CLI commands.
-* **Live Demo Site & Credentials:**  
-  Site: `https://one-atlas-feur.atlassian.net`  
-  *(Confirm the site is available to judges and provide least-privilege demo accounts. Do not share a production webtrigger secret.)*
-* **Demo Video Walkthrough (< 5:00): BLOCKER**
-  No video is linked in this draft. The script and captions are preparation materials only; add a public YouTube URL after recording the functioning app.
-* **Marketplace Listing / Legal Package:**  
-  *Legal and support package (`PRIVACY_POLICY.md`, `TERMS_OF_SERVICE.md`, `SUPPORT.md`) is prepared under `marketplace/` for the [MedTrace App](https://developer.atlassian.com/console/myapps/5e49c10e-696f-4984-9d00-4a47d0a5dd99). Note: Atlassian Marketplace review/publish status should only be marked "submitted/published" once finalized in Developer Console.*
-* **GitHub Repository:** [https://github.com/armageden/MedTrace](https://github.com/armageden/MedTrace) (Public, Apache-2.0, complete with automated test suites and reproducible benchmarks)
-* **Self-Serve Forge Installation (Site Admins):** Provide judge-tested installation links for both Jira and Confluence. The current Jira link alone does not install the Confluence modules. Do not require judges to use Forge CLI.
-* **Local Developer Assistant (MCP):** Optional. Use synthetic demo data or a dedicated demo deployment; never include a production `MEDTRACE_MCP_SECRET` in the submission.
+* **Installation Link:** `[[INSTALL_LINK — paste from Developer Console → Distribution]]`
+* **Demo Video (< 5:00):** `[[YOUTUBE_URL]]`
+* **GitHub Repository:** [https://github.com/armageden/MedTrace](https://github.com/armageden/MedTrace) (Public, Apache-2.0, with automated test suite)
+
+### Judge walkthrough
+
+1. **Install** the app on your Jira + Confluence site using the installation link above.
+2. **Open a Jira project** → **Apps** → **MedTrace IEC 62304** project page.
+3. **Load data** — pick one:
+   * **(i) Demo dataset:** click `Seed Demo Suite` to load the labelled modeled dataset (`DEMO DATASET` badge).
+   * **(ii) Live sync:** label issues `iec-62304` plus a risk class (`class-a`, `class-b`, or `class-c`), add a Confluence page as a Jira remote link (`Wiki Page`), then click `Sync Live Atlassian`. Tracked issues become hazards/tests starting `UNTESTED` and unsigned — the release starts `BLOCKED` (fail-closed).
+4. **Rovo:** open Rovo chat, choose **MedTrace Auditor**, and use a conversation starter (e.g., hazard lineage or an IEC 62304 compliance check).
+5. **Atlassian MCP:** a site or org admin enables external MCP exposure in Atlassian Administration → Apps → Sites → site → Connected apps → MedTrace, then connect an MCP client to `https://mcp.atlassian.com/forge/5e49c10e-696f-4984-9d00-4a47d0a5dd99` via the OAuth consent screen.

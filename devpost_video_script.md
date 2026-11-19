@@ -2,80 +2,86 @@
 
 **Video constraints (official rules):** less than 5 minutes; show the app functioning on its
 platform; public YouTube link.
-**Target runtime: 3:10.** Record the real app; this script is not evidence of a completed demo.
+**Target runtime: 3:48.** Record the real app; this script is not evidence of a completed demo.
 
 ---
 
-## Part 1 — Video script (3:10)
+## Part 1 — Video script (3:48)
 
-### Shot 1 — Hook (0:00–0:25) · screen: dark slide with the 5-stage chain
+### Shot 1 — Hook (0:00–0:20) · screen: dark slide with the 5-stage chain
 > **NARRATION:** "A change to a medical-device software requirement can affect linked hazards,
 > work items, test evidence, and approval records. MedTrace makes those trace relationships
-> inspectable in Jira and Confluence. It supports traceability work; it does not determine
-> regulatory compliance."
+> inspectable on live Jira and Confluence data. It supports traceability work; it does not
+> determine regulatory compliance."
 
 **On screen:** `HAZARD ↔ SRS ↔ JIRA TASK ↔ TEST ↔ SIGNATURE`, then the 5.0 → 5.5 diff.
 
-### Shot 2 — Cold-start discipline & the demo dataset (0:25–0:48) · screen: Jira → MedTrace project page
-**Action:** Start on empty uninitialized `LIVE` state (`0 hazards`), then click `⚡ Seed Demo Suite`. Wait for the graph to populate.
-> **NARRATION:** "On an empty tenant, MedTrace starts fail-closed in clean LIVE mode — never
-> auto-seeding fake data. One click seeds a modeled Smart Infusion Pump project, stamped
-> with a persistent DEMO DATASET badge. Honest boundaries are the product."
+### Shot 2 — Real data: live sync (0:20–1:05) · screen: Jira project + Confluence space → MedTrace project page
+**Action:** Flash the `MEDTRACE` Jira project (six issues) and the `MEDTRACE` Confluence space
+(four SRS pages) — real tenant artifacts, synthetic content. Open the MedTrace project page in
+`MEDTRACE`: empty uninitialized `LIVE` state. Click `Sync Live Atlassian`; watch links populate.
+Point out the SRS-201…204 links, MEDTRACE-5 flagged with no linked SRS, MEDTRACE-6 skipped as
+untagged, and the release `BLOCKED` state.
+> **NARRATION:** "This is a real Jira project and a real Confluence space — the specifications
+> are synthetic, but they are live tenant artifacts. MedTrace opens empty: LIVE mode starts
+> fail-closed with zero hazards. One click on Sync Live Atlassian ingests the project's labelled
+> issues. Four tracked tasks link to their SRS pages through Jira remote links. MEDTRACE-5 is
+> safety-labelled but has no linked specification — flagged as a gap. MEDTRACE-6 is untagged and
+> skipped. Every test starts UNTESTED and unsigned, so the release is BLOCKED."
 
-**Overlay:** `DEMO DATASET — MODELED RECORDS` badge zoom.
+**Overlay:** `LIVE` dataset badge; zoom on the MEDTRACE-5 no-linked-SRS flag and the
+`BLOCKED` release chip.
 
-### Shot 3 — The hero: blast radius (0:48–1:20) · screen: the live graph
-**Action:** Point at HAZ-101 (Class C, flashing red TEST-88, invalidated signature).
-Click `⚡ Blast Radius`.
-> **NARRATION:** "SRS-104 drifted after its approval attestation. One click runs a breadth-first
-> traversal over the trace graph and returns the blast radius: the signature invalidated,
-> the Class C hazard compromised, Jira task MED-42 locked, TEST-88 invalidated — plus the
-> exact re-audit checklist. When two requirements share one hazard, the traversal crosses
-> that shared node — a dedicated test in our suite pins that propagation."
+### Shot 3 — Closing the loop on MEDTRACE-1 (1:05–1:35) · screen: inspection drawer
+**Action:** On the MEDTRACE-1 link, open `Record Test Result`, submit `PASSED` with an
+`https://` evidence URL, then `Execute 21 CFR Part 11 Sign-Off`. The link flips to verified.
+> **NARRATION:** "Closing the loop on MEDTRACE-1: record a PASSED verification result with a
+> real evidence URL, then execute the 21 CFR Part 11 sign-off — an attested electronic signature
+> over the spec's content hash. The trace link turns verified."
 
-**Overlay:** hop-by-hop path highlight; `executionTimeMs` chip; then a 3-second overlay of the
-test name `propagates blast radius transitively to sibling links sharing the hazard node` with
-`✔ passing`.
+### Shot 4 — Drift + blast radius (1:35–2:05) · screen: Confluence SRS-201 edit → MedTrace graph
+**Action:** Edit `SRS-201 Bolus Rate Hard Limit` in Confluence, changing `5.0` to `5.5` mL/hr,
+and publish. Return to MedTrace: the approval signature is revoked; click `Blast Radius`.
+> **NARRATION:** "Now the requirement drifts: in Confluence, SRS-201 changes from 5.0 to 5.5
+> millilitres per hour. The page-update trigger fires, the approval signature is revoked, and one
+> click shows the transitive blast radius — the spec, its hazard, the Jira task, the test, and the
+> re-audit checklist."
 
-### Shot 4 — The gate (1:20–1:48) · screen: same page
-**Action:** Click `🔒 Test Human Gate` → blocked modal appears.
-> **NARRATION:** "This in-app simulation invokes the validator handler. A Jira admin can attach
-> the Forge validator to a workflow transition. Atlassian issue ECO-624 reports an Automation
-> case but is marked Invalid; it does not establish REST behavior. Our separate release-gate
-> workflow also checks the production suite on pull requests and pushes to main."
+**Overlay:** hop-by-hop path highlight; the revoked-signature marker on the spec node.
 
-### Shot 5 — Demo remediation (1:48–2:02) · screen: inspection drawer
-**Action:** Run the demo-only remediation simulation. Show the modeled graph state change and
-the updated demo result.
-> **NARRATION:** "This is a demo-only state change: it does not run hardware tests or certify a
-> real device. In LIVE mode, remediation is blocked. Backend failures remain visible as errors."
+### Shot 5 — The gate (2:05–2:30) · screen: same page
+**Action:** Click `Test Human Gate` → blocked modal appears on the Class C issue.
+> **NARRATION:** "The Test Human Gate button invokes the same validator handler a Jira workflow
+> calls on transition. With a Class C hazard unverified, the transition is blocked — fail-closed.
+> A site admin can attach this validator to a live workflow."
 
-### Shot 6 — The evidence export (2:02–2:12) · screen: export modal
-**Action:** Click `📄 Audit Evidence Export` → print preview.
-> **NARRATION:** "The printable traceability report includes linked artifacts and hashes. It is
-> not an official FDA eSTAR form or 510(k) submission."
+### Shot 6 — Rovo agent (2:30–2:55) · screen: Rovo chat
+**Action (pre-record if Rovo latency runs long):** In Rovo, choose MedTrace Auditor and ask
+"Show me the hazard lineage for MEDTRACE-1" → the agent calls `get-hazard-lineage-action` and
+returns the lineage card; follow with "verify IEC 62304 compliance" → `verify-iec-compliance-action`.
+> **NARRATION:** "The MedTrace Auditor runs the same deterministic engine inside Rovo chat. Asked
+> about MEDTRACE-1, it calls the hazard-lineage action and returns the trace chain and the release
+> verdict — under the invoking user's own permissions."
 
-### Shot 7 — Architecture and data flow (2:12–2:44) · screen: architecture slide
-> **NARRATION:** "The Forge manifest grants no external backend-fetch permission. Separately,
-> authenticated MCP and CI requests receive their requested results, so data can leave the
-> tenant through those configured clients. The webtrigger uses HMAC-SHA256 and single-use
-> nonces. Automated tests cover replay handling; show production results only if freshly verified."
+### Shot 7 — Atlassian MCP (2:55–3:20) · screen: MCP client (Claude Desktop / VS Code / Cursor — whichever supports remote MCP with OAuth)
+**Action:** Show the client connected to
+`https://mcp.atlassian.com/forge/5e49c10e-696f-4984-9d00-4a47d0a5dd99`; run
+`verify-iec-compliance-action` with the 5.0 → 5.5 diff → response: blocked.
+> **NARRATION:** "The same two actions are exposed through the Atlassian MCP server at
+> mcp.atlassian.com — a site admin enables external MCP exposure under Connected apps, and the
+> client connects over OAuth. Here verify-iec-compliance answers the bolus-rate diff: release
+> blocked." *(Optional extra: the local stdio MCP bridge in `mcp-server/` — not part of this demo.)*
 
-**Overlay:** Show a redacted live terminal capture only after rerunning the check against the
-deployment being demonstrated. Never include secrets or signed URLs.
+### Shot 8 — Evidence & boundaries (3:20–3:38) · screen: `Export Dossier` + audit log
+**Action:** Click `Export Dossier` → printable report; flash the audit log hash chain.
+> **NARRATION:** "Evidence exports and the hash-chained audit trail verify independently.
+> Evaluators with no tenant data can seed a labelled DEMO dataset instead. MedTrace is assistive
+> traceability tooling — not a regulatory determination, not a validated QMS, and not for patient
+> data."
 
-### Shot 8 — Rovo agent + MCP (2:44–3:00) · screen: Rovo chat + Cursor
-**Action (pre-record the Cursor half separately — Rovo latency often exceeds 20s):**
-In Rovo: "Audit current sprint for IEC 62304 compliance gaps" → agent calls
-`verify-iec-compliance-action`, returns affected hazards + remediation (tighten to the agent's
-answer card). In Cursor (pre-recorded 5s capture): paste the bolus-rate diff question →
-`medtrace_verify_iec_compliance` answers from live cloud state.
-> **NARRATION:** "The MedTrace Auditor Rovo agent runs the same deterministic engine from chat.
-> And through our MCP server, Cursor asks the live compliance graph before you commit."
-
-### Shot 9 — Close (3:00–3:10)
-> **NARRATION:** "MedTrace — deterministic regulatory blast radius, a hard safety gate, and
-> cryptographic evidence, inside the tools engineers already use. Built on Atlassian Forge."
+### Shot 9 — Close (3:38–3:48)
+> **NARRATION:** "MedTrace — deterministic blast radius, a hard safety gate, and cryptographic
+> evidence, on live Atlassian data. Built on Forge."
 > **Overlay:** repo URL.
 
 **Recording notes:** 1080p minimum, zoom to 125% in Jira, cut all dead time, captions on
@@ -85,40 +91,42 @@ answer card). In Cursor (pre-recorded 5s capture): paste the bolus-rate diff que
 
 ## Part 2 — 60-minute judge dress rehearsal (do this the day before recording)
 
-1. **Fresh tenant install (10 min):** create a brand-new dev tenant → install using the
-   judge-facing Jira and Confluence links →
-   confirm the app appears in a project sidebar. Anything that breaks here is what judges hit first.
-2. **Zero-state path (10 min):** open MedTrace on the empty tenant → confirm clean uninitialized
-   `LIVE` state (no fabricated auto-seeded data, no console errors), then click `⚡ Seed Demo Suite`
-   and confirm the graph + `DEMO DATASET: MODELED RECORDS` badge render cleanly.
-3. **Full click-through + live Firefox gates (10 min):** every button in the header, drawer,
-   table search, export print; also verify the three live production browser checks in Firefox:
-   (a) native Jira workflow dropdown block on `MED-42` (confirm standalone `WorkflowValidator` log),
-   (b) real Confluence SRS page edit (`avi:confluence:updated:page` drift trigger), and
-   (c) Rovo prompt triggering `[MedTrace RovoAction] Dispatching action:` in `forge logs -e production`.
-4. **Crypto replay proof (5 min):** run the README's replay check against the target deployment;
-   retain dated, redacted output if you intend to claim a live result.
-5. **CI gate (5 min):** POST `verify-release-gate` → expect HTTP 403 with the HAZ-101 violation.
-6. **Rovo live test (10 min):** in the tenant's Rovo chat, ask:
-   - "Audit current sprint for IEC 62304 compliance gaps" → expect affected hazards + guidance.
-   - "Inspect ISO 14971 Class C hazards for Smart Infusion Pump" → expect HAZ-101 lineage.
-   - **If the agent answers without calling an action**, open Developer logs
-     (`forge logs -e production`) — look for `[MedTrace RovoAction] Dispatching action:`.
-     Absent log = invocation didn't reach the handler: check the manifest deployed
-     and that the agent's conversation starters are enabled.
-7. **MCP in Cursor (10 min):** configure per `mcp-server/README.md`, ask the bolus question,
-   confirm the response cites live cloud state; then kill the URL and confirm it says
-   `LOCAL HEURISTIC ONLY` instead of pretending.
+1. **Confirm the live dataset on MEDTRACE (10 min):** open the `MEDTRACE` Jira project (six
+   issues, correct labels) and the `MEDTRACE` Confluence space (four SRS pages, status current).
+   Open the MedTrace project page in `MEDTRACE` → confirm clean uninitialized `LIVE` state →
+   click `Sync Live Atlassian` → confirm hazards, tests, and the four SRS links populate,
+   MEDTRACE-5 shows the missing-SRS flag, and MEDTRACE-6 is skipped.
+2. **Close-the-loop path (10 min):** on MEDTRACE-1 use `Record Test Result` (`PASSED` + an
+   `https://` evidence URL) → `Execute 21 CFR Part 11 Sign-Off` → link verified and the release
+   state updates.
+3. **Confluence drift trigger (10 min):** edit SRS-201 (`5.0` → `5.5` mL/hr) and publish →
+   confirm `avi:confluence:updated:page` fires and the signature is revoked → run `Blast Radius`.
+   Check `forge logs -e production` for the trigger event if nothing changes.
+4. **Gate + Rovo (10 min):** `Test Human Gate` → blocked modal on a Class C issue. In Rovo chat,
+   choose MedTrace Auditor → "Show me the hazard lineage for MEDTRACE-1" → expect the action
+   response. If the agent answers without calling an action, check `forge logs -e production` for
+   `[MedTrace RovoAction] Dispatching action:` — absent log means the invocation never reached the
+   handler.
+5. **Atlassian MCP (10 min):** a site or org admin enables external MCP exposure (Atlassian
+   Administration → Apps → Sites → site → Connected apps → MedTrace → turn on tools). Connect an
+   MCP client to `https://mcp.atlassian.com/forge/5e49c10e-696f-4984-9d00-4a47d0a5dd99` via the
+   OAuth consent screen, then run `verify-iec-compliance-action` with the 5.0 → 5.5 diff → expect
+   blocked.
+6. **Demo fallback + install smoke (10 min):** on a scratch site, install via the judge-facing
+   link → `Seed Demo Suite` → confirm the `DEMO DATASET` badge path still works for evaluators
+   with no tenant data.
+7. **Recording prep (5 min):** 1080p, zoom 125%, cut dead time; pre-record the Rovo shot if
+   latency exceeds ~20 s.
 
 ---
 
 ## Part 3 — Submission checklist (final 48 hours)
 
-- [ ] Deploy HEAD (`npm run build:all && forge deploy -e production`) and verify production logs are free of old `KEY_NOT_FOUND` batch-read errors.
+- [ ] Deploy HEAD (`npm run build:all && forge deploy -e production` + `forge install --upgrade` on Jira and Confluence so `read:graph:*` scopes apply), initialize `Sync Live Atlassian` on the active production partition, and verify `production` logs are free of old errors.
+- [ ] Verify `verify-iec-compliance-action` over `https://mcp.atlassian.com/forge/5e49c10e-696f-4984-9d00-4a47d0a5dd99` after production sync so it answers from live `MEDTRACE` records rather than an uninitialized storage partition.
 - [ ] Record the functioning app, publish it on YouTube, and add the public URL to `devpost_submission_draft.md` (currently a blocker, no URL present).
 - [ ] Confirm separate judge-facing Jira and Confluence install links on a fresh site.
 - [ ] Provide least-privilege demo accounts; never submit a production webtrigger secret.
-- [ ] Verify the Marketplace status and include a review-ticket/listing link only if one exists.
-- [ ] Re-run `npm run test:all` and verify the final test count (`191`: 158 backend + 33 frontend) matches the draft.
+- [ ] Re-run `npm run test:all` and verify the final test count (`200`: `166` backend + `34` frontend) matches the draft.
 - [ ] Screenshot the `DEMO DATASET` badge + honest error banner — use one in the Devpost gallery
       images; it's a differentiator, not a weakness.

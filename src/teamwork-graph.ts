@@ -1,15 +1,21 @@
 import api, { getAppContext, route } from '@forge/api';
-import { AggIssueLinkRef, ConfluenceRemoteLinkRef, IssueGraphContextResult } from './types';
+import { ConfluenceRemoteLinkRef, IssueGraphContextResult, SpecOwnerRef } from './types';
 
-export type { AggIssueLinkRef, ConfluenceRemoteLinkRef, IssueGraphContextResult };
+export type { ConfluenceRemoteLinkRef, IssueGraphContextResult, SpecOwnerRef };
 
 export interface QueryIssueGraphContextOptions {
   callerMode?: 'USER' | 'APP';
   /**
    * When true, checks Jira `/remotelink` first and returns `null` immediately if no Confluence links exist,
-   * avoiding extra Jira issue REST and AGG GraphQL calls for untagged non-safety issues.
+   * avoiding extra Jira issue REST calls for untagged non-safety issues.
    */
   requireConfluenceLinkToEnrich?: boolean;
+  /**
+   * When true and callerMode is USER, queries the Teamwork Graph `confluencePageOwners`
+   * curated query for the linked Confluence pages and attaches `specOwners`.
+   * Skipped in APP mode (Teamwork Graph is user-context only) and when no pageIds exist.
+   */
+  includeSpecOwners?: boolean;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -109,33 +115,102 @@ function parseStatus(raw: unknown): { name?: string; category?: string } | undef
   };
 }
 
-function parseAggIssueLinks(rawLinks: unknown): AggIssueLinkRef[] {
-  if (!Array.isArray(rawLinks)) return [];
-  const parsed: AggIssueLinkRef[] = [];
-  for (const item of rawLinks) {
-    if (!isRecord(item)) continue;
-    const id = asNonEmptyString(item.id);
-    if (!id) continue;
-
-    const rawType = isRecord(item.type) ? item.type : undefined;
-    const name = typeof rawType?.name === 'string' && rawType.name ? rawType.name : undefined;
-    const inward = typeof rawType?.inward === 'string' && rawType.inward ? rawType.inward : undefined;
-    const outward = typeof rawType?.outward === 'string' && rawType.outward ? rawType.outward : undefined;
-
-    const linkRef: AggIssueLinkRef = { id };
-    if (name !== undefined || inward !== undefined || outward !== undefined) {
-      linkRef.type = {
-        ...(name !== undefined ? { name } : {}),
-        ...(inward !== undefined ? { inward } : {}),
-        ...(outward !== undefined ? { outward } : {}),
-      };
-    }
-    parsed.push(linkRef);
-  }
-  return parsed;
-}
-
 type ForgeClient = ReturnType<typeof api.asApp> | ReturnType<typeof api.asUser>;
+
+const SPEC_OWNERS_MAX_PAGES = 5;
+
+const SPEC_OWNERS_TWG_QUERY = `query medtrace_specPageOwners($id: ID!) {
+  confluencePageOwners(id: $id, first: 25) {
+    edges { node { __typename ... on AtlassianUser { accountId name } } }
+  }
+}`;
+
+export type SpecOwnersStatus = 'OK' | 'EMPTY' | 'ERROR';
+
+/**
+ * Queries the Teamwork Graph `confluencePageOwners` curated query for up to 5 unique
+ * Confluence pageIds (sequential calls, user-context client required). Extracts any valid
+ * `AtlassianUser` edges even when GraphQL `errors` includes partial/app-owner errors;
+ * non-200 responses, thrown errors, or GraphQL errors with zero valid owners on a page yield
+ * status `ERROR` while keeping owners already collected; zero owners with all calls OK yields `EMPTY`.
+ */
+export async function fetchSpecOwnersFromTeamworkGraph(
+  client: ReturnType<typeof api.asUser>,
+  cloudId: string,
+  pageIds: string[]
+): Promise<{ owners: SpecOwnerRef[]; status: SpecOwnersStatus }> {
+  const uniquePageIds = [...new Set(pageIds.filter((id) => typeof id === 'string' && id))].slice(
+    0,
+    SPEC_OWNERS_MAX_PAGES
+  );
+  const owners: SpecOwnerRef[] = [];
+  let status: SpecOwnersStatus = 'OK';
+
+  for (const pageId of uniquePageIds) {
+    const pageAri = `ari:cloud:confluence:${cloudId}:page/${pageId}`;
+    try {
+      const resp = await client.requestTeamworkGraph(
+        SPEC_OWNERS_TWG_QUERY,
+        { id: pageAri },
+        'medtrace_specPageOwners'
+      );
+      if (resp.status !== 200) {
+        status = 'ERROR';
+        console.warn(
+          `[TeamworkGraph] specOwners query failed (status=${resp.status}): non-200 response`
+        );
+        continue;
+      }
+      const json: unknown = await resp.json();
+      const graphErrors = isRecord(json) && Array.isArray(json.errors) ? json.errors : undefined;
+      const edges =
+        isRecord(json) &&
+        isRecord(json.data) &&
+        isRecord(json.data.confluencePageOwners) &&
+        Array.isArray(json.data.confluencePageOwners.edges)
+          ? json.data.confluencePageOwners.edges
+          : [];
+      const seenOnPage = new Set<string>();
+      for (const edge of edges) {
+        const node = isRecord(edge) && isRecord(edge.node) ? edge.node : undefined;
+        if (!node) continue;
+        if (typeof node.__typename === 'string' && node.__typename !== 'AtlassianUser') continue;
+        if (typeof node.name !== 'string' || !node.name) continue;
+        const accountId = typeof node.accountId === 'string' && node.accountId ? node.accountId : undefined;
+        const dedupeKey = accountId || node.name;
+        if (seenOnPage.has(dedupeKey)) continue;
+        seenOnPage.add(dedupeKey);
+        owners.push({ pageId, ...(accountId !== undefined ? { accountId } : {}), name: node.name });
+      }
+      if (graphErrors && graphErrors.length > 0) {
+        const messages = graphErrors
+          .map((e) => (isRecord(e) && typeof e.message === 'string' ? e.message : ''))
+          .filter(Boolean);
+        if (seenOnPage.size === 0) {
+          status = 'ERROR';
+          console.warn(
+            `[TeamworkGraph] specOwners query failed (status=${resp.status}):`,
+            messages.join('; ') || 'GraphQL errors'
+          );
+        } else {
+          console.warn(
+            `[TeamworkGraph] specOwners query returned partial GraphQL error(s) for page ${pageId}; kept ${seenOnPage.size} AtlassianUser owner(s):`,
+            messages.join('; ') || 'GraphQL partial error'
+          );
+        }
+      }
+    } catch (err: unknown) {
+      status = 'ERROR';
+      console.warn('[TeamworkGraph] specOwners query error:', formatErrorMessage(err));
+    }
+  }
+
+  if (status === 'OK' && owners.length === 0) status = 'EMPTY';
+  console.log(
+    `[TeamworkGraph] specOwners ${uniquePageIds.join(',')}: ${owners.length} owner(s) from ${uniquePageIds.length} page(s), status=${status}`
+  );
+  return { owners, status };
+}
 
 interface JiraIssueRestMetadata {
   issueId?: string;
@@ -220,14 +295,14 @@ async function fetchConfluenceRemoteLinks(
 }
 
 /**
- * Jira Atlassian GraphQL Gateway (AGG) + Jira/Confluence REST Graph Context Service.
- * Note: `@forge/api` provides `requestGraph` (AGG `/graphql`) rather than `requestTeamworkGraph`,
- * and this app declares no `read:graph:*` TWG scopes. This service queries AGG `jira.issue`
- * (`JIRA_AGG_AND_REST`) and enriches/falls back via Jira REST issue + `/remotelink` (`JIRA_REMOTELINK_REST`).
+ * Jira REST issue + `/remotelink` Graph Context Service.
+ * Queries Jira REST issue metadata and Jira `/remotelink` Confluence references
+ * (`JIRA_REST` + `JIRA_REMOTELINK_REST`), with an optional Teamwork Graph
+ * `confluencePageOwners` step for spec owners when `includeSpecOwners` is set.
  */
 export class TeamworkGraphService {
   /**
-   * Queries Jira REST issue metadata, Jira `/remotelink` Confluence references, and AGG `jira.issue`.
+   * Queries Jira REST issue metadata and Jira `/remotelink` Confluence references.
    * Defaults `callerMode` to `'USER'` (`api.asUser()`) for interactive UI authorization; background
    * app-level sync callers must explicitly pass `{ callerMode: 'APP' }`.
    */
@@ -261,74 +336,15 @@ export class TeamworkGraphService {
 
     const { issueId, issueSelf, summary, status, issuelinks } = issueMeta;
 
-    // 2. Construct valid Jira issue ARI when cloudId + issueId are known, and query AGG
+    // Construct a valid Jira issue ARI when cloudId + issueId are known
     const cloudId = resolveCloudId(issueSelf);
     const issueAri = cloudId && issueId ? `ari:cloud:jira:${cloudId}:issue/${issueId}` : undefined;
-
-    if (issueAri) {
-      const graphQLQuery = `
-        query GetIssueGraphContext($issueId: ID!) {
-          jira {
-            issue(id: $issueId) {
-              id
-              key
-              summary
-              status {
-                name
-                category
-              }
-              links {
-                id
-                type {
-                  name
-                  inward
-                  outward
-                }
-              }
-            }
-          }
-        }
-      `;
-      try {
-        const response = await client.requestGraph(graphQLQuery, { issueId: issueAri });
-        if (response && response.status === 200) {
-          const json: unknown = await response.json();
-          const errors = isRecord(json) && Array.isArray(json.errors) ? json.errors : undefined;
-          const data = isRecord(json) && isRecord(json.data) ? json.data : undefined;
-          const jiraData = data && isRecord(data.jira) ? data.jira : undefined;
-          const jiraIssue = jiraData && isRecord(jiraData.issue) ? jiraData.issue : undefined;
-
-          if ((!errors || errors.length === 0) && data && jiraIssue) {
-            const aggSummary =
-              typeof jiraIssue.summary === 'string' && jiraIssue.summary ? jiraIssue.summary : summary;
-            const aggStatus = parseStatus(jiraIssue.status) || status;
-            const aggIssueLinks = parseAggIssueLinks(jiraIssue.links);
-
-            return {
-              source: 'JIRA_AGG_AND_REST',
-              confluenceSource: 'JIRA_REMOTELINK_REST',
-              issueKey: cleanKey,
-              issueId,
-              issueAri,
-              summary: aggSummary,
-              status: aggStatus,
-              issuelinks,
-              aggIssueLinks,
-              confluenceLinks,
-              aggRaw: data,
-            };
-          }
-        }
-      } catch (err: unknown) {
-        console.warn(`[TeamworkGraph] AGG query fallback to REST for ${cleanKey}:`, formatErrorMessage(err));
-      }
-    }
 
     if (!issueId && confluenceLinks.length === 0 && issuelinks.length === 0) {
       return null;
     }
 
-    return {
+    const result: IssueGraphContextResult = {
       source: 'JIRA_REST',
       confluenceSource: 'JIRA_REMOTELINK_REST',
       issueKey: cleanKey,
@@ -339,5 +355,27 @@ export class TeamworkGraphService {
       issuelinks,
       confluenceLinks,
     };
+
+    if (options?.includeSpecOwners === true) {
+      if (callerMode === 'APP') {
+        // Teamwork Graph is user-context only; asApp() cannot call it
+        result.teamworkGraphStatus = 'SKIPPED_APP_MODE';
+      } else {
+        const pageIds = confluenceLinks
+          .map((l) => l.pageId)
+          .filter((id): id is string => typeof id === 'string' && Boolean(id));
+        if (cloudId && pageIds.length > 0) {
+          const { owners, status: twgStatus } = await fetchSpecOwnersFromTeamworkGraph(
+            api.asUser(),
+            cloudId,
+            pageIds
+          );
+          result.specOwners = owners;
+          result.teamworkGraphStatus = twgStatus;
+        }
+      }
+    }
+
+    return result;
   }
 }

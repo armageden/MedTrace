@@ -611,6 +611,15 @@ test.describe('McpToolService & rovoActionHandler Integration Tests', () => {
     assert.strictEqual(multiMatch.found, true);
     assert.ok(Array.isArray(multiMatch.matchedLinks));
     assert.strictEqual(multiMatch.matchedLinks.length, 2);
+
+    // Outside Forge runtime, spec owners are never queried even when cloudId + pageId are available
+    const noTwg = await McpToolService.getHazardLineage(
+      { hazardKey: 'HAZ-102' },
+      { cloudId: '12345678-1234-1234-1234-1234567890ab' }
+    );
+    assert.strictEqual(noTwg.found, true);
+    assert.strictEqual(noTwg.specOwners, undefined);
+    assert.strictEqual(noTwg.teamworkGraphStatus, undefined);
   });
 
   test.it('McpToolService.verifyIecCompliance enforces uninitialized fail-closed, multi-key contradiction fix, and LIVE keyword isolation', async () => {
@@ -909,5 +918,67 @@ test.describe('McpToolService & rovoActionHandler Integration Tests', () => {
     );
     assert.strictEqual(sanitizedErr.error, 'Unable to execute MedTrace Rovo action.');
     assert.doesNotMatch(sanitizedErr.error, /SECRET_INTERNAL_STACK_DETAIL/);
+  });
+
+  test.it('McpToolService.getHazardLineage queries Teamwork Graph for all unique matchedLinks pageIds up to cap', async () => {
+    const { blockedLink, verifiedLink } = buildSampleLinks();
+    const multiSpecLink1 = ComplianceEngine.evaluateTraceLink(
+      { ...verifiedLink.hazard, id: 'haz-mn', key: 'HAZ-MN' },
+      { ...verifiedLink.spec, id: 'srs-501', pageId: '50101', title: 'SRS-501' },
+      { ...verifiedLink.work, key: 'MN-10' },
+      verifiedLink.test,
+      verifiedLink.signature
+    );
+    const multiSpecLink2 = ComplianceEngine.evaluateTraceLink(
+      { ...blockedLink.hazard, id: 'haz-mn', key: 'HAZ-MN' },
+      { ...verifiedLink.spec, id: 'srs-502', pageId: '50102', title: 'SRS-502' },
+      { ...verifiedLink.work, key: 'MN-10' },
+      verifiedLink.test,
+      verifiedLink.signature
+    );
+    const suite = ComplianceEngine.generateComplianceReport(
+      [multiSpecLink1, multiSpecLink2],
+      'LIVE',
+      'M:N Lineage Suite',
+      { initialized: true }
+    );
+
+    const queriedAris = [];
+    const origAsUser = forgeApi.default.asUser;
+    const origRuntime = globalThis.__forge_runtime__;
+    globalThis.__forge_runtime__ = true;
+    forgeApi.default.asUser = () => ({
+      requestTeamworkGraph: async (_query, variables) => {
+        queriedAris.push(variables.id);
+        const pid = String(variables.id).split('/').pop();
+        return makeJsonResponse(200, {
+          data: {
+            confluencePageOwners: {
+              edges: [{ node: { __typename: 'AtlassianUser', accountId: `acc-${pid}`, name: `Owner ${pid}` } }],
+            },
+          },
+        });
+      },
+    });
+    try {
+      const res = await McpToolService.getHazardLineage(
+        { hazardKey: 'HAZ-MN' },
+        { suite, cloudId: '12345678-1234-1234-1234-1234567890ab' }
+      );
+      assert.strictEqual(res.found, true);
+      assert.strictEqual(res.teamworkGraphStatus, 'OK');
+      assert.deepStrictEqual(queriedAris, [
+        'ari:cloud:confluence:12345678-1234-1234-1234-1234567890ab:page/50101',
+        'ari:cloud:confluence:12345678-1234-1234-1234-1234567890ab:page/50102',
+      ]);
+      assert.deepStrictEqual(res.specOwners, [
+        { pageId: '50101', accountId: 'acc-50101', name: 'Owner 50101' },
+        { pageId: '50102', accountId: 'acc-50102', name: 'Owner 50102' },
+      ]);
+    } finally {
+      forgeApi.default.asUser = origAsUser;
+      if (origRuntime === undefined) delete globalThis.__forge_runtime__;
+      else globalThis.__forge_runtime__ = origRuntime;
+    }
   });
 });

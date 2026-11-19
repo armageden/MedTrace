@@ -28,11 +28,11 @@ node scripts/docs-check.mjs --strict-listing    # pre-Marketplace placeholder ga
 
 | Changed File(s) | Doc(s) to Check / Update |
 |---|---|
-| `manifest.yml` | [docs/01-architecture/forge-modules.md](../01-architecture/forge-modules.md), [README.md](../../README.md) |
-| `package.json`, `static/frontend/package.json`, `static/frontend/vite.config.ts`, `static/frontend/vitest.config.ts` | [docs/00-how-to/00-overview.md](./00-overview.md), [README.md](../../README.md) |
+| `manifest.yml` | [docs/01-architecture/forge-modules.md](../01-architecture/forge-modules.md), [README.md](../../README.md), [devpost_submission_draft.md](../../devpost_submission_draft.md) |
+| `package.json`, `static/frontend/package.json`, `static/frontend/vite.config.ts`, `static/frontend/vitest.config.ts` | [docs/00-how-to/00-overview.md](./00-overview.md), [docs/00-how-to/03-deploy-production.md](./03-deploy-production.md), [README.md](../../README.md) |
 | `.github/workflows/ci.yml`, `.github/workflows/medtrace-release-gate.yml` | [docs/00-how-to/03-deploy-production.md](./03-deploy-production.md), [SECURITY.md](../../SECURITY.md) |
-| `scripts/validate-manifest.mjs`, `scripts/docs-check.mjs`, `scripts/rotate-mcp-secret.sh` | [docs/00-how-to/03-deploy-production.md](./03-deploy-production.md), [SECURITY.md](../../SECURITY.md) |
-| `.githooks/commit-msg` | [docs/00-how-to/00-overview.md](./00-overview.md) |
+| `scripts/validate-manifest.mjs`, `scripts/docs-check.mjs`, `scripts/rotate-mcp-secret.sh` | [docs/00-how-to/00-overview.md](./00-overview.md), [docs/00-how-to/03-deploy-production.md](./03-deploy-production.md), [SECURITY.md](../../SECURITY.md) |
+| `.githooks/commit-msg`, `.githooks/pre-commit` | [docs/00-how-to/00-overview.md](./00-overview.md) |
 | `mcp-server/index.mjs` | [docs/03-mcp-integration/live-sync.md](../03-mcp-integration/live-sync.md), [docs/00-how-to/02-add-mcp-tool.md](./02-add-mcp-tool.md), [mcp-server/README.md](../../mcp-server/README.md) |
 
 ### Backend Forge Runtime (`src/*.ts`)
@@ -45,9 +45,9 @@ node scripts/docs-check.mjs --strict-listing    # pre-Marketplace placeholder ga
 | `src/seeder.ts`, `src/seeder-storage.ts`, `src/seeder-identity.ts` | [docs/02-compliance-engine/evaluation-rules.md](../02-compliance-engine/evaluation-rules.md), [docs/99-design-decisions/001-twg-and-kvs-hybrid.md](../99-design-decisions/001-twg-and-kvs-hybrid.md), [docs/99-design-decisions/005-hash-chained-audit-log-and-sharded-kvs.md](../99-design-decisions/005-hash-chained-audit-log-and-sharded-kvs.md) |
 | `src/ingestion.ts` | [docs/02-compliance-engine/evaluation-rules.md](../02-compliance-engine/evaluation-rules.md), [docs/01-architecture/forge-modules.md](../01-architecture/forge-modules.md), [docs/99-design-decisions/005-hash-chained-audit-log-and-sharded-kvs.md](../99-design-decisions/005-hash-chained-audit-log-and-sharded-kvs.md) |
 | `src/audit-log.ts`, `src/crypto-utils.ts` | [docs/02-compliance-engine/evaluation-rules.md](../02-compliance-engine/evaluation-rules.md), [docs/99-design-decisions/005-hash-chained-audit-log-and-sharded-kvs.md](../99-design-decisions/005-hash-chained-audit-log-and-sharded-kvs.md), [SECURITY.md](../../SECURITY.md) |
-| `src/teamwork-graph.ts` | [docs/99-design-decisions/003-twg-dual-engine-fallback.md](../99-design-decisions/003-twg-dual-engine-fallback.md) |
+| `src/teamwork-graph.ts` | [docs/99-design-decisions/003-twg-dual-engine-fallback.md](../99-design-decisions/003-twg-dual-engine-fallback.md), [docs/01-architecture/00-overview.md](../01-architecture/00-overview.md), [docs/01-architecture/forge-modules.md](../01-architecture/forge-modules.md), [docs/03-mcp-integration/00-overview.md](../03-mcp-integration/00-overview.md), [README.md](../../README.md), [devpost_submission_draft.md](../../devpost_submission_draft.md) |
 | `src/workflow-validator.ts` | [docs/02-compliance-engine/evaluation-rules.md](../02-compliance-engine/evaluation-rules.md), [docs/00-how-to/03-deploy-production.md](./03-deploy-production.md) |
-| `src/mcp-server.ts`, `src/nonce-store.ts` | [docs/03-mcp-integration/live-sync.md](../03-mcp-integration/live-sync.md), [docs/00-how-to/02-add-mcp-tool.md](./02-add-mcp-tool.md), [docs/99-design-decisions/002-webtrigger-hmac-authentication.md](../99-design-decisions/002-webtrigger-hmac-authentication.md) |
+| `src/mcp-server.ts`, `src/nonce-store.ts` | [docs/03-mcp-integration/00-overview.md](../03-mcp-integration/00-overview.md), [docs/03-mcp-integration/live-sync.md](../03-mcp-integration/live-sync.md), [docs/00-how-to/02-add-mcp-tool.md](./02-add-mcp-tool.md), [docs/99-design-decisions/002-webtrigger-hmac-authentication.md](../99-design-decisions/002-webtrigger-hmac-authentication.md) |
 
 ### Custom UI Frontend & Frontend Tests (`static/frontend/src/**/*.ts*`)
 
@@ -68,6 +68,7 @@ node scripts/docs-check.mjs --strict-listing    # pre-Marketplace placeholder ga
 | `tests/index-rbac-webtrigger.test.cjs`, `tests/nonce-store.test.cjs` | [docs/01-architecture/forge-modules.md](../01-architecture/forge-modules.md), [docs/03-mcp-integration/live-sync.md](../03-mcp-integration/live-sync.md), [docs/99-design-decisions/002-webtrigger-hmac-authentication.md](../99-design-decisions/002-webtrigger-hmac-authentication.md) |
 | `tests/ingestion.test.cjs` | [docs/01-architecture/forge-modules.md](../01-architecture/forge-modules.md), [docs/02-compliance-engine/evaluation-rules.md](../02-compliance-engine/evaluation-rules.md) |
 | `tests/mcp-server.test.mjs`, `tests/workflow-validator-and-mcp.test.cjs` | [docs/03-mcp-integration/live-sync.md](../03-mcp-integration/live-sync.md), [docs/00-how-to/02-add-mcp-tool.md](./02-add-mcp-tool.md) |
+| Any test count or release-readiness change (`tests/*.test.*`, `static/frontend/src/__tests__/*`, deploy) | [devpost_submission_draft.md](../../devpost_submission_draft.md), [devpost_video_script.md](../../devpost_video_script.md) |
 | `npm run test:scripts` (`scripts/*.mjs` and `scripts/*.sh` tests) | [docs/00-how-to/00-overview.md](./00-overview.md), [docs/00-how-to/03-deploy-production.md](./03-deploy-production.md) |
 
 ## 2. Verification Commands

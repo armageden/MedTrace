@@ -1270,3 +1270,58 @@ test('.githooks/commit-msg enforces a conventional subject line and exempts git-
     fixture.cleanup();
   }
 });
+
+test('docs-check: sync-consistency catches stale read:graph, removed AGG, and test-count mismatches', async () => {
+  const fixture = createTempTree(
+    'medtrace-docs-sync-drift-',
+    makeValidDocsFixtureFiles({
+      'manifest.yml': [
+        'app:',
+        '  id: ari:cloud:ecosystem::app/test',
+        'permissions:',
+        '  scopes:',
+        '    - read:graph:page:confluence',
+        '',
+      ].join('\n'),
+      'src/teamwork-graph.ts': 'export async function fetchSpecOwners() { return []; }\n',
+      'README.md': [
+        '# Fixture Repository',
+        '',
+        'See [Guide Overview](docs/00-guide/00-overview.md), [Security](SECURITY.md), and [Privacy](marketplace/PRIVACY_POLICY.md).',
+        'Enriches via `JIRA_AGG_AND_REST` while declaring zero `read:graph:*` scopes.',
+        '- `package.json`',
+        '- `scripts/sample.mjs`',
+        '- `manifest.yml`',
+        '- `src/teamwork-graph.ts`',
+        '',
+      ].join('\n'),
+      'devpost_submission_draft.md': [
+        '# Draft',
+        '199 automated tests (161 backend/MCP/script tests across 29 suites + 34 React/Vitest frontend tests).',
+        '',
+      ].join('\n'),
+    }),
+  );
+
+  try {
+    const res = runDocsCheck({ root: fixture.dir });
+    assert.equal(res.exitCode, 1);
+    assert.ok(
+      res.errors.some((e) => e.includes('README.md:') && e.includes('sync-consistency:') && e.includes('read:graph:*')),
+      `expected read:graph sync error, got: ${JSON.stringify(res.errors)}`,
+    );
+    assert.ok(
+      res.errors.some((e) => e.includes('README.md:') && e.includes('sync-consistency:') && e.includes('JIRA_AGG_AND_REST')),
+      `expected legacy AGG sync error, got: ${JSON.stringify(res.errors)}`,
+    );
+    assert.ok(
+      res.errors.some((e) => e.includes('devpost_submission_draft.md:') && e.includes('sync-consistency:') && e.includes('199 !== 161 + 34')),
+      `expected test-count mismatch error, got: ${JSON.stringify(res.errors)}`,
+    );
+
+    const hookSyntax = await runProcess('bash', ['-n', path.join(REPO_ROOT, '.githooks', 'pre-commit')]);
+    assert.equal(hookSyntax.code, 0, hookSyntax.stderr);
+  } finally {
+    fixture.cleanup();
+  }
+});

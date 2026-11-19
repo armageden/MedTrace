@@ -61,6 +61,20 @@ test.describe('ComplianceEngine - IEC 62304 traceability & signature-fingerprint
     assert.strictEqual(link.violations.length, 0);
   });
 
+  test.it('fails closed on unlabelled hazards (safetyClassAssigned: false) even with PASSED test and valid signature', () => {
+    const unclassifiedHazard = { ...baseHazard, safetyClassAssigned: false };
+    const link = ComplianceEngine.evaluateTraceLink(unclassifiedHazard, baseSpec, baseWork, baseTest, baseSig);
+    assert.strictEqual(link.complianceState, 'SAFETY_VIOLATION');
+    assert.ok(
+      link.violations.some(
+        (v) =>
+          v ===
+          'IEC 62304 Classification Gap: Hazard [HAZ-101] has no software safety class label (class-a, class-b, or class-c); treated as Class C until classified.'
+      ),
+      `Expected Classification Gap violation, saw: ${JSON.stringify(link.violations)}`
+    );
+  });
+
   test.it('blocks Class C hazard when verification test is UNTESTED', () => {
     const untested = { ...baseTest, status: 'UNTESTED' };
     const link = ComplianceEngine.evaluateTraceLink(baseHazard, baseSpec, baseWork, untested, baseSig);
@@ -73,7 +87,7 @@ test.describe('ComplianceEngine - IEC 62304 traceability & signature-fingerprint
     const failedTest = { ...baseTest, id: 'test-89', testKey: 'TEST-89', status: 'FAILED' };
     const link = ComplianceEngine.evaluateTraceLink(classBHazard, baseSpec, baseWork, failedTest, baseSig);
     assert.strictEqual(link.complianceState, 'INCOMPLETE');
-    assert.match(link.violations[0], /IEC 62304 Notice: Class B Hazard \[HAZ-102\] verification test is FAILED/);
+    assert.match(link.violations[0], /IEC 62304 Notice: Hazard \[HAZ-102\] \(Software Safety Class B\) verification test is FAILED/);
   });
 
   test.it('flags signature-fingerprint drift when Confluence hash diverges', () => {
@@ -1321,7 +1335,7 @@ test.describe('ComplianceEngine - Extended Invariants, Gate Parity & Exact Blast
     const failedTest = { ...baseTest, testKey: 'TEST-90', status: 'FAILED' };
     const failedLink = ComplianceEngine.evaluateTraceLink(classAHazard, baseSpec, baseWork, failedTest, baseSig);
     assert.strictEqual(failedLink.complianceState, 'INCOMPLETE');
-    assert.match(failedLink.violations[0], /Class A Hazard \[HAZ-103\] verification test \[TEST-90\] FAILED/);
+    assert.match(failedLink.violations[0], /Hazard \[HAZ-103\] \(Software Safety Class A\) verification test \[TEST-90\] FAILED/);
 
     const missingWorkLink = ComplianceEngine.evaluateTraceLink(classAHazard, baseSpec, { ...baseWork, key: '' }, baseTest, baseSig);
     assert.strictEqual(missingWorkLink.complianceState, 'INCOMPLETE');
@@ -1746,6 +1760,14 @@ test.describe('LiveIngestionService & TeamworkGraphService - Mocked Atlassian Cl
       },
       requestConfluence: async (routeObj) => {
         const r = String(routeObj?.value || routeObj);
+        if (r.includes('/wiki/api/v2/pages/55001')) {
+          return makeJsonResponse(200, {
+            id: '55001',
+            title: 'SRS-55001: Bolus Clamp',
+            version: { number: 4, createdAt: '2026-11-12T10:00:00Z' },
+            body: { storage: { value: modifiedBody } },
+          });
+        }
         if (r.includes('/wiki/api/v2/pages')) {
           return makeJsonResponse(200, {
             results: [
@@ -1760,20 +1782,6 @@ test.describe('LiveIngestionService & TeamworkGraphService - Mocked Atlassian Cl
         }
         return makeJsonResponse(404, {});
       },
-      requestGraph: async () =>
-        makeJsonResponse(200, {
-          data: {
-            jira: {
-              issue: {
-                id: 'ari:cloud:jira:11111111-2222-3333-4444-555555555555:issue/10050',
-                key: 'PUMP-10',
-                summary: 'Implement Bolus Clamp Firmware',
-                status: { name: 'In Progress', category: 'In Progress' },
-                links: [],
-              },
-            },
-          },
-        }),
     });
 
     await withForgeMocks(
@@ -1785,7 +1793,7 @@ test.describe('LiveIngestionService & TeamworkGraphService - Mocked Atlassian Cl
       },
       async () => {
         const twg = await TeamworkGraphService.queryIssueGraphContext('PUMP-10');
-        assert.strictEqual(twg.source, 'JIRA_AGG_AND_REST');
+        assert.strictEqual(twg.source, 'JIRA_REST');
         assert.strictEqual(twg.confluenceLinks[0].pageId, '55001');
 
         const syncRes = await LiveIngestionService.syncFromAtlassian({ projectKey: 'PUMP' }, 'acc-sync');
@@ -1801,7 +1809,7 @@ test.describe('LiveIngestionService & TeamworkGraphService - Mocked Atlassian Cl
     );
   });
 
-  test.it('TeamworkGraphService falls back to JIRA_REST when AGG fails and confluencePageUpdatedTrigger revokes drifted signatures', async () => {
+  test.it('TeamworkGraphService returns JIRA_REST and confluencePageUpdatedTrigger revokes drifted signatures', async () => {
     const kvsMock = createMockForgeKvs();
     const fallbackClient = () => ({
       requestJira: async (routeObj) => {
@@ -1821,7 +1829,6 @@ test.describe('LiveIngestionService & TeamworkGraphService - Mocked Atlassian Cl
           version: { number: 9 },
           body: { storage: { value: '<p>Modified spec content</p>' } },
         }),
-      requestGraph: async () => makeJsonResponse(500, { errors: [{ message: 'AGG down' }] }),
     });
     await withForgeMocks(
       {

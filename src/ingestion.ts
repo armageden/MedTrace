@@ -121,24 +121,29 @@ function stripStorageMarkup(storageHtml: string): string {
   return storageHtml.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 220);
 }
 
-function inferRiskClass(labels: string[], priorityName?: string): {
+function inferRiskClass(labels: string[]): {
   riskClass: RiskClass;
   severity: IsoHazard['severity'];
   probability: IsoHazard['probability'];
+  safetyClassAssigned?: boolean;
 } {
   const lowerLabels = labels.map((l) => l.toLowerCase());
-  const lowerPriority = (priorityName || '').toLowerCase();
 
-  if (
-    lowerLabels.some((l) => l.includes('class-c') || l.includes('class_c') || l.includes('critical-safety')) ||
-    lowerPriority === 'highest'
-  ) {
+  if (lowerLabels.some((l) => l.includes('class-c') || l.includes('class_c') || l.includes('critical-safety'))) {
     return { riskClass: 'CLASS_C', severity: 'CATASTROPHIC', probability: 'OCCASIONAL' };
   }
-  if (lowerLabels.some((l) => l.includes('class-b') || l.includes('class_b')) || lowerPriority === 'high') {
+  if (lowerLabels.some((l) => l.includes('class-b') || l.includes('class_b'))) {
     return { riskClass: 'CLASS_B', severity: 'CRITICAL', probability: 'REMOTE' };
   }
-  return { riskClass: 'CLASS_A', severity: 'MINOR', probability: 'IMPROBABLE' };
+  if (lowerLabels.some((l) => l.includes('class-a') || l.includes('class_a'))) {
+    return { riskClass: 'CLASS_A', severity: 'MINOR', probability: 'IMPROBABLE' };
+  }
+  return {
+    riskClass: 'CLASS_C',
+    severity: 'CATASTROPHIC',
+    probability: 'OCCASIONAL',
+    safetyClassAssigned: false,
+  };
 }
 
 function normalizeStringArray(values: unknown): string[] {
@@ -257,6 +262,7 @@ function validateAndNormalizeOptions(options: SyncFromAtlassianOptions): {
   projectKey?: string;
   spaceId?: string;
   jql: string;
+  hasCustomJql: boolean;
   includeUntaggedIssues: boolean;
   callerMode: 'USER' | 'APP';
   hazardLabels?: string[];
@@ -291,9 +297,12 @@ function validateAndNormalizeOptions(options: SyncFromAtlassianOptions): {
     maxIssues = Math.min(MAX_SYNC_MAX_ISSUES, Math.floor(options.maxIssues));
   }
 
-  const jql =
-    options.jql?.trim() ||
-    (projectKey ? `project = "${projectKey}" ORDER BY updated DESC` : 'ORDER BY updated DESC');
+  const defaultJql = projectKey
+    ? `project = "${projectKey}" ORDER BY updated DESC`
+    : 'ORDER BY updated DESC';
+  const trimmedJql = options.jql?.trim();
+  const jql = trimmedJql || defaultJql;
+  const hasCustomJql = Boolean(trimmedJql && trimmedJql !== defaultJql);
 
   const pageToken =
     typeof options.pageToken === 'string' && options.pageToken.trim() !== ''
@@ -304,6 +313,7 @@ function validateAndNormalizeOptions(options: SyncFromAtlassianOptions): {
     projectKey,
     spaceId,
     jql,
+    hasCustomJql,
     includeUntaggedIssues: options.includeUntaggedIssues === true,
     callerMode: options.callerMode === 'APP' ? 'APP' : 'USER',
     hazardLabels: options.hazardLabels,
@@ -342,8 +352,8 @@ async function fetchAllJiraIssues(
     }
 
     const jiraRoute = nextPageToken
-      ? route`/rest/api/3/search/jql?jql=${jql}&maxResults=${JIRA_PAGE_SIZE}&fields=summary,status,assignee,labels,priority,issuetype,project&nextPageToken=${nextPageToken}`
-      : route`/rest/api/3/search/jql?jql=${jql}&maxResults=${JIRA_PAGE_SIZE}&fields=summary,status,assignee,labels,priority,issuetype,project`;
+      ? route`/rest/api/3/search/jql?jql=${jql}&maxResults=${JIRA_PAGE_SIZE}&fields=summary,status,assignee,labels,issuetype,project&nextPageToken=${nextPageToken}`
+      : route`/rest/api/3/search/jql?jql=${jql}&maxResults=${JIRA_PAGE_SIZE}&fields=summary,status,assignee,labels,issuetype,project`;
 
     const jiraResp = await client.requestJira(jiraRoute);
     if (jiraResp.status !== 200) {
@@ -541,16 +551,20 @@ export class LiveIngestionService {
     const issues = jiraResult.issues;
     let truncated = jiraResult.truncated;
 
-    // 2. Paginate Confluence pages via v2 _links.next cursor
-    const confResult = await fetchAllConfluencePages(
-      client,
-      normalized.spaceId,
-      startedAt,
-      warnings
-    );
-    const pages = confResult.pages;
-    if (confResult.truncated) {
-      truncated = true;
+    // 2. Paginate Confluence pages ONLY when spaceId is explicitly scoped; otherwise fetch linked pageIds
+    // on demand and lazily fall back to bounded space/first-page lookup only for SRS-\d+ heuristic summaries.
+    let pages: ConfluencePageData[] = [];
+    if (normalized.spaceId) {
+      const confResult = await fetchAllConfluencePages(
+        client,
+        normalized.spaceId,
+        startedAt,
+        warnings
+      );
+      pages = confResult.pages;
+      if (confResult.truncated) {
+        truncated = true;
+      }
     }
 
     const pageCache = new Map<string, ConfluencePageData | null>();
@@ -560,6 +574,91 @@ export class LiveIngestionService {
       }
     }
     const pageFetchInflight = new Map<string, Promise<ConfluencePageData | null>>();
+    let heuristicPagesPromise: Promise<ConfluencePageData[]> | null = null;
+
+    const getHeuristicCandidatePages = async (): Promise<ConfluencePageData[]> => {
+      if (normalized.spaceId) {
+        return pages;
+      }
+      if (!heuristicPagesPromise) {
+        heuristicPagesPromise = (async (): Promise<ConfluencePageData[]> => {
+          const collected: ConfluencePageData[] = [];
+          try {
+            if (normalized.projectKey) {
+              const spaceResp = await client.requestConfluence(
+                route`/wiki/api/v2/spaces?keys=${normalized.projectKey}&limit=5`
+              );
+              if (spaceResp.status === 200) {
+                const spaceJson = (await spaceResp.json()) as {
+                  results?: Array<{ id?: string | number }>;
+                };
+                const matchedSpaceId =
+                  Array.isArray(spaceJson?.results) && spaceJson.results[0]?.id !== undefined
+                    ? String(spaceJson.results[0].id).trim()
+                    : '';
+                if (matchedSpaceId) {
+                  const spacePages = await fetchAllConfluencePages(
+                    client,
+                    matchedSpaceId,
+                    startedAt,
+                    warnings
+                  );
+                  if (spacePages.truncated) {
+                    truncated = true;
+                  }
+                  collected.push(...spacePages.pages);
+                  for (const p of collected) {
+                    if (p?.id !== undefined && p?.id !== null) {
+                      pageCache.set(String(p.id), p);
+                    }
+                  }
+                  return collected;
+                }
+              }
+            }
+
+            const confResp = await client.requestConfluence(
+              route`/wiki/api/v2/pages?body-format=storage&limit=${CONFLUENCE_PAGE_SIZE}`
+            );
+            if (confResp.status !== 200) {
+              warnings.push(
+                `Confluence heuristic pages query returned HTTP ${confResp.status}; proceeding with Jira remote links only.`
+              );
+              return collected;
+            }
+            const confJson = (await confResp.json()) as {
+              results?: ConfluencePageData[];
+              _links?: { next?: string };
+            };
+            const results = Array.isArray(confJson?.results) ? confJson.results : [];
+            collected.push(...results);
+            for (const p of collected) {
+              if (p?.id !== undefined && p?.id !== null) {
+                pageCache.set(String(p.id), p);
+              }
+            }
+            if (extractCursorFromNextLink(confJson?._links?.next)) {
+              warnings.push(
+                `Confluence heuristic title fallback scanned only the first ${CONFLUENCE_PAGE_SIZE} pages (pass spaceId or link Confluence pages via Jira remote links for full coverage).`
+              );
+            }
+          } catch (err: unknown) {
+            const msg = err instanceof Error ? err.message : String(err);
+            warnings.push(`Confluence heuristic pages fallback failed: ${msg}`);
+          }
+          return collected;
+        })();
+      }
+      return await heuristicPagesPromise;
+    };
+
+    const getConfluencePagesScanned = (): number => {
+      let count = 0;
+      for (const page of pageCache.values()) {
+        if (page !== null) count++;
+      }
+      return count;
+    };
 
     const getConfluencePageCached = async (
       pageId: string,
@@ -708,7 +807,7 @@ export class LiveIngestionService {
         };
       }
 
-      const { riskClass, severity, probability } = inferRiskClass(labels, fields.priority?.name);
+      const { riskClass, severity, probability, safetyClassAssigned } = inferRiskClass(labels);
       const prevWorkLinks = existingByWorkKey.get(issueKey.toUpperCase()) || [];
       const defaultHazardKey = prevWorkLinks[0]?.hazard?.key || `HAZ-${issueKey}`;
 
@@ -748,13 +847,16 @@ export class LiveIngestionService {
         const srsTokens = Array.from(
           new Set((String(fields.summary || '').match(/\bSRS-\d+\b/gi) || []).map((t) => t.toLowerCase()))
         );
-        for (const token of srsTokens) {
-          for (const candidate of pages) {
-            const candidateId = candidate?.id !== undefined && candidate?.id !== null ? String(candidate.id) : '';
-            if (!candidateId || seenPageIds.has(candidateId)) continue;
-            if (String(candidate.title || '').toLowerCase().includes(token)) {
-              seenPageIds.add(candidateId);
-              matchedPages.push({ page: candidate, edgeType: 'HEURISTIC:summary-srs-title' });
+        if (srsTokens.length > 0) {
+          const candidatePages = await getHeuristicCandidatePages();
+          for (const token of srsTokens) {
+            for (const candidate of candidatePages) {
+              const candidateId = candidate?.id !== undefined && candidate?.id !== null ? String(candidate.id) : '';
+              if (!candidateId || seenPageIds.has(candidateId)) continue;
+              if (String(candidate.title || '').toLowerCase().includes(token)) {
+                seenPageIds.add(candidateId);
+                matchedPages.push({ page: candidate, edgeType: 'HEURISTIC:summary-srs-title' });
+              }
             }
           }
         }
@@ -784,6 +886,7 @@ export class LiveIngestionService {
           key: hazardKey,
           title: fields.summary || prevExact?.hazard?.title || `Hazard for ${issueKey}`,
           riskClass,
+          ...(safetyClassAssigned === false ? { safetyClassAssigned: false } : {}),
           severity,
           probability,
           mitigationRequirementId: spec.id,
@@ -936,6 +1039,7 @@ export class LiveIngestionService {
           key: hazardKey,
           title: fields.summary || prevExact?.hazard?.title || `Hazard for ${issueKey}`,
           riskClass,
+          ...(safetyClassAssigned === false ? { safetyClassAssigned: false } : {}),
           severity,
           probability,
           mitigationRequirementId: spec.id,
@@ -1110,6 +1214,7 @@ export class LiveIngestionService {
       const seenLinkIds = new Set(traceLinks.map((l) => l.id));
       let preservedTruncatedCount = 0;
       let preservedOtherProjectCount = 0;
+      let preservedFilteredJqlCount = 0;
 
       for (const existingLink of existingSuite.traceLinks) {
         const workKeyUpper = (existingLink.work?.key || '').trim().toUpperCase();
@@ -1120,14 +1225,25 @@ export class LiveIngestionService {
         const isUnprocessedTruncated = Boolean(
           (truncated || resumedFromCursor) && workKeyUpper && !processedWorkKeys.has(workKeyUpper)
         );
+        const isExcludedByFilteredJql = Boolean(
+          normalized.hasCustomJql &&
+            !isOtherProject &&
+            !isUnprocessedTruncated &&
+            (!workKeyUpper || !processedWorkKeys.has(workKeyUpper))
+        );
 
-        if ((isOtherProject || isUnprocessedTruncated) && !seenLinkIds.has(existingLink.id)) {
+        if (
+          (isOtherProject || isUnprocessedTruncated || isExcludedByFilteredJql) &&
+          !seenLinkIds.has(existingLink.id)
+        ) {
           traceLinks.push(cloneTraceLink(existingLink));
           seenLinkIds.add(existingLink.id);
           if (isOtherProject) {
             preservedOtherProjectCount++;
-          } else {
+          } else if (isUnprocessedTruncated) {
             preservedTruncatedCount++;
+          } else {
+            preservedFilteredJqlCount++;
           }
         }
       }
@@ -1142,6 +1258,11 @@ export class LiveIngestionService {
           `Preserved ${preservedOtherProjectCount} existing trace link(s) belonging to other Jira project(s).`
         );
       }
+      if (preservedFilteredJqlCount > 0) {
+        warnings.push(
+          `Preserved ${preservedFilteredJqlCount} existing trace link(s) outside the filtered JQL query scope.`
+        );
+      }
     }
 
     const persistOrClearCursor = async (): Promise<void> => {
@@ -1153,13 +1274,15 @@ export class LiveIngestionService {
             projectKey: normalized.projectKey || 'GLOBAL',
             updatedAt: new Date().toISOString(),
           });
-        } else if (!jiraResult.truncated) {
+        } else if (!truncated || jiraResult.truncated || !resumedFromCursor) {
           await kvs.delete(cursorKey);
         }
       } catch {
         // Non-fatal: nextPageToken is still returned to caller.
       }
     };
+
+    const confluencePagesScanned = getConfluencePagesScanned();
 
     if (traceLinks.length === 0) {
       await persistOrClearCursor();
@@ -1170,7 +1293,7 @@ export class LiveIngestionService {
         success: false,
         datasetMode: existingSuite.datasetMode,
         jiraIssuesScanned: issues.length,
-        confluencePagesScanned: pages.length,
+        confluencePagesScanned,
         linkedPairsFound,
         driftDetectedCount,
         truncated,
@@ -1201,7 +1324,7 @@ export class LiveIngestionService {
         targetKey: projectLabel,
         details: {
           jiraIssuesScanned: issues.length,
-          confluencePagesScanned: pages.length,
+          confluencePagesScanned,
           linkedPairsFound,
           driftDetectedCount,
           skippedUntaggedCount,
@@ -1219,7 +1342,7 @@ export class LiveIngestionService {
       success: true,
       datasetMode: 'LIVE',
       jiraIssuesScanned: issues.length,
-      confluencePagesScanned: pages.length,
+      confluencePagesScanned,
       linkedPairsFound,
       driftDetectedCount,
       truncated,
@@ -1387,7 +1510,12 @@ export class LiveIngestionService {
           link.test,
           link.signature,
           link.graphMetadata,
-          { linkId: link.id, part11Secret }
+          {
+            linkId: link.id,
+            part11Secret,
+            requireCryptographicSeal: true,
+            requireTestEvidence: suite.datasetMode === 'LIVE',
+          }
         );
         evaluated.hazard.status = ComplianceEngine.deriveHazardStatus(evaluated.complianceState);
         updatedLinks[idx] = evaluated;

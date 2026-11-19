@@ -2,6 +2,7 @@ import api, { route } from '@forge/api';
 import { ComplianceEngine } from './compliance-engine';
 import { isForgeRuntime } from './runtime';
 import { SeederService } from './seeder';
+import { fetchSpecOwnersFromTeamworkGraph } from './teamwork-graph';
 import {
   BlastRadiusReport,
   ComplianceSummary,
@@ -10,6 +11,7 @@ import {
   JiraWorkItem,
   Part11Signature,
   RiskClass,
+  SpecOwnerRef,
   TraceLink,
   VerificationTest,
 } from './types';
@@ -61,6 +63,8 @@ export interface HazardLineageFoundResponse {
   signature: Part11Signature;
   complianceState: TraceLink['complianceState'];
   violations: string[];
+  specOwners?: SpecOwnerRef[];
+  teamworkGraphStatus?: 'OK' | 'EMPTY' | 'ERROR';
 }
 
 export interface HazardLineageNotFoundResponse {
@@ -469,7 +473,7 @@ export class McpToolService {
       issueKey?: string;
       hazardKey?: string;
     },
-    options?: { suite?: ComplianceSummary }
+    options?: { suite?: ComplianceSummary; cloudId?: string }
   ): Promise<HazardLineageResponse> {
     const suite = options?.suite ?? (await SeederService.getActiveComplianceSuite());
     const initialized = suite.initialized ?? suite.traceLinks.length > 0;
@@ -482,7 +486,7 @@ export class McpToolService {
       const matches = suite.traceLinks.filter((l) => collectCanonicalLinkKeys(l).includes(lower));
       if (matches.length > 0) {
         const match = matches[0];
-        return {
+        const found: HazardLineageFoundResponse = {
           found: true,
           datasetMode: suite.datasetMode,
           initialized,
@@ -501,6 +505,28 @@ export class McpToolService {
           complianceState: match.complianceState,
           violations: match.violations,
         };
+        const pageIds = matches
+          .map((m) => (typeof m.spec.pageId === 'string' ? m.spec.pageId.trim() : ''))
+          .filter(Boolean);
+        const cloudId = typeof options?.cloudId === 'string' ? options.cloudId.trim() : '';
+        if (isForgeRuntime() && cloudId && pageIds.length > 0) {
+          try {
+            const { owners, status } = await fetchSpecOwnersFromTeamworkGraph(
+              api.asUser(),
+              cloudId,
+              pageIds
+            );
+            found.specOwners = owners;
+            found.teamworkGraphStatus = status;
+          } catch (err: unknown) {
+            console.warn(
+              '[TeamworkGraph] specOwners lineage fetch notice:',
+              err instanceof Error ? err.message : String(err)
+            );
+            found.teamworkGraphStatus = 'ERROR';
+          }
+        }
+        return found;
       }
 
       return {
@@ -791,12 +817,16 @@ export async function rovoActionHandler(
     }
 
     if (actionKey === 'get-hazard-lineage-action' || actionKey === 'get-hazard-lineage') {
+      const rawCloudId = context?.cloudId ?? payloadCtx?.cloudId;
+      const cloudId = typeof rawCloudId === 'string' && rawCloudId.trim() ? rawCloudId.trim() : undefined;
       return await McpToolService.getHazardLineage(
         {
           issueKey: sanitizedInputs.issueKey,
           hazardKey: sanitizedInputs.hazardKey,
         },
-        scopedSuite ? { suite: scopedSuite } : undefined
+        scopedSuite || cloudId
+          ? { ...(scopedSuite ? { suite: scopedSuite } : {}), ...(cloudId ? { cloudId } : {}) }
+          : undefined
       );
     }
 

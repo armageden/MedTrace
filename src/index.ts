@@ -26,8 +26,10 @@ import {
   NonceClaimResult,
 } from './nonce-store';
 import {
+  ComplianceSummary,
   MedTraceResolverMap,
   PART11_ATTESTATION_PHRASE,
+  TraceLink,
   VerificationTest,
 } from './types';
 
@@ -570,6 +572,105 @@ export async function assertAuthorizedOperator(
   };
 }
 
+async function hasJiraBrowsePermission(projectKey?: string): Promise<boolean> {
+  const permRoute = projectKey
+    ? route`/rest/api/3/mypermissions?projectKey=${projectKey}&permissions=BROWSE_PROJECTS`
+    : route`/rest/api/3/mypermissions?permissions=BROWSE_PROJECTS`;
+
+  const res = await api.asUser().requestJira(permRoute);
+  if (!isHttpOk(res)) {
+    return false;
+  }
+  const data = (await res.json().catch(() => ({}))) as JiraPermissionsResponse;
+  const browsePerm = data.permissions?.BROWSE_PROJECTS;
+  if (browsePerm !== undefined) {
+    return browsePerm.havePermission === true;
+  }
+  return (
+    data.permissions?.EDIT_ISSUES?.havePermission === true ||
+    data.permissions?.ADMINISTER_PROJECTS?.havePermission === true
+  );
+}
+
+function extractJiraProjectKeyFromLink(link: TraceLink): string | undefined {
+  const workKey = link.work?.key?.trim().toUpperCase();
+  if (workKey && ISSUE_KEY_RE.test(workKey)) {
+    return workKey.split('-')[0];
+  }
+  const hazardDerived = link.hazard?.key?.trim().toUpperCase().replace(/^HAZ-/i, '');
+  if (hazardDerived && ISSUE_KEY_RE.test(hazardDerived)) {
+    return hazardDerived.split('-')[0];
+  }
+  return undefined;
+}
+
+async function filterLiveSuiteForCaller(
+  caller: AuthorizedCaller,
+  suite: ComplianceSummary
+): Promise<ComplianceSummary> {
+  if (
+    !isForgeRuntime() ||
+    suite.datasetMode !== 'LIVE' ||
+    suite.initialized === false ||
+    suite.traceLinks.length === 0 ||
+    caller.projectKey
+  ) {
+    return suite;
+  }
+
+  if (caller.extensionType.toLowerCase().startsWith('confluence:')) {
+    await verifyJiraIdentity(caller.accountId);
+  }
+
+  const projectPermCache = new Map<string, boolean>();
+  let globalBrowsePerm: boolean | undefined;
+
+  const canBrowseProject = async (projectKey: string): Promise<boolean> => {
+    const clean = projectKey.trim().toUpperCase();
+    if (projectPermCache.has(clean)) {
+      return projectPermCache.get(clean) === true;
+    }
+    const allowed = await hasJiraBrowsePermission(clean);
+    projectPermCache.set(clean, allowed);
+    return allowed;
+  };
+
+  const canBrowseGlobal = async (): Promise<boolean> => {
+    if (globalBrowsePerm === undefined) {
+      globalBrowsePerm = await hasJiraBrowsePermission(undefined);
+    }
+    return globalBrowsePerm;
+  };
+
+  const authorizedLinks: TraceLink[] = [];
+  for (const link of suite.traceLinks) {
+    const projKey = extractJiraProjectKeyFromLink(link);
+    if (projKey) {
+      if (await canBrowseProject(projKey)) {
+        authorizedLinks.push(link);
+      }
+    } else if (await canBrowseGlobal()) {
+      authorizedLinks.push(link);
+    }
+  }
+
+  if (authorizedLinks.length === suite.traceLinks.length) {
+    return suite;
+  }
+
+  return ComplianceEngine.generateComplianceReport(
+    authorizedLinks,
+    suite.datasetMode,
+    suite.projectName,
+    {
+      storageFormat: suite.storageFormat,
+      auditEntryCount: suite.auditEntryCount,
+      auditHeadHash: suite.auditHeadHash,
+      initialized: suite.initialized,
+    }
+  );
+}
+
 async function assertOperatorAuthorizedForTarget(
   req: ForgeResolverRequest<unknown> | undefined,
   target: {
@@ -584,6 +685,32 @@ async function assertOperatorAuthorizedForTarget(
   if (suite.datasetMode === 'DEMO') {
     return;
   }
+
+  const accountId = extractCallerAccountId(req);
+  const scope = normalizeAndValidateScope(req?.context?.extension, undefined);
+
+  const assertFallbackJiraOperator = async (derivedIssueKey?: string): Promise<void> => {
+    if (derivedIssueKey && ISSUE_KEY_RE.test(derivedIssueKey)) {
+      await assertAuthorizedOperator(req, { issueKey: derivedIssueKey });
+      return;
+    }
+    if (!isForgeRuntime()) {
+      return;
+    }
+    if (scope.effectiveProjectKey) {
+      if (scope.isConfluence) {
+        await assertAuthorizedOperator(req, { projectKey: scope.effectiveProjectKey });
+      }
+      return;
+    }
+    if (scope.isConfluence) {
+      if (!accountId) {
+        throw new Error('Unauthorized: Authenticated Atlassian accountId is required in resolver context.');
+      }
+      await verifyJiraIdentity(accountId);
+      await assertJiraOperatorPermissions();
+    }
+  };
 
   let idx = -1;
   if (target.testKey !== undefined || !target.hazardKey) {
@@ -613,13 +740,21 @@ async function assertOperatorAuthorizedForTarget(
   }
 
   if (idx < 0) {
+    await assertFallbackJiraOperator();
     return;
   }
 
-  const boundIssueKey = suite.traceLinks[idx].work?.key?.trim().toUpperCase();
+  const targetLink = suite.traceLinks[idx];
+  const boundIssueKey = targetLink.work?.key?.trim().toUpperCase();
   if (boundIssueKey && ISSUE_KEY_RE.test(boundIssueKey)) {
     await assertAuthorizedOperator(req, { issueKey: boundIssueKey });
+    return;
   }
+
+  const hazardDerivedKey = targetLink.hazard?.key?.trim().toUpperCase().replace(/^HAZ-/i, '');
+  await assertFallbackJiraOperator(
+    hazardDerivedKey && ISSUE_KEY_RE.test(hazardDerivedKey) ? hazardDerivedKey : undefined
+  );
 }
 
 function defineTypedResolver<K extends keyof MedTraceResolverMap & string>(
@@ -646,7 +781,8 @@ function defineTypedResolver<K extends keyof MedTraceResolverMap & string>(
 
 defineTypedResolver('getComplianceSuite', async (req) => {
   const caller = await assertAuthorizedReader(req);
-  return SeederService.getActiveComplianceSuite({ projectKey: caller.projectKey });
+  const suite = await SeederService.getActiveComplianceSuite({ projectKey: caller.projectKey });
+  return filterLiveSuiteForCaller(caller, suite);
 });
 
 defineTypedResolver('seedDemoSuite', async (req) => {
@@ -687,7 +823,7 @@ defineTypedResolver('syncLiveSuite', async (req) => {
   });
   if (isForgeRuntime() && caller.extensionType.startsWith('confluence:') && !rawProjectKey) {
     await verifyJiraIdentity(caller.accountId);
-    await assertJiraReaderPermissions(caller.projectKey);
+    await assertJiraOperatorPermissions(caller.projectKey);
   }
 
   const rawJql =
@@ -818,7 +954,7 @@ defineTypedResolver('signOffPart11', async (req) => {
 
   if (!attestationConfirmed || !passwordConfirmed) {
     throw new Error(
-      '21 CFR Part 11 Violation: Both attestationConfirmed and passwordConfirmed re-authentication flags must be true.'
+      'Part 11 attestation: Both attestationConfirmed and passwordConfirmed confirmation flags must be true.'
     );
   }
   if (attestationPhrase !== PART11_ATTESTATION_PHRASE) {
@@ -886,7 +1022,10 @@ defineTypedResolver('queryGraphContext', async (req) => {
     return null;
   }
 
-  return TeamworkGraphService.queryIssueGraphContext(issueKey, { callerMode: 'USER' });
+  return TeamworkGraphService.queryIssueGraphContext(issueKey, {
+    callerMode: 'USER',
+    includeSpecOwners: true,
+  });
 });
 
 defineTypedResolver('bindIssueToHazard', async (req) => {
@@ -908,6 +1047,8 @@ defineTypedResolver('bindIssueToHazard', async (req) => {
     typeof req.payload?.linkId === 'string' && req.payload.linkId.trim().length > 0
       ? req.payload.linkId.trim()
       : undefined;
+
+  await assertOperatorAuthorizedForTarget(req, { hazardKey, linkId });
 
   const summary = await SeederService.bindIssueToHazard(
     hazardKey,
@@ -942,7 +1083,19 @@ defineTypedResolver('simulateTransition', async (req) => {
     ? undefined
     : (rawPayloadIssue || rawContextIssue).toUpperCase() || undefined;
 
-  await assertAuthorizedReader(req, issueKey ? { issueKey } : undefined);
+  const caller = await assertAuthorizedReader(req, issueKey ? { issueKey } : undefined);
+
+  if (!issueKey) {
+    const rawSuite = await SeederService.getActiveComplianceSuite({ projectKey: caller.projectKey });
+    const scopedSuite = await filterLiveSuiteForCaller(caller, rawSuite);
+    if (scopedSuite.datasetMode === 'LIVE' || caller.projectKey) {
+      const outcome = ComplianceEngine.evaluateIssueReleaseGate(undefined, scopedSuite);
+      return {
+        ...outcome,
+        evaluatedIssueKey: undefined,
+      };
+    }
+  }
 
   const result = await workflowValidatorHandler(
     issueKey
@@ -962,7 +1115,8 @@ defineTypedResolver('analyzeBlastRadius', async (req) => {
   if (!triggerKey) {
     throw new Error('Bad Request: triggerKey is required.');
   }
-  const suite = await SeederService.getActiveComplianceSuite({ projectKey: caller.projectKey });
+  const rawSuite = await SeederService.getActiveComplianceSuite({ projectKey: caller.projectKey });
+  const suite = await filterLiveSuiteForCaller(caller, rawSuite);
   return ComplianceEngine.computeBlastRadius(triggerKey, suite);
 });
 

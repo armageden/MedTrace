@@ -505,7 +505,7 @@ export const AuditHeader: React.FC<AuditHeaderProps> = ({
         </div>
 
         <div style={cardStyle}>
-          <div style={cardLabel}>ISO 14971 RISK CLASSES</div>
+          <div style={cardLabel}>IEC 62304 SAFETY CLASSES</div>
           <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginTop: 4, flexWrap: 'wrap' }}>
             <span
               style={{

@@ -259,7 +259,7 @@ describe('FE-01..FE-04 & FE-07: App races, bridge errors, confirm seed, and tran
       PART11_ATTESTATION_PHRASE
     );
     await user.click(
-      screen.getByLabelText(/I confirm my active Atlassian user session re-attestation/i)
+      screen.getByLabelText(/I confirm I am the signer and intend this electronic attestation/i)
     );
     await user.click(
       screen.getByLabelText(/I attest under 21 CFR Part 11/i)
@@ -411,7 +411,7 @@ describe('FE-01..FE-04 & FE-07: App races, bridge errors, confirm seed, and tran
 
     // Test signOffPart11 returning null retains drawer attestation inputs
     const phraseInput = screen.getByLabelText(/Required Attestation Phrase/i);
-    const pwdBox = screen.getByLabelText(/I confirm my active Atlassian user session re-attestation/i);
+    const pwdBox = screen.getByLabelText(/I confirm I am the signer and intend this electronic attestation/i);
     const attBox = screen.getByLabelText(/I attest under 21 CFR Part 11/i);
 
     await user.type(phraseInput, PART11_ATTESTATION_PHRASE);
@@ -682,7 +682,7 @@ describe('FE-01..FE-04 & FE-07: App races, bridge errors, confirm seed, and tran
       PART11_ATTESTATION_PHRASE
     );
     await user.click(
-      screen.getByLabelText(/I confirm my active Atlassian user session re-attestation/i)
+      screen.getByLabelText(/I confirm I am the signer and intend this electronic attestation/i)
     );
     await user.click(screen.getByLabelText(/I attest under 21 CFR Part 11/i));
     await user.click(screen.getByRole('button', { name: /Sign Off Spec/i }));

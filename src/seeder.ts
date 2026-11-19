@@ -933,21 +933,21 @@ export class SeederService {
         hazardAri: 'ari:cloud:medtrace::iso14971-hazard/HAZ-101',
         linkedSpecAri: 'ari:cloud:confluence:d601ebde-589a-45d8-ab19-a8edfb1d5a47:page/98304',
         edgeType: 'iso14971:mitigates-hazard -> atlassian:work-item-links-page',
-        aggTraversalStatus: 'MODELED (demo lineage — live AGG query via queryGraphContext)',
+        aggTraversalStatus: 'MODELED (demo lineage)',
       },
       {
         entityAri: 'ari:cloud:jira:5cbf2ff9-658a-44d8-9004-dbe8a96e952b:issue/10043',
         hazardAri: 'ari:cloud:medtrace::iso14971-hazard/HAZ-102',
         linkedSpecAri: 'ari:cloud:confluence:d601ebde-589a-45d8-ab19-a8edfb1d5a47:page/98305',
         edgeType: 'iso14971:mitigates-hazard -> atlassian:work-item-links-page',
-        aggTraversalStatus: 'MODELED (demo lineage — live AGG query via queryGraphContext)',
+        aggTraversalStatus: 'MODELED (demo lineage)',
       },
       {
         entityAri: 'ari:cloud:jira:5cbf2ff9-658a-44d8-9004-dbe8a96e952b:issue/10044',
         hazardAri: 'ari:cloud:medtrace::iso14971-hazard/HAZ-103',
         linkedSpecAri: 'ari:cloud:confluence:d601ebde-589a-45d8-ab19-a8edfb1d5a47:page/98306',
         edgeType: 'iso14971:mitigates-hazard -> atlassian:work-item-links-page',
-        aggTraversalStatus: 'MODELED (demo lineage — live AGG query via queryGraphContext)',
+        aggTraversalStatus: 'MODELED (demo lineage)',
       },
     ];
 
@@ -1276,6 +1276,7 @@ export class SeederService {
       {
         linkId: targetLink.id,
         part11Secret: process.env.MEDTRACE_PART11_SECRET,
+        requireCryptographicSeal: true,
         requireTestEvidence: current.datasetMode === 'LIVE',
       }
     );
@@ -1370,6 +1371,7 @@ export class SeederService {
       {
         linkId: targetLink.id,
         part11Secret: process.env.MEDTRACE_PART11_SECRET,
+        requireCryptographicSeal: true,
         requireTestEvidence: current.datasetMode === 'LIVE',
       }
     );
@@ -1404,7 +1406,7 @@ export class SeederService {
 
   /**
    * Executes a 21 CFR Part 11 electronic signature sign-off on a specification artifact.
-   * Enforces `MEDTRACE_PART11_SECRET`, §11.200 re-authentication + exact attestation phrase,
+   * Enforces `MEDTRACE_PART11_SECRET`, explicit signer confirmation + exact attestation phrase,
    * server-side identity binding via `UserIdentityResolver`, HMAC-SHA256 sealing, and rollback-safe commits.
    */
   static async signOffPart11(params: SignOffPart11Params): Promise<ComplianceSummary> {
@@ -1420,7 +1422,7 @@ export class SeederService {
     }
     if (params.attestation?.passwordConfirmed !== true) {
       throw new Error(
-        '21 CFR Part 11 §11.200 Violation: Explicit re-authentication confirmation (passwordConfirmed: true) is required.'
+        'Part 11 attestation: Explicit signer confirmation (passwordConfirmed: true) is required.'
       );
     }
     const normalizedPhrase = (params.attestation?.attestationPhrase || '').trim();
@@ -1447,6 +1449,15 @@ export class SeederService {
     }
 
     const targetLink = current.traceLinks[idx];
+    if (
+      targetLink.spec.isMissingSentinel === true ||
+      typeof targetLink.spec.sha256Hash !== 'string' ||
+      targetLink.spec.sha256Hash.trim() === ''
+    ) {
+      throw new Error(
+        `21 CFR Part 11 Violation: Cannot sign hazard ${targetLink.hazard.key} because no linked Confluence SRS specification with a valid SHA-256 hash exists.`
+      );
+    }
     const identityResolver = getActiveUserIdentityResolver();
     const resolvedIdentity = await identityResolver.resolveSignerIdentity({
       actorAccountId: actorId,
@@ -1563,7 +1574,12 @@ export class SeederService {
       targetLink.test,
       targetLink.signature,
       targetLink.graphMetadata,
-      { linkId: targetLink.id, part11Secret, requireCryptographicSeal: true }
+      {
+        linkId: targetLink.id,
+        part11Secret,
+        requireCryptographicSeal: true,
+        requireTestEvidence: current.datasetMode === 'LIVE',
+      }
     );
     evaluated.hazard.status = ComplianceEngine.deriveHazardStatus(evaluated.complianceState);
     current.traceLinks[idx] = evaluated;

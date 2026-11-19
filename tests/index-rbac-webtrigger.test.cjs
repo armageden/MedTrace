@@ -1837,4 +1837,328 @@ test.describe('SEC-01 & SEC-03: Resolver RBAC, Confused-Deputy, Part 11 & Webtri
       LiveIngestionService.syncFromAtlassian = origSync;
     }
   });
+
+  test.it('tightens Confluence-to-Jira RBAC on cross-project LIVE reads, unbound-hazard writes, and bindIssueToHazard hijacks', async () => {
+    const { ComplianceEngine } = require('../dist/compliance-engine');
+
+    const baseSpec = {
+      pageId: '888',
+      version: 1,
+      sha256Hash: 'b'.repeat(64),
+      lastSignedHash: '',
+      isSignatureInvalidated: false,
+      contentSnippet: 'Spec text',
+      lastUpdated: '2026-01-01T00:00:00.000Z',
+    };
+    const baseSig = {
+      id: 'sig-base',
+      signedBy: '',
+      signedAt: '',
+      role: 'QA',
+      meaning: '',
+      artifactSha256: '',
+      isValid: false,
+    };
+
+    const medLink = ComplianceEngine.evaluateTraceLink(
+      {
+        id: 'haz-med-20',
+        key: 'HAZ-MED-20',
+        title: 'MED-20 critical hazard',
+        riskClass: 'CLASS_C',
+        severity: 'CATASTROPHIC',
+        probability: 'REMOTE',
+        mitigationRequirementId: 'srs-med',
+        status: 'ACTION_REQUIRED',
+      },
+      { ...baseSpec, id: 'srs-med', title: 'SRS-MED' },
+      { id: 'w-med', key: 'MED-20', title: 'MED issue', status: 'In Progress', assignee: 'Alice' },
+      { id: 't-med', testKey: 'TEST-MED', title: 'MED test', testType: 'Unit', status: 'UNTESTED' },
+      { ...baseSig, id: 'sig-med' },
+      undefined,
+      { linkId: 'link-med-20', requireTestEvidence: true }
+    );
+    const acmeLink = ComplianceEngine.evaluateTraceLink(
+      {
+        id: 'haz-acme-1',
+        key: 'HAZ-ACME-1',
+        title: 'ACME-1 hazard',
+        riskClass: 'CLASS_A',
+        severity: 'MINOR',
+        probability: 'REMOTE',
+        mitigationRequirementId: 'srs-acme',
+        status: 'MITIGATED',
+      },
+      { ...baseSpec, id: 'srs-acme', title: 'SRS-ACME' },
+      { id: 'w-acme', key: 'ACME-1', title: 'ACME issue', status: 'Done', assignee: 'Bob' },
+      {
+        id: 't-acme',
+        testKey: 'TEST-ACME',
+        title: 'ACME test',
+        testType: 'Unit',
+        status: 'PASSED',
+        evidenceUrl: 'https://ci.example.com/acme/1',
+        executionDate: '2026-01-02T00:00:00.000Z',
+      },
+      {
+        id: 'sig-acme',
+        signedBy: 'QA (op-acme)',
+        signedByAccountId: 'op-acme',
+        signedAt: '2026-01-02T00:00:00.000Z',
+        role: 'Authorized Signatory',
+        meaning: 'Approved',
+        artifactSha256: baseSpec.sha256Hash,
+        isValid: true,
+        authMethod: 'PART11_ATTESTATION',
+        signatureAlgorithm: 'HMAC-SHA256-SEAL-V1',
+        signatureSeal: ComplianceEngine.computePart11Seal(
+          {
+            hazardKey: 'HAZ-ACME-1',
+            specId: 'srs-acme',
+            artifactSha256: baseSpec.sha256Hash,
+            signedByAccountId: 'op-acme',
+            signedBy: 'QA (op-acme)',
+            role: 'Authorized Signatory',
+            meaning: 'Approved',
+            signedAt: '2026-01-02T00:00:00.000Z',
+            authMethod: 'PART11_ATTESTATION',
+          },
+          process.env.MEDTRACE_PART11_SECRET
+        ),
+      },
+      undefined,
+      { linkId: 'link-acme-1', requireTestEvidence: true, requireCryptographicSeal: true }
+    );
+    const unboundLink = ComplianceEngine.evaluateTraceLink(
+      {
+        id: 'haz-unbound-1',
+        key: 'HAZ-UNBOUND',
+        title: 'Unbound safety hazard',
+        riskClass: 'CLASS_B',
+        severity: 'CRITICAL',
+        probability: 'REMOTE',
+        mitigationRequirementId: 'srs-unbound',
+        status: 'UNVERIFIED_RISK',
+      },
+      { ...baseSpec, id: 'srs-unbound', title: 'SRS-UNBOUND' },
+      { id: 'w-unbound', key: '', title: 'Unbound work', status: 'To Do', assignee: 'Unassigned' },
+      { id: 't-unbound', testKey: 'TEST-UNBOUND', title: 'Unbound test', testType: 'Unit', status: 'UNTESTED' },
+      { ...baseSig, id: 'sig-unbound' },
+      undefined,
+      { linkId: 'link-unbound-1', requireTestEvidence: true }
+    );
+
+    // 1. Confluence editor with Jira BROWSE on ACME only (no MED browse, no Jira EDIT_ISSUES):
+    //    - LIVE reads return ONLY ACME-1 (hiding MED-20 & unbound hazard)
+    //    - Unbound-hazard writes from Confluence context fail closed without Jira EDIT_ISSUES
+    await withForgeMocks(
+      {
+        requestConfluence: async (url) => {
+          if (url === '/wiki/rest/api/user/current') {
+            return makeHttpResponse(200, { accountId: 'conf-acme-reader', type: 'known' });
+          }
+          if (url.startsWith('/wiki/api/v2/spaces?limit=1')) {
+            return makeHttpResponse(200, { results: [{ id: 'sp-1', type: 'global' }] });
+          }
+          if (url.startsWith('/wiki/api/v2/spaces?type=global')) {
+            return makeHttpResponse(200, { results: [{ id: 'sp-1', type: 'global' }] });
+          }
+          if (url === '/wiki/api/v2/spaces/sp-1/operations') {
+            return makeHttpResponse(200, { operations: [{ operation: 'update', targetType: 'page' }] });
+          }
+          return makeHttpResponse(404, {});
+        },
+        requestJira: async (url) => {
+          if (url === '/rest/api/3/myself') {
+            return makeHttpResponse(200, { accountId: 'conf-acme-reader', active: true });
+          }
+          if (url.startsWith('/rest/api/3/mypermissions')) {
+            const parsed = new URL(`https://jira.invalid${url}`);
+            const proj = parsed.searchParams.get('projectKey');
+            const canBrowse = proj === null || proj === 'ACME';
+            return makeHttpResponse(200, {
+              permissions: {
+                BROWSE_PROJECTS: { havePermission: canBrowse },
+                EDIT_ISSUES: { havePermission: false },
+                ADMINISTER_PROJECTS: { havePermission: false },
+              },
+            });
+          }
+          return makeHttpResponse(404, {});
+        },
+      },
+      async () => {
+        await SeederService.saveComplianceSuite(
+          ComplianceEngine.generateComplianceReport(
+            [medLink, acmeLink, unboundLink],
+            'LIVE',
+            'Cross-Product LIVE Suite',
+            { initialized: true }
+          ),
+          0
+        );
+
+        const confSuite = await resolverHandler(
+          {
+            call: { functionKey: 'getComplianceSuite', payload: {} },
+            context: { extension: { type: 'confluence:globalPage' } },
+          },
+          { principal: { accountId: 'conf-acme-reader' } }
+        );
+        assert.deepStrictEqual(
+          confSuite.traceLinks.map((l) => l.work.key),
+          ['ACME-1', ''],
+          'Confluence LIVE read must filter out unauthorized MED-20 while preserving authorized ACME-1'
+        );
+
+        const confBlast = await resolverHandler(
+          {
+            call: { functionKey: 'analyzeBlastRadius', payload: { triggerKey: 'MED-20' } },
+            context: { extension: { type: 'confluence:globalPage' } },
+          },
+          { principal: { accountId: 'conf-acme-reader' } }
+        );
+        assert.deepStrictEqual(confBlast.affectedHazardKeys, []);
+
+        const confGate = await resolverHandler(
+          {
+            call: { functionKey: 'simulateTransition', payload: { scope: 'global' } },
+            context: { extension: { type: 'confluence:globalPage' } },
+          },
+          { principal: { accountId: 'conf-acme-reader' } }
+        );
+        assert.strictEqual(confGate.result, false);
+        assert.ok(
+          !String(confGate.errorMessage || '').includes('MED-20'),
+          'Filtered LIVE gate must not leak unauthorized MED-20 violation'
+        );
+
+        // Unbound-hazard writes from Confluence context without Jira EDIT_ISSUES MUST fail closed
+        await assert.rejects(
+          () =>
+            resolverHandler(
+              {
+                call: {
+                  functionKey: 'recordTestResult',
+                  payload: {
+                    linkId: 'link-unbound-1',
+                    hazardKey: 'HAZ-UNBOUND',
+                    status: 'PASSED',
+                    evidenceUrl: 'https://ci.example.com/spoof',
+                  },
+                },
+                context: { extension: { type: 'confluence:globalPage' } },
+              },
+              { principal: { accountId: 'conf-acme-reader' } }
+            ),
+          /Forbidden: Requires Jira EDIT_ISSUES/
+        );
+
+        await assert.rejects(
+          () =>
+            resolverHandler(
+              {
+                call: {
+                  functionKey: 'signOffPart11',
+                  payload: {
+                    linkId: 'link-unbound-1',
+                    hazardKey: 'HAZ-UNBOUND',
+                    meaning: 'Unauthorized Confluence-only signoff',
+                    attestationConfirmed: true,
+                    passwordConfirmed: true,
+                    attestationPhrase: PART11_ATTESTATION_PHRASE,
+                  },
+                },
+                context: { extension: { type: 'confluence:globalPage' } },
+              },
+              { principal: { accountId: 'conf-acme-reader' } }
+            ),
+          /Forbidden: Requires Jira EDIT_ISSUES/
+        );
+      }
+    );
+
+    // 2. Confluence-only user without Jira identity is rejected on LIVE getComplianceSuite
+    await withForgeMocks(
+      {
+        requestConfluence: async (url) => {
+          if (url === '/wiki/rest/api/user/current') {
+            return makeHttpResponse(200, { accountId: 'conf-no-jira', type: 'known' });
+          }
+          if (url.startsWith('/wiki/api/v2/spaces?limit=1')) {
+            return makeHttpResponse(200, { results: [{ id: 'sp-1', type: 'global' }] });
+          }
+          return makeHttpResponse(404, {});
+        },
+        requestJira: async (url) => {
+          if (url === '/rest/api/3/myself') {
+            return makeHttpResponse(403, { message: 'No Jira license' });
+          }
+          return makeHttpResponse(404, {});
+        },
+      },
+      async () => {
+        await SeederService.saveComplianceSuite(
+          ComplianceEngine.generateComplianceReport([medLink], 'LIVE', 'Jira-Restricted LIVE Suite', {
+            initialized: true,
+          }),
+          0
+        );
+        await assert.rejects(
+          () =>
+            resolverHandler(
+              {
+                call: { functionKey: 'getComplianceSuite', payload: {} },
+                context: { extension: { type: 'confluence:globalPage' } },
+              },
+              { principal: { accountId: 'conf-no-jira' } }
+            ),
+          /Forbidden: Jira user session validation failed/
+        );
+      }
+    );
+
+    // 3. bindIssueToHazard blocks ACME projectPage operator from hijacking HAZ-MED-20 (currently bound to MED-20)
+    await withForgeMocks(
+      {
+        requestJira: async (url) => {
+          if (url === '/rest/api/3/myself') {
+            return makeHttpResponse(200, { accountId: 'op-acme', active: true });
+          }
+          if (url.startsWith('/rest/api/3/mypermissions')) {
+            return makeHttpResponse(200, {
+              permissions: {
+                BROWSE_PROJECTS: { havePermission: true },
+                EDIT_ISSUES: { havePermission: true },
+                ADMINISTER_PROJECTS: { havePermission: false },
+              },
+            });
+          }
+          return makeHttpResponse(404, {});
+        },
+      },
+      async () => {
+        await SeederService.saveComplianceSuite(
+          ComplianceEngine.generateComplianceReport([medLink, acmeLink], 'LIVE', 'Hijack Guard Suite', {
+            initialized: true,
+          }),
+          0
+        );
+        await assert.rejects(
+          () =>
+            resolverHandler(
+              {
+                call: {
+                  functionKey: 'bindIssueToHazard',
+                  payload: { hazardKey: 'HAZ-MED-20', issueKey: 'ACME-2', linkId: 'link-med-20' },
+                },
+                context: { extension: { type: 'jira:projectPage', project: { key: 'ACME' } } },
+              },
+              { principal: { accountId: 'op-acme' } }
+            ),
+          /Forbidden: Cross-project issue access is not permitted/
+        );
+      }
+    );
+  });
 });

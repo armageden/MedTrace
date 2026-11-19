@@ -7,6 +7,7 @@ export interface IsoHazard {
   key: string;
   title: string;
   riskClass: RiskClass;
+  safetyClassAssigned?: boolean;
   severity: 'CATASTROPHIC' | 'CRITICAL' | 'SERIOUS' | 'MINOR';
   probability: 'FREQUENT' | 'PROBABLE' | 'OCCASIONAL' | 'REMOTE' | 'IMPROBABLE';
   mitigationRequirementId: string;
@@ -212,17 +213,14 @@ export interface ConfluenceRemoteLinkRef {
   relationship?: string;
 }
 
-export interface AggIssueLinkRef {
-  id: string;
-  type?: {
-    name?: string;
-    inward?: string;
-    outward?: string;
-  };
+export interface SpecOwnerRef {
+  pageId: string;
+  accountId?: string;
+  name: string;
 }
 
 export interface IssueGraphContextResult {
-  source: 'JIRA_AGG_AND_REST' | 'JIRA_REST';
+  source: 'JIRA_REST';
   confluenceSource?: 'JIRA_REMOTELINK_REST';
   issueKey: string;
   issueId?: string;
@@ -230,9 +228,9 @@ export interface IssueGraphContextResult {
   summary?: string;
   status?: { name?: string; category?: string };
   issuelinks: unknown[];
-  aggIssueLinks?: AggIssueLinkRef[];
   confluenceLinks: ConfluenceRemoteLinkRef[];
-  aggRaw?: unknown;
+  specOwners?: SpecOwnerRef[];
+  teamworkGraphStatus?: 'OK' | 'EMPTY' | 'ERROR' | 'SKIPPED_APP_MODE';
 }
 
 export interface LiveSyncOptions {

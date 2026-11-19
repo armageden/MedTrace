@@ -122,7 +122,7 @@ export const InspectionDrawer: React.FC<InspectionDrawerProps> = ({
   const [testNotes, setTestNotes] = useState('');
   const [testValidationError, setTestValidationError] = useState<string | null>(null);
 
-  // 21 CFR Part 11 §11.200 Sign-off form state (identity & role are derived server-side)
+  // 21 CFR Part 11 Sign-off form state (identity & role are derived server-side)
   const [signMeaning, setSignMeaning] = useState('');
   const [attestationPhrase, setAttestationPhrase] = useState('');
   const [attestationConfirmed, setAttestationConfirmed] = useState(false);
@@ -173,7 +173,7 @@ export const InspectionDrawer: React.FC<InspectionDrawerProps> = ({
     }
   }, [contextIssueKey, link?.id]);
 
-  // Fetch live AGG / Jira REST context dynamically for the selected link's Jira work key
+  // Fetch live Jira REST context dynamically for the selected link's Jira work key
   useEffect(() => {
     const currentLinkId = latestLinkRef.current?.id;
     const activeProjectKey = panelContext?.projectKey?.trim().toUpperCase();
@@ -205,7 +205,7 @@ export const InspectionDrawer: React.FC<InspectionDrawerProps> = ({
           const message =
             err instanceof Error && err.message.trim()
               ? err.message
-              : 'Unable to query Jira / AGG context.';
+              : 'Unable to query Jira REST context.';
           setGraphContext(null);
           setGraphContextError(message);
         }
@@ -521,7 +521,7 @@ export const InspectionDrawer: React.FC<InspectionDrawerProps> = ({
                 size={15}
                 color={isClassC ? 'var(--mt-danger-text)' : 'var(--mt-brand-text)'}
               />
-              <span>1. ISO 14971 Risk Classification</span>
+              <span>1. IEC 62304 Software Safety Class</span>
             </div>
             <div style={{ fontWeight: 700, fontSize: 13, color: 'var(--mt-text-primary)' }}>
               {link.hazard.title}
@@ -796,7 +796,7 @@ export const InspectionDrawer: React.FC<InspectionDrawerProps> = ({
             </div>
           </div>
 
-          {/* Stage 5: 21 CFR Part 11 Electronic Signature + §11.200 Explicit Attestation Sign-Off */}
+          {/* Stage 5: 21 CFR Part 11 Electronic Signature + Explicit Attestation Sign-Off */}
           <div style={sectionStyle}>
             <div style={sectionHeader}>
               <Lock
@@ -888,7 +888,7 @@ export const InspectionDrawer: React.FC<InspectionDrawerProps> = ({
               </div>
               <div>
                 <label htmlFor="signoff-attestation-phrase" style={labelStyle}>
-                  Required Attestation Phrase (§11.200): <code>{PART11_ATTESTATION_PHRASE}</code>
+                  Required Attestation Phrase: <code>{PART11_ATTESTATION_PHRASE}</code>
                 </label>
                 <input
                   id="signoff-attestation-phrase"
@@ -922,7 +922,7 @@ export const InspectionDrawer: React.FC<InspectionDrawerProps> = ({
                   style={{ marginTop: 2 }}
                 />
                 <span>
-                  I confirm my active Atlassian user session re-attestation for 21 CFR Part 11 §11.200.
+                  I confirm I am the signer and intend this electronic attestation.
                 </span>
               </label>
               <label
@@ -963,7 +963,7 @@ export const InspectionDrawer: React.FC<InspectionDrawerProps> = ({
             </div>
           </div>
 
-          {/* Atlassian Graph (AGG / Jira REST) Lineage Metadata */}
+          {/* Atlassian Lineage Metadata (Jira REST + Teamwork Graph) */}
           <div
             style={{
               ...sectionStyle,
@@ -974,7 +974,7 @@ export const InspectionDrawer: React.FC<InspectionDrawerProps> = ({
             <div style={sectionHeader}>
               <Share2 size={15} color="var(--mt-brand-text)" />
               <span style={{ color: 'var(--mt-brand-text)' }}>
-                Atlassian Graph Lineage Metadata (AGG / Jira REST)
+                Atlassian Lineage Metadata (Jira REST + Teamwork Graph)
               </span>
             </div>
             {link.graphMetadata ? (
@@ -1080,11 +1080,11 @@ export const InspectionDrawer: React.FC<InspectionDrawerProps> = ({
                   marginBottom: 4,
                 }}
               >
-                Live AGG / Jira REST Context ({link.work.key || 'Unbound'})
+                Live Jira REST Context ({link.work.key || 'Unbound'})
               </div>
               {isLoadingGraph ? (
                 <div style={{ fontSize: 11, color: 'var(--mt-text-secondary)' }}>
-                  Querying AGG / Jira REST for {link.work.key}...
+                  Querying Jira REST for {link.work.key}...
                 </div>
               ) : graphContextError ? (
                 <div
@@ -1099,7 +1099,7 @@ export const InspectionDrawer: React.FC<InspectionDrawerProps> = ({
                     fontWeight: 600,
                   }}
                 >
-                  Live Jira/AGG context query failed: {graphContextError}
+                  Live Jira REST context query failed: {graphContextError}
                 </div>
               ) : graphContext ? (
                 <div
@@ -1124,6 +1124,23 @@ export const InspectionDrawer: React.FC<InspectionDrawerProps> = ({
                       • {c.title} {c.pageId ? `(pageId=${c.pageId})` : ''}
                     </div>
                   ))}
+                  {graphContext.specOwners && graphContext.specOwners.length > 0 && (
+                    <div style={{ marginTop: 2 }}>
+                      Spec owners to re-review (Teamwork Graph):{' '}
+                      {graphContext.specOwners.map((o) => o.name).join(', ')}
+                    </div>
+                  )}
+                  {graphContext.teamworkGraphStatus === 'EMPTY' && (
+                    <div style={{ marginTop: 2 }}>
+                      Teamwork Graph returned no page owners (check that an admin granted the graph
+                      scopes)
+                    </div>
+                  )}
+                  {graphContext.teamworkGraphStatus === 'ERROR' && (
+                    <div style={{ marginTop: 2, color: 'var(--mt-danger-text)' }}>
+                      Teamwork Graph query failed
+                    </div>
+                  )}
                 </div>
               ) : !workKey ? (
                 <div style={{ fontSize: 10, color: 'var(--mt-text-secondary)' }}>
@@ -1135,7 +1152,7 @@ export const InspectionDrawer: React.FC<InspectionDrawerProps> = ({
                 </div>
               ) : (
                 <div style={{ fontSize: 10, color: 'var(--mt-text-secondary)' }}>
-                  No live AGG/REST issue context returned for {workKey} (expected in offline/unlinked demo fixtures).
+                  No live Jira REST issue context returned for {workKey} (expected in offline/unlinked demo fixtures).
                 </div>
               )}
             </div>

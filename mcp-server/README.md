@@ -4,6 +4,17 @@ Standalone Model Context Protocol (`stdio`, JSON-RPC 2.0) bridge (`SERVER_VERSIO
 
 The bridge does not intentionally persist compliance state locally. Tool requests are signed with HMAC-SHA256 and forwarded over `https://` to the deployed webtrigger; requested response data is returned to the MCP host, which may retain it under its own policies.
 
+## Atlassian-hosted MCP (`rovo:mcp`) — recommended
+
+The primary MCP integration is Atlassian-hosted: the `rovo:mcp` module in `manifest.yml` exposes the app's Rovo actions (`get-hazard-lineage-action`, `verify-iec-compliance-action`) to any remote MCP client — no local bridge required.
+
+- **Endpoint:** `https://mcp.atlassian.com/forge/<appId>` — for this app, `https://mcp.atlassian.com/forge/5e49c10e-696f-4984-9d00-4a47d0a5dd99` (the `appId` is the UUID after `ari:cloud:ecosystem::app/` in `manifest.yml`).
+- **Admin enablement:** external MCP exposure is **disabled by default**. A site or org admin enables it per app installation: Atlassian Administration → Apps → Sites → site → Connected apps → MedTrace → turn on tools.
+- **Connection:** MCP clients connect through an OAuth 2.1 consent screen where the user picks the site and approves access; tools then run subject to the invoking user's own permissions.
+- **Docs:** [rovo:mcp manifest reference](https://developer.atlassian.com/platform/forge/manifest-reference/modules/rovo-mcp/) · [Configure tools for an external MCP server](https://support.atlassian.com/organization-administration/docs/configure-tools-for-an-external-mcp-server/)
+
+The stdio bridge documented in the rest of this README is a **separate, optional** integration that forwards HMAC-signed requests to the app's Forge webtrigger — useful where remote MCP with OAuth is unavailable.
+
 ## Configuration & `.env` Rules
 
 On CLI startup, [mcp-server/index.mjs](./index.mjs) loads `.env` from `process.cwd()` first, falling back to the repository root (`..`). Pre-set process environment variables always win over `.env`.

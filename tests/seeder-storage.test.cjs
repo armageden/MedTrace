@@ -237,6 +237,25 @@ function makeSyntheticLinks(count, opts = {}) {
     const specId = opts.unsafeIds ? `srs/${rawIdSuffix}` : `srs-${num}`;
     const workKey = `MED-${num}`;
     const hash = crypto.createHash('sha256').update(`spec-${num}`).digest('hex');
+    const signedAt = '2026-11-12T00:00:00Z';
+    const meaning = 'Release signoff';
+    const role = 'Authorized Signatory';
+    const signedBy = 'QA Lead (acc-qa)';
+    const sealSecret = (process.env.MEDTRACE_PART11_SECRET || 'test-part11-secret-2026').trim();
+    const signatureSeal = ComplianceEngine.computePart11Seal(
+      {
+        hazardKey: hazKey,
+        specId,
+        artifactSha256: hash,
+        signedByAccountId: 'acc-qa',
+        signedBy,
+        role,
+        meaning,
+        signedAt,
+        authMethod: 'PART11_ATTESTATION',
+      },
+      sealSecret
+    );
     const link = ComplianceEngine.evaluateTraceLink(
       {
         id: `haz-${num}`,
@@ -257,7 +276,7 @@ function makeSyntheticLinks(count, opts = {}) {
         lastSignedHash: hash,
         isSignatureInvalidated: false,
         contentSnippet: `Clause ${num}`,
-        lastUpdated: '2026-11-12T00:00:00Z',
+        lastUpdated: signedAt,
       },
       {
         id: `work-${num}`,
@@ -272,18 +291,22 @@ function makeSyntheticLinks(count, opts = {}) {
         title: `Test ${num}`,
         testType: 'Integration Test',
         status: 'PASSED',
-        executionDate: '2026-11-12T00:00:00Z',
+        executionDate: signedAt,
         evidenceUrl: `https://ci.example.internal/runs/${num}`,
       },
       {
         id: `sig-${num}`,
-        signedBy: 'QA Lead (acc-qa)',
+        signedBy,
         signedByAccountId: 'acc-qa',
-        signedAt: '2026-11-12T00:00:00Z',
-        role: 'Authorized Signatory',
-        meaning: 'Release signoff',
+        signedAt,
+        role,
+        meaning,
         artifactSha256: hash,
         isValid: true,
+        authMethod: 'PART11_ATTESTATION',
+        signatureAlgorithm: 'HMAC-SHA256-SEAL-V1',
+        signatureSeal,
+        sealKeyId: 'env:MEDTRACE_PART11_SECRET',
       },
       undefined,
       opts.unsafeIds ? { linkId: `trace-${hazKey}--${specId}--${workKey}` } : undefined
@@ -427,7 +450,7 @@ test.describe('Task 1B-Seeder: Cold-Start LIVE Isolation, Migration & Overwrite 
   });
 });
 
-test.describe('Task 1B-Seeder: Part 11 Identity Binding, §11.200 Enforcement & HMAC Sealing (CS-03)', () => {
+test.describe('Task 1B-Seeder: Part 11 Identity Binding, Signer Confirmation & HMAC Sealing (CS-03)', () => {
   const origPart11Secret = process.env.MEDTRACE_PART11_SECRET;
 
   test.beforeEach(() => {
@@ -1252,5 +1275,166 @@ test.describe('Task 1B-Seeder: bindIssueToHazard & recordTestResult Hardening (C
     assert.strictEqual(resetSig.clientSignatureBase64, undefined);
     assert.strictEqual(resetSig.clientPublicKeySpki, undefined);
     assert.strictEqual(resetSig.clientKeyFingerprint, undefined);
+  });
+
+  test.it('signOffPart11 rejects missing-sentinel / empty-sha256 specs and enforces LIVE test evidence & cryptographic seals consistently', async () => {
+    const sentinelLink = ComplianceEngine.evaluateTraceLink(
+      {
+        id: 'haz-sentinel',
+        key: 'HAZ-SENT-1',
+        title: 'Unlinked Spec Hazard',
+        riskClass: 'CLASS_C',
+        severity: 'CATASTROPHIC',
+        probability: 'OCCASIONAL',
+        mitigationRequirementId: 'unlinked-sent-1',
+        status: 'ACTION_REQUIRED',
+      },
+      {
+        id: 'unlinked-sent-1',
+        title: '',
+        version: 0,
+        sha256Hash: '',
+        lastSignedHash: '',
+        isSignatureInvalidated: true,
+        isMissingSentinel: true,
+        contentSnippet: 'No linked Confluence SRS',
+        lastUpdated: '2026-11-12T00:00:00Z',
+      },
+      { id: 'w-sent', key: 'SENT-1', title: 'Work', status: 'Done', assignee: 'Dev' },
+      {
+        id: 't-sent',
+        testKey: 'TEST-SENT-1',
+        title: 'Test',
+        testType: 'Integration Test',
+        status: 'PASSED',
+        evidenceUrl: 'https://ci.example.internal/runs/sent-1',
+        executionDate: '2026-11-12T00:00:00Z',
+      },
+      {
+        id: 'sig-sent',
+        signedBy: '',
+        signedAt: '',
+        role: 'Authority',
+        meaning: 'Pending',
+        artifactSha256: '',
+        isValid: false,
+      }
+    );
+
+    const noEvidenceLiveLink = ComplianceEngine.evaluateTraceLink(
+      {
+        id: 'haz-noev',
+        key: 'HAZ-NOEV-1',
+        title: 'Passed Test Missing Evidence',
+        riskClass: 'CLASS_A',
+        severity: 'MINOR',
+        probability: 'REMOTE',
+        mitigationRequirementId: 'srs-noev-1',
+        status: 'UNVERIFIED_RISK',
+      },
+      {
+        id: 'srs-noev-1',
+        pageId: '77701',
+        title: 'SRS-77701',
+        version: 1,
+        sha256Hash: crypto.createHash('sha256').update('noev-spec').digest('hex'),
+        lastSignedHash: '',
+        isSignatureInvalidated: false,
+        contentSnippet: 'Spec',
+        lastUpdated: '2026-11-12T00:00:00Z',
+      },
+      { id: 'w-noev', key: 'NOEV-1', title: 'Work', status: 'Done', assignee: 'Dev' },
+      {
+        id: 't-noev',
+        testKey: 'TEST-NOEV-1',
+        title: 'Test',
+        testType: 'Unit Test',
+        status: 'PASSED',
+      },
+      {
+        id: 'sig-noev',
+        signedBy: '',
+        signedAt: '',
+        role: 'Authority',
+        meaning: 'Pending',
+        artifactSha256: '',
+        isValid: false,
+      }
+    );
+
+    await SeederService.saveComplianceSuite(
+      ComplianceEngine.generateComplianceReport([sentinelLink, noEvidenceLiveLink], 'LIVE', 'Sentinel Guard Suite', {
+        initialized: true,
+      }),
+      0
+    );
+
+    // 1. Missing-sentinel spec cannot be signed
+    await assert.rejects(
+      () =>
+        SeederService.signOffPart11({
+          hazardKey: 'HAZ-SENT-1',
+          attestation: {
+            meaning: 'Attempting to sign missing SRS',
+            attestationConfirmed: true,
+            passwordConfirmed: true,
+            attestationPhrase: PART11_ATTESTATION_PHRASE,
+          },
+          actorAccountId: 'acc-qa',
+        }),
+      /no linked Confluence SRS specification with a valid SHA-256 hash/i
+    );
+
+    // 2. Empty sha256Hash without isMissingSentinel flag is also rejected
+    const current = await SeederService.getActiveComplianceSuite();
+    current.traceLinks[0].spec.isMissingSentinel = false;
+    current.traceLinks[0].spec.title = 'Empty Hash Spec';
+    await SeederService.saveComplianceSuite(current, 1);
+    await assert.rejects(
+      () =>
+        SeederService.signOffPart11({
+          hazardKey: 'HAZ-SENT-1',
+          attestation: {
+            meaning: 'Attempting to sign empty SHA-256 spec',
+            attestationConfirmed: true,
+            passwordConfirmed: true,
+            attestationPhrase: PART11_ATTESTATION_PHRASE,
+          },
+          actorAccountId: 'acc-qa',
+        }),
+      /no linked Confluence SRS specification with a valid SHA-256 hash/i
+    );
+
+    // 3. signOffPart11 in LIVE mode enforces requireTestEvidence: true (missing evidenceUrl keeps link INCOMPLETE)
+    const signedNoEv = await SeederService.signOffPart11({
+      hazardKey: 'HAZ-NOEV-1',
+      attestation: {
+        meaning: 'Valid SRS approval despite missing test evidence URL',
+        attestationConfirmed: true,
+        passwordConfirmed: true,
+        attestationPhrase: PART11_ATTESTATION_PHRASE,
+      },
+      actorAccountId: 'acc-qa',
+    });
+    const noEvAfter = signedNoEv.traceLinks.find((l) => l.hazard.key === 'HAZ-NOEV-1');
+    assert.strictEqual(noEvAfter.signature.isValid, true);
+    assert.strictEqual(noEvAfter.complianceState, 'INCOMPLETE');
+    assert.ok(noEvAfter.violations.some((v) => /Verification Evidence Gap/i.test(v)));
+
+    // 4. bindIssueToHazard enforces requireCryptographicSeal: true on unsealed signatures
+    const unsealedLive = makeSyntheticLinks(1)[0];
+    delete unsealedLive.signature.signatureSeal;
+    delete unsealedLive.signature.signatureAlgorithm;
+    await SeederService.saveComplianceSuite(
+      ComplianceEngine.generateComplianceReport([unsealedLive], 'LIVE', 'Unsealed Bind Suite', {
+        initialized: true,
+      }),
+      3
+    );
+    const boundUnsealed = await SeederService.bindIssueToHazard('HAZ-1', 'MED-99', 'acc-qa');
+    assert.strictEqual(boundUnsealed.traceLinks[0].complianceState, 'SIGNATURE_DRIFT');
+    assert.ok(
+      boundUnsealed.traceLinks[0].violations.some((v) => /Cryptographic Seal Violation/i.test(v))
+    );
   });
 });

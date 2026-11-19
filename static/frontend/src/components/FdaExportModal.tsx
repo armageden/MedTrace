@@ -291,7 +291,7 @@ export const FdaExportModal: React.FC<FdaExportModalProps> = ({
               id="fda-export-modal-title"
               style={{ fontWeight: 700, fontSize: 14, color: 'var(--mt-text-primary)' }}
             >
-              FDA 510(k) eSTAR Software Documentation Traceability Package
+              Software Traceability Report (Supporting Records — Not an FDA Submission)
             </span>
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
@@ -703,7 +703,7 @@ export const FdaExportModal: React.FC<FdaExportModalProps> = ({
                 marginBottom: 10,
               }}
             >
-              FDA 21 CFR Part 11 Electronic Signature Audit Certification
+              Electronic Attestation Records
             </div>
             {summary.traceLinks.map((link) => (
               <div

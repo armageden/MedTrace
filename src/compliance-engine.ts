@@ -573,25 +573,25 @@ export class ComplianceEngine {
     if (hazard.riskClass === 'CLASS_C') {
       if (!test || test.status !== 'PASSED') {
         violations.push(
-          `IEC 62304 Critical Gap: Class C Hazard [${hazard.key}] requires verified test coverage. Current test [${test?.testKey || 'UNLINKED'}] status is ${test?.status || 'MISSING'}.`
+          `IEC 62304 Critical Gap: Hazard [${hazard.key}] (Software Safety Class C) requires verified test coverage. Current test [${test?.testKey || 'UNLINKED'}] status is ${test?.status || 'MISSING'}.`
         );
         state = escalateComplianceState(state, 'SAFETY_VIOLATION');
       }
     } else if (hazard.riskClass === 'CLASS_B') {
       if (!test || test.status !== 'PASSED') {
         violations.push(
-          `IEC 62304 Notice: Class B Hazard [${hazard.key}] verification test is ${test?.status || 'MISSING'}.`
+          `IEC 62304 Notice: Hazard [${hazard.key}] (Software Safety Class B) verification test is ${test?.status || 'MISSING'}.`
         );
         state = escalateComplianceState(state, 'INCOMPLETE');
       }
     } else if (!test || test.status !== 'PASSED') {
       if (test?.status === 'FAILED') {
         violations.push(
-          `IEC 62304 Notice: Class A Hazard [${hazard.key}] verification test [${test.testKey}] FAILED.`
+          `IEC 62304 Notice: Hazard [${hazard.key}] (Software Safety Class A) verification test [${test.testKey}] FAILED.`
         );
       } else {
         violations.push(
-          `IEC 62304 Notice: Class A Hazard [${hazard.key}] verification test [${test?.testKey || 'UNLINKED'}] is ${test?.status || 'MISSING'} (requires PASSED).`
+          `IEC 62304 Notice: Hazard [${hazard.key}] (Software Safety Class A) verification test [${test?.testKey || 'UNLINKED'}] is ${test?.status || 'MISSING'} (requires PASSED).`
         );
       }
       state = escalateComplianceState(state, 'INCOMPLETE');
@@ -662,6 +662,14 @@ export class ComplianceEngine {
         `FDA 21 CFR Part 11 Cryptographic Seal Violation: Electronic signature [${signature?.id || 'missing'}] failed HMAC-SHA256 integrity verification.`
       );
       state = escalateComplianceState(state, 'SIGNATURE_DRIFT');
+    }
+
+    // 5. IEC 62304 Software Safety Class Assignment (fail-closed when no class label)
+    if (hazard.safetyClassAssigned === false) {
+      violations.push(
+        `IEC 62304 Classification Gap: Hazard [${hazard.key}] has no software safety class label (class-a, class-b, or class-c); treated as Class C until classified.`
+      );
+      state = escalateComplianceState(state, severityForRiskClass('CLASS_C'));
     }
 
     const linkId = options?.linkId?.trim() || this.buildTraceLinkId(hazard.key, spec?.id || '', work?.key);

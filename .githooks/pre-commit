@@ -1,0 +1,19 @@
+#!/bin/sh
+# Enforced via core.hooksPath=.githooks (set by `npm run prepare` at repo root).
+# Validates documentation integrity before allowing a commit and prints an advisory
+# reminder when code/config/test files are staged without any Markdown update.
+
+set -eu
+
+node scripts/docs-check.mjs
+
+STAGED=$(git diff --cached --name-only --diff-filter=ACM || true)
+[ -z "$STAGED" ] && exit 0
+
+HAS_CODE=$(printf '%s\n' "$STAGED" | grep -E '^(manifest\.yml|package\.json|src/|tests/|scripts/|static/frontend/src/|\.github/)' || true)
+HAS_DOCS=$(printf '%s\n' "$STAGED" | grep -E '\.md$' || true)
+
+if [ -n "$HAS_CODE" ] && [ -z "$HAS_DOCS" ]; then
+  echo "pre-commit note: code/config/test files are staged without any .md update." >&2
+  echo "  If behavior, scopes, or test counts changed, review docs/00-how-to/sync-docs-runbook.md (including README.md and devpost_*.md)." >&2
+fi

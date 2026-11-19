@@ -468,6 +468,81 @@ function checkStrictListing(ctx) {
   return findings;
 }
 
+const OPTIONAL_SUBMISSION_DOCS = [
+  "devpost_submission_draft.md",
+  "devpost_video_script.md",
+];
+
+function checkSyncConsistency(ctx, checkedDocs, texts) {
+  const submissionFiles = OPTIONAL_SUBMISSION_DOCS
+    .map((f) => path.join(ctx.root, f))
+    .filter((f) => fs.existsSync(f));
+
+  for (const f of submissionFiles) {
+    if (!texts.has(f)) {
+      const content = readText(f);
+      texts.set(f, content);
+      checkLinks(f, content, ctx);
+    }
+  }
+
+  const activeDocs = [...checkedDocs, ...submissionFiles].filter((f) => {
+    const r = ctx.rel(f);
+    return !r.startsWith("docs/99-design-decisions/") && r !== "docs/00-how-to/sync-docs-runbook.md";
+  });
+
+  const manifestPath = path.join(ctx.root, "manifest.yml");
+  const manifestText = fs.existsSync(manifestPath) ? readText(manifestPath) : "";
+  const manifestHasReadGraph = /^\s*-\s*read:graph:[a-z0-9:_-]+/mi.test(manifestText);
+
+  const twgPath = path.join(ctx.root, "src", "teamwork-graph.ts");
+  const twgText = fs.existsSync(twgPath) ? readText(twgPath) : "";
+  const twgHasLegacyAgg = Boolean(
+    twgText && (twgText.includes("JIRA_AGG_AND_REST") || /\.requestGraph\s*\(/.test(twgText)),
+  );
+
+  const rules = [];
+  if (manifestText && manifestHasReadGraph) {
+    rules.push({
+      re: /(?:^|[^a-z])(?:(?:zero|no)\s+`?read:graph|does not request[^\n.]*read:graph|declares no[^\n.]*read:graph)/i,
+      msg: "manifest.yml declares read:graph:* scopes, contradicting 'zero/no read:graph' claim",
+    });
+  }
+  if (twgText && !twgHasLegacyAgg) {
+    rules.push({
+      re: /JIRA_AGG_AND_REST|\bAGG\s+(?:GraphQL|fallback)\b|`?requestGraph\b/i,
+      msg: "src/teamwork-graph.ts removed AGG requestGraph/JIRA_AGG_AND_REST; active doc still cites it",
+    });
+  }
+
+  for (const filePath of activeDocs) {
+    const raw = texts.get(filePath) ?? readText(filePath);
+    const lines = stripFencedCodeBlocks(raw).split(/\r?\n/);
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      for (const { re, msg } of rules) {
+        if (re.test(line)) ctx.fail("sync-consistency", filePath, msg, i + 1);
+      }
+      const draftMatch = line.match(
+        /\b(\d+)\s+automated tests\s*\(\s*(\d+)\s+backend[^)]*\+\s*(\d+)\s+React\/Vitest/i,
+      );
+      if (draftMatch) {
+        const [, total, back, front] = draftMatch.map(Number);
+        if (total !== back + front) {
+          ctx.fail("sync-consistency", filePath, `test count mismatch (${total} !== ${back} + ${front})`, i + 1);
+        }
+      }
+      const checklistMatch = line.match(/\(`(\d+)`:\s*`(\d+)`\s*backend\s*\+\s*`(\d+)`\s*frontend\)/i);
+      if (checklistMatch) {
+        const [, total, back, front] = checklistMatch.map(Number);
+        if (total !== back + front) {
+          ctx.fail("sync-consistency", filePath, `test count mismatch (${total} !== ${back} + ${front})`, i + 1);
+        }
+      }
+    }
+  }
+}
+
 /**
  * Runs all documentation checks against `options.root` without mutating
  * module-global state, returning structured errors, warnings, and summary data.
@@ -547,6 +622,7 @@ export function runDocsCheck(options = {}) {
   checkRouterIntegrity(folders, texts.has(router) ? texts.get(router) : null, router, ctx);
 
   checkReverseCoverage([...texts.values()].join("\n"), ctx);
+  checkSyncConsistency(ctx, checkedDocs, texts);
 
   const strictListingFindings = strictListing ? checkStrictListing(ctx) : [];
 
