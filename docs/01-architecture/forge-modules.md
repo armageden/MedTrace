@@ -14,7 +14,7 @@ MedTrace is defined in [manifest.yml](../../manifest.yml) under the Forge `nodej
 | `confluence:contentBylineItem` | `medtrace-confluence-byline` | `resolver-fn` / `main` / `resource:icons;medtrace-icon.svg` | Content byline item on Confluence pages surfacing linked requirements, signature validity, and drift state. |
 | `confluence:globalPage` | `medtrace-confluence-page` | `resolver-fn` / `main` | Confluence global compliance workspace (route: `medtrace-compliance`) matching Jira workspace parity. |
 | `trigger` | `medtrace-confluence-page-updated` | `confluence-trigger-fn` | Listens to `avi:confluence:updated:page`; runs `LiveIngestionService.handleConfluencePageUpdated()` with CAS retry for real-time spec drift detection. |
-| `rovo:agent` | `medtrace-regulatory-auditor` | — | MedTrace Auditor assistive traceability agent for IEC 62304 / ISO 14971 inspection (not a regulatory authority). |
+| `rovo:agent` | `medtrace-regulatory-auditor` | — | MedTrace Auditor engineering traceability assistant for hazards, Confluence specs, Jira work items, verification tests, and approval records (independent quality review still required). |
 | `action` | `get-hazard-lineage-action` | `rovo-action-fn` | Returns the 5-stage trace chain for a `hazardKey` or `issueKey` (or `found: false` when absent). |
 | `action` | `verify-iec-compliance-action` | `rovo-action-fn` | Analyzes a diff or description for affected suite tokens/safety keywords and computes blast radius. |
 | `rovo:mcp` | `medtrace-mcp-server` | — | Exposes `get-hazard-lineage-action` and `verify-iec-compliance-action` to Rovo / Atlassian Studio. |

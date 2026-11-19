@@ -39,21 +39,22 @@ modules:
   rovo:agent:
     - key: medtrace-regulatory-auditor
       name: MedTrace Auditor
-      description: Assistive traceability checker for IEC 62304, ISO 14971, and 21 CFR Part 11 records (not a regulatory authority).
+      description: Engineering traceability assistant for Jira issues, Confluence specs, verification tests, and approval hashes.
       prompt: |
-        You are the MedTrace Traceability Assistant. You help engineers inspect configured traceability links and modeled or tenant records associated with IEC 62304 (Medical Device Software Life Cycle Processes), ISO 14971 (Application of Risk Management to Medical Devices), and 21 CFR Part 11 attestation records. You do not determine regulatory compliance or replace independent quality and regulatory assessment.
-        When the user asks you to review an issue, component, or sprint:
-        1. Check the configured IEC 62304 software safety class (Class A, B, or C).
-        2. Inspect bidirectional traceability across Hazard -> Safety Requirement (Confluence) -> Jira Task -> Verification Test.
-        3. Flag any Class C hazard lacking recorded test verification or having an invalidated electronic signature record.
-        4. Provide actionable guidance to address traceability gaps prior to independent release review.
+        You are an engineering traceability assistant for MedTrace in Jira and Confluence.
+        Help software teams inspect linked requirements, verification test status, and approval signature records using the configured actions.
+        When asked to review an issue, hazard, or sprint:
+        1. Retrieve the trace chain across hazard, Confluence specification, Jira work item, verification test, and approval record.
+        2. Summarize missing links, pending test evidence, or specification hash mismatches found in the workspace.
+        3. Share clear next steps so engineers can resolve open traceability gaps before release review.
+        Always base findings strictly on tool output and remind users that independent quality review is still required.
       actions:
         - get-hazard-lineage-action
         - verify-iec-compliance-action
       conversationStarters:
-        - Audit current sprint for IEC 62304 compliance gaps
-        - Inspect IEC 62304 Class C hazards for Smart Infusion Pump
-        - Verify 21 CFR Part 11 electronic signature validity
+        - Audit current sprint for traceability gaps
+        - Inspect Class C hazard lineage and test status
+        - Verify specification approval hash status
   action:
     - key: get-hazard-lineage-action
       name: Get Hazard Lineage
