@@ -159,7 +159,7 @@ export interface BaselineMutationRecord {
  */
 export interface CommitSuiteMutationParams {
   summary: ComplianceSummary;
-  expectedVersion?: number;
+  expectedVersion: number;
   auditEntry: AuditAppendInput;
   baselineUpdates?: BaselineMutationRecord[];
 }
@@ -691,9 +691,7 @@ export class SeederService {
         }
       }
       if (suiteSaved) {
-        const baseVersion =
-          typeof params.expectedVersion === 'number' ? params.expectedVersion : previousState.version ?? 0;
-        const rollbackExpectedVersion = baseVersion + 1;
+        const rollbackExpectedVersion = params.expectedVersion + 1;
         await this.saveComplianceSuite(previousSuiteSnapshot, rollbackExpectedVersion);
       }
       throw err;
@@ -1141,18 +1139,36 @@ export class SeederService {
     };
   }
 
+  private static filterSuiteLinksByIssueKey(
+    suite: ComplianceSummary,
+    issueKeyFilter?: string
+  ): ComplianceSummary {
+    const cleanKey = issueKeyFilter?.trim().toUpperCase();
+    if (!cleanKey || suite.initialized === false) {
+      return suite;
+    }
+    return {
+      ...suite,
+      traceLinks: suite.traceLinks.filter(
+        (link) =>
+          (link.work?.key || '').trim().toUpperCase() === cleanKey ||
+          (link.hazard?.key || '').trim().toUpperCase() === cleanKey
+      ),
+    };
+  }
+
   static async getActiveComplianceSuite(options?: GetSuiteOptions): Promise<ComplianceSummary> {
-    if (options?.issueKeyFilter) {
+    if (options?.issueKeyFilter && !options?.projectKey) {
       const fastPath = await this.loadFastPathSuiteByIssueKey(options.issueKeyFilter);
       if (fastPath) {
-        return this.applyProjectKeyFilter(fastPath, options.projectKey);
+        return fastPath;
       }
     }
 
     if (!isForgeRuntime()) {
       if (this.inMemorySuite) {
         const head = await AuditLogService.getHead();
-        return this.applyProjectKeyFilter(
+        const projectScoped = this.applyProjectKeyFilter(
           cloneJsonValue({
             ...this.inMemorySuite,
             auditEntryCount: head.lastSeq,
@@ -1160,13 +1176,17 @@ export class SeederService {
           }),
           options?.projectKey
         );
+        return this.filterSuiteLinksByIssueKey(projectScoped, options?.issueKeyFilter);
       }
       return await this.getUninitializedLiveSuite();
     }
 
     const sharded = await this.loadShardedSuiteFromKvs();
     if (sharded) {
-      return this.applyProjectKeyFilter(sharded.summary, options?.projectKey);
+      return this.filterSuiteLinksByIssueKey(
+        this.applyProjectKeyFilter(sharded.summary, options?.projectKey),
+        options?.issueKeyFilter
+      );
     }
 
     const legacy = await kvs.get<ComplianceSummary>(LEGACY_STORAGE_KEY);
@@ -1181,7 +1201,10 @@ export class SeederService {
         0
       );
       await kvs.delete(LEGACY_STORAGE_KEY);
-      return this.applyProjectKeyFilter(migrated, options?.projectKey);
+      return this.filterSuiteLinksByIssueKey(
+        this.applyProjectKeyFilter(migrated, options?.projectKey),
+        options?.issueKeyFilter
+      );
     }
 
     return await this.getUninitializedLiveSuite();
@@ -1190,7 +1213,7 @@ export class SeederService {
   /**
    * Returns the active compliance suite together with its current optimistic-lock version number.
    */
-  static async getSuiteWithVersion(): Promise<{ summary: ComplianceSummary; version?: number }> {
+  static async getSuiteWithVersion(): Promise<{ summary: ComplianceSummary; version: number }> {
     if (!isForgeRuntime()) {
       return {
         summary: await this.getActiveComplianceSuite(),

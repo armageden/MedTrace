@@ -345,47 +345,66 @@ export const App: React.FC = () => {
     };
   }, [fetchAndApplySuite]);
 
-  const executeSeed = async (confirmOverwriteLive: boolean): Promise<boolean> => {
+  const runSummaryMutation = async (opts: {
+    setBusy: (busy: boolean) => void;
+    actionLabel: string;
+    noticeSource?: UiNotice['source'];
+    invoke: () => Promise<unknown>;
+    onSuccess?: (raw: unknown, nextSummary: ComplianceSummary) => void;
+    formatError: (detail: string, threw: boolean) => string;
+    onFinally?: () => void;
+  }): Promise<boolean> => {
     if (activeMutationRef.current) return false;
     activeMutationRef.current = true;
     mutationEpochRef.current += 1;
     suiteRequestSeqRef.current += 1;
-    setIsSeeding(true);
+    opts.setBusy(true);
 
     try {
-      const resp: unknown = await invokeResolver(
-        'seedDemoSuite',
-        confirmOverwriteLive ? { confirmOverwriteLive: true } : undefined
-      );
-      if (isPlainRecord(resp) && resp.success !== false && isComplianceSummary(resp.summary)) {
+      const raw: unknown = await opts.invoke();
+      const outcome = resolveMutationSummaryResponse(raw, opts.actionLabel);
+      if (outcome.ok) {
         suiteRequestSeqRef.current += 1;
-        commitSummary(resp.summary);
-        setSelectedLinkId(null);
+        commitSummary(outcome.summary);
         setBlastRadius(null);
         setNotice(null);
+        opts.onSuccess?.(raw, outcome.summary);
         return true;
       }
-      const detail = extractErrorMessage(resp) || 'Malformed or unsuccessful backend response';
       setNotice({
         kind: 'error',
-        source: 'mutation',
-        message: `Seeding failed (${detail}). Existing state was NOT changed.`,
+        source: opts.noticeSource ?? 'mutation',
+        message: opts.formatError(outcome.error, false),
       });
       return false;
     } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Seeding failed';
+      const msg = err instanceof Error ? err.message : `${opts.actionLabel} failed`;
       setNotice({
         kind: 'error',
-        source: 'mutation',
-        message: `Seeding failed (${msg}). Existing state was NOT changed.`,
+        source: opts.noticeSource ?? 'mutation',
+        message: opts.formatError(msg, true),
       });
       return false;
     } finally {
       activeMutationRef.current = false;
-      setIsSeeding(false);
-      setIsConfirmSeedOpen(false);
+      opts.setBusy(false);
+      opts.onFinally?.();
     }
   };
+
+  const executeSeed = async (confirmOverwriteLive: boolean): Promise<boolean> =>
+    runSummaryMutation({
+      setBusy: setIsSeeding,
+      actionLabel: 'Seeding',
+      invoke: () =>
+        invokeResolver(
+          'seedDemoSuite',
+          confirmOverwriteLive ? { confirmOverwriteLive: true } : undefined
+        ),
+      onSuccess: () => setSelectedLinkId(null),
+      formatError: (detail) => `Seeding failed (${detail}). Existing state was NOT changed.`,
+      onFinally: () => setIsConfirmSeedOpen(false),
+    });
 
   const handleSeed = () => {
     if (activeMutationRef.current) return;
@@ -398,29 +417,25 @@ export const App: React.FC = () => {
 
   const handleSyncLive = async (options?: {
     includeUntaggedIssues?: boolean;
-  }): Promise<boolean> => {
-    if (activeMutationRef.current) return false;
-    activeMutationRef.current = true;
-    mutationEpochRef.current += 1;
-    suiteRequestSeqRef.current += 1;
-    setIsSyncingLive(true);
-
-    try {
-      const payload: Omit<LiveSyncOptions, 'callerMode'> = {
-        projectKey: panelContext.projectKey,
-        ...(typeof options?.includeUntaggedIssues === 'boolean'
-          ? { includeUntaggedIssues: options.includeUntaggedIssues }
-          : {}),
-      };
-      const resp: unknown = await invokeResolver('syncLiveSuite', payload);
-      if (isPlainRecord(resp) && resp.success !== false && isComplianceSummary(resp.summary)) {
-        const nextSummary = resp.summary;
-        suiteRequestSeqRef.current += 1;
-        commitSummary(nextSummary);
-        setBlastRadius(null);
+  }): Promise<boolean> =>
+    runSummaryMutation({
+      setBusy: setIsSyncingLive,
+      actionLabel: 'Live Atlassian sync',
+      noticeSource: 'sync',
+      invoke: () => {
+        const payload: Omit<LiveSyncOptions, 'callerMode'> = {
+          projectKey: panelContext.projectKey,
+          ...(typeof options?.includeUntaggedIssues === 'boolean'
+            ? { includeUntaggedIssues: options.includeUntaggedIssues }
+            : {}),
+        };
+        return invokeResolver('syncLiveSuite', payload);
+      },
+      onSuccess: (resp, nextSummary) => {
         setSelectedLinkId((prev) =>
           prev && nextSummary.traceLinks.some((l) => l.id === prev) ? prev : null
         );
+        if (!isPlainRecord(resp)) return;
 
         const warnings = Array.isArray(resp.warnings)
           ? resp.warnings.filter(
@@ -448,33 +463,11 @@ export const App: React.FC = () => {
             source: 'sync',
             message: `Live sync scanned ${jiraIssuesScanned} Jira issue(s) and ${confluencePagesScanned} Confluence page(s) (${skippedUntaggedCount} untagged issue(s) skipped).`,
           });
-        } else {
-          setNotice(null);
         }
-        return true;
-      }
-
-      const detail =
-        extractErrorMessage(resp) || 'Backend returned an unsuccessful or malformed sync response';
-      setNotice({
-        kind: 'error',
-        source: 'sync',
-        message: `Live Atlassian sync failed (${detail}). Existing state was NOT changed.`,
-      });
-      return false;
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Live tenant sync failed';
-      setNotice({
-        kind: 'error',
-        source: 'sync',
-        message: `Live Atlassian sync failed (${msg}). Existing state was NOT changed.`,
-      });
-      return false;
-    } finally {
-      activeMutationRef.current = false;
-      setIsSyncingLive(false);
-    }
-  };
+      },
+      formatError: (detail) =>
+        `Live Atlassian sync failed (${detail}). Existing state was NOT changed.`,
+    });
 
   const handleAnalyzeBlastRadius = async () => {
     const currentSummary = summaryRef.current;
@@ -586,45 +579,14 @@ export const App: React.FC = () => {
     hazardKey: string,
     issueKey: string,
     linkId?: string
-  ): Promise<boolean> => {
-    if (activeMutationRef.current) return false;
-    activeMutationRef.current = true;
-    mutationEpochRef.current += 1;
-    suiteRequestSeqRef.current += 1;
-    setIsMutating(true);
-
-    try {
-      const resp: unknown = await invokeResolver('bindIssueToHazard', {
-        hazardKey,
-        issueKey,
-        linkId,
-      });
-      if (isPlainRecord(resp) && resp.success === true && isComplianceSummary(resp.summary)) {
-        suiteRequestSeqRef.current += 1;
-        commitSummary(resp.summary);
-        setBlastRadius(null);
-        setNotice(null);
-        return true;
-      }
-      setNotice({
-        kind: 'error',
-        source: 'mutation',
-        message: `Bind issue failed: ${extractErrorMessage(resp) || 'Unknown backend error'}`,
-      });
-      return false;
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Bind issue failed';
-      setNotice({
-        kind: 'error',
-        source: 'mutation',
-        message: `Bind issue failed (${msg}).`,
-      });
-      return false;
-    } finally {
-      activeMutationRef.current = false;
-      setIsMutating(false);
-    }
-  };
+  ): Promise<boolean> =>
+    runSummaryMutation({
+      setBusy: setIsMutating,
+      actionLabel: 'Bind issue',
+      invoke: () => invokeResolver('bindIssueToHazard', { hazardKey, issueKey, linkId }),
+      formatError: (detail, threw) =>
+        threw ? `Bind issue failed (${detail}).` : `Bind issue failed: ${detail}`,
+    });
 
   const handleRecordTestResult = async (params: {
     hazardKey: string;
@@ -633,42 +595,13 @@ export const App: React.FC = () => {
     status: VerificationTest['status'];
     evidenceUrl: string;
     notes: string;
-  }): Promise<boolean> => {
-    if (activeMutationRef.current) return false;
-    activeMutationRef.current = true;
-    mutationEpochRef.current += 1;
-    suiteRequestSeqRef.current += 1;
-    setIsMutating(true);
-
-    try {
-      const raw: unknown = await invokeResolver('recordTestResult', params);
-      const outcome = resolveMutationSummaryResponse(raw, 'Recording test result');
-      if (outcome.ok) {
-        suiteRequestSeqRef.current += 1;
-        commitSummary(outcome.summary);
-        setBlastRadius(null);
-        setNotice(null);
-        return true;
-      }
-      setNotice({
-        kind: 'error',
-        source: 'mutation',
-        message: `Recording test result failed (${outcome.error}).`,
-      });
-      return false;
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Failed to record test result';
-      setNotice({
-        kind: 'error',
-        source: 'mutation',
-        message: `Recording test result failed (${msg}).`,
-      });
-      return false;
-    } finally {
-      activeMutationRef.current = false;
-      setIsMutating(false);
-    }
-  };
+  }): Promise<boolean> =>
+    runSummaryMutation({
+      setBusy: setIsMutating,
+      actionLabel: 'Recording test result',
+      invoke: () => invokeResolver('recordTestResult', params),
+      formatError: (detail) => `Recording test result failed (${detail}).`,
+    });
 
   const handleSignOffPart11 = async (params: {
     hazardKey: string;
@@ -678,84 +611,28 @@ export const App: React.FC = () => {
     attestationConfirmed: boolean;
     attestationChecked: boolean;
     attestationPhrase: string;
-  }): Promise<boolean> => {
-    if (activeMutationRef.current) return false;
-    activeMutationRef.current = true;
-    mutationEpochRef.current += 1;
-    suiteRequestSeqRef.current += 1;
-    setIsMutating(true);
+  }): Promise<boolean> =>
+    runSummaryMutation({
+      setBusy: setIsMutating,
+      actionLabel: 'Electronic attestation',
+      invoke: () => invokeResolver('signOffPart11', params),
+      formatError: (detail) => `Electronic attestation failed (${detail}).`,
+    });
 
-    try {
-      const raw: unknown = await invokeResolver('signOffPart11', params);
-      const outcome = resolveMutationSummaryResponse(raw, 'Electronic attestation');
-      if (outcome.ok) {
-        suiteRequestSeqRef.current += 1;
-        commitSummary(outcome.summary);
-        setBlastRadius(null);
-        setNotice(null);
-        return true;
-      }
-      setNotice({
-        kind: 'error',
-        source: 'mutation',
-        message: `Electronic attestation failed (${outcome.error}).`,
-      });
-      return false;
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Electronic attestation failed';
-      setNotice({
-        kind: 'error',
-        source: 'mutation',
-        message: `Electronic attestation failed (${msg}).`,
-      });
-      return false;
-    } finally {
-      activeMutationRef.current = false;
-      setIsMutating(false);
-    }
-  };
-
-  const handleRemediateDemo = async (hazardKey: string, meaning: string): Promise<boolean> => {
-    if (activeMutationRef.current) return false;
-    activeMutationRef.current = true;
-    mutationEpochRef.current += 1;
-    suiteRequestSeqRef.current += 1;
-    setIsMutating(true);
-
-    try {
-      const raw: unknown = await invokeResolver('remediateGap', {
-        hazardKey,
-        simulate: true,
-        attestationConfirmed: true,
-        meaning,
-      });
-      const outcome = resolveMutationSummaryResponse(raw, 'Simulated remediation');
-      if (outcome.ok) {
-        suiteRequestSeqRef.current += 1;
-        commitSummary(outcome.summary);
-        setBlastRadius(null);
-        setNotice(null);
-        return true;
-      }
-      setNotice({
-        kind: 'error',
-        source: 'mutation',
-        message: `Simulated remediation failed (${outcome.error}). Compliance gap remains OPEN.`,
-      });
-      return false;
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Demo remediation failed';
-      setNotice({
-        kind: 'error',
-        source: 'mutation',
-        message: `Simulated remediation failed (${msg}). Compliance gap remains OPEN.`,
-      });
-      return false;
-    } finally {
-      activeMutationRef.current = false;
-      setIsMutating(false);
-    }
-  };
+  const handleRemediateDemo = async (hazardKey: string, meaning: string): Promise<boolean> =>
+    runSummaryMutation({
+      setBusy: setIsMutating,
+      actionLabel: 'Simulated remediation',
+      invoke: () =>
+        invokeResolver('remediateGap', {
+          hazardKey,
+          simulate: true,
+          attestationConfirmed: true,
+          meaning,
+        }),
+      formatError: (detail) =>
+        `Simulated remediation failed (${detail}). Compliance gap remains OPEN.`,
+    });
 
   const isAnyMutationBusy = isSeeding || isSyncingLive || isMutating;
   const isBusy = isAnyMutationBusy || isAnalyzingBlastRadius;

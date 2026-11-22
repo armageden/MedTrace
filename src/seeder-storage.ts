@@ -195,11 +195,16 @@ export function buildMetaAndShardItems(
   }
 
   const metaShardItems: Array<{ key: string; value: string[] | Record<string, string[]> }> = [];
-  if (measureJsonBytes(meta.blockingReasons) > 32 * 1024) {
+  const shardReasons = () => {
+    if (meta.blockingReasons.length === 0) return;
     const reasonShards = shardStringArray(meta.blockingReasons, META_REASONS_SHARD_PREFIX, nextVersion);
     meta.blockingReasons = [];
     meta.blockingReasonShardKeys = reasonShards.map((s) => s.key);
     metaShardItems.push(...reasonShards);
+  };
+
+  if (measureJsonBytes(meta.blockingReasons) > 32 * 1024) {
+    shardReasons();
   }
 
   if (measureJsonBytes(meta) > MAX_KVS_META_BYTES && meta.linkKeys.length > 0) {
@@ -218,6 +223,10 @@ export function buildMetaAndShardItems(
     delete meta.issueKeyIndex;
     meta.issueKeyIndexShardKeys = indexShards.map((s) => s.key);
     metaShardItems.push(...indexShards);
+  }
+
+  if (measureJsonBytes(meta) > MAX_KVS_META_BYTES && meta.blockingReasons.length > 0) {
+    shardReasons();
   }
 
   return { meta, metaShardItems };

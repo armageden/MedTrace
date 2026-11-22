@@ -44,9 +44,12 @@ function extractConfluencePageId(url?: string, globalId?: string): string | unde
   return url.match(/\/pages\/(\d+)/i)?.[1] || url.match(/[?&]pageId=(\d+)/i)?.[1];
 }
 
-function extractJiraCloudIdFromSelfUrl(issueSelfUrl?: string): string | undefined {
-  if (typeof issueSelfUrl !== 'string') return undefined;
-  const trimmed = issueSelfUrl.trim();
+function extractProductCloudIdFromUrl(
+  product: 'jira' | 'confluence',
+  rawUrl?: string
+): string | undefined {
+  if (typeof rawUrl !== 'string') return undefined;
+  const trimmed = rawUrl.trim();
   if (!trimmed) return undefined;
 
   let pathToCheck = trimmed;
@@ -61,10 +64,44 @@ function extractJiraCloudIdFromSelfUrl(issueSelfUrl?: string): string | undefine
     return undefined;
   }
 
-  const match = pathToCheck.match(
-    /^\/ex\/jira\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{4,}(?:-[0-9a-f]{4,})+)(?:\/|$)/i
-  );
-  return match?.[1];
+  const pattern =
+    product === 'jira'
+      ? /^\/ex\/jira\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{4,}(?:-[0-9a-f]{4,})+)(?:\/|$)/i
+      : /^\/ex\/confluence\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{4,}(?:-[0-9a-f]{4,})+)(?:\/|$)/i;
+  return pathToCheck.match(pattern)?.[1];
+}
+
+function resolveProductCloudId(
+  product: 'jira' | 'confluence',
+  selfUrl?: string
+): string | undefined {
+  const fromUrl = extractProductCloudIdFromUrl(product, selfUrl);
+  if (fromUrl) return fromUrl;
+
+  try {
+    const ctx = getAppContext();
+    const contexts = ctx?.installation?.contexts;
+    if (Array.isArray(contexts)) {
+      const productMarker = `:${product}:`;
+      const matchedContext = contexts.find(
+        (c) => Boolean(c?.cloudId) && String(c.toString?.() ?? '').includes(productMarker)
+      );
+      if (matchedContext?.cloudId) return matchedContext.cloudId;
+
+      if (product === 'jira') {
+        const untypedContext = contexts.find((c) => {
+          if (!c?.cloudId) return false;
+          const repr = String(c.toString?.() ?? '');
+          return !repr.startsWith('ari:cloud:') || repr.includes(':jira:');
+        });
+        if (untypedContext?.cloudId) return untypedContext.cloudId;
+      }
+    }
+  } catch {
+    // Outside Forge runtime or appContext unavailable
+  }
+
+  return undefined;
 }
 
 /**
@@ -73,30 +110,15 @@ function extractJiraCloudIdFromSelfUrl(issueSelfUrl?: string): string | undefine
  * from `getAppContext()`, and finally an untyped `{ cloudId }` fallback for test mocks.
  */
 export function resolveCloudId(issueSelfUrl?: string): string | undefined {
-  const fromSelfUrl = extractJiraCloudIdFromSelfUrl(issueSelfUrl);
-  if (fromSelfUrl) return fromSelfUrl;
+  return resolveProductCloudId('jira', issueSelfUrl);
+}
 
-  try {
-    const ctx = getAppContext();
-    const contexts = ctx?.installation?.contexts;
-    if (Array.isArray(contexts)) {
-      const jiraContext = contexts.find(
-        (c) => Boolean(c?.cloudId) && String(c.toString?.() ?? '').includes(':jira:')
-      );
-      if (jiraContext?.cloudId) return jiraContext.cloudId;
-
-      const untypedContext = contexts.find((c) => {
-        if (!c?.cloudId) return false;
-        const repr = String(c.toString?.() ?? '');
-        return !repr.startsWith('ari:cloud:') || repr.includes(':jira:');
-      });
-      if (untypedContext?.cloudId) return untypedContext.cloudId;
-    }
-  } catch {
-    // Outside Forge runtime or appContext unavailable
-  }
-
-  return undefined;
+/**
+ * Resolves the Confluence Cloud ID from `/ex/confluence/<uuid>` or a Confluence
+ * installation context in `getAppContext()`, returning `undefined` when only Jira exists.
+ */
+export function resolveConfluenceCloudId(confluenceUrl?: string): string | undefined {
+  return resolveProductCloudId('confluence', confluenceUrl);
 }
 
 function parseStatus(raw: unknown): { name?: string; category?: string } | undefined {
@@ -364,10 +386,11 @@ export class TeamworkGraphService {
         const pageIds = confluenceLinks
           .map((l) => l.pageId)
           .filter((id): id is string => typeof id === 'string' && Boolean(id));
-        if (cloudId && pageIds.length > 0) {
+        const confluenceCloudId = resolveConfluenceCloudId(confluenceLinks[0]?.url) ?? cloudId;
+        if (confluenceCloudId && pageIds.length > 0) {
           const { owners, status: twgStatus } = await fetchSpecOwnersFromTeamworkGraph(
             api.asUser(),
-            cloudId,
+            confluenceCloudId,
             pageIds
           );
           result.specOwners = owners;

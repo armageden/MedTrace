@@ -5,10 +5,11 @@ const forgeApi = require('@forge/api');
 const forgeKvs = require('@forge/kvs');
 const { ComplianceEngine } = require('../dist/compliance-engine');
 const { AuditLogService, setAuditStorageAdapter, resetInMemoryAuditStorage } = require('../dist/audit-log');
-const { sanitizeKvsKeySegment } = require('../dist/crypto-utils');
+const { sanitizeKvsKeySegment, measureJsonBytes } = require('../dist/crypto-utils');
 const { PART11_ATTESTATION_PHRASE } = require('../dist/types');
 const seederMod = require('../dist/seeder');
 const { SeederService } = seederMod;
+const { buildMetaAndShardItems } = require('../dist/seeder-storage');
 
 const { ForgeKvsAPIError } = forgeKvs;
 const KVS_KEY_REGEX = /^(?!\s+$)[a-zA-Z0-9:._\s-#]+$/;
@@ -1436,5 +1437,72 @@ test.describe('Task 1B-Seeder: bindIssueToHazard & recordTestResult Hardening (C
     assert.ok(
       boundUnsealed.traceLinks[0].violations.some((v) => /Cryptographic Seal Violation/i.test(v))
     );
+  });
+
+  test.it('isolates project counts and blockingReasons when both issueKeyFilter and projectKey are passed', async () => {
+    const kvsMock = createFullMockForgeKvs();
+    await withForgeMocks({ kvsMock }, async () => {
+      const links = makeSyntheticLinks(2);
+      // Link 0: ALPHA-1 verified; Link 1: BETA-2 blocked with violation
+      links[0] = ComplianceEngine.evaluateTraceLink(
+        links[0].hazard,
+        links[0].spec,
+        { ...links[0].work, id: 'alpha-1', key: 'ALPHA-1' },
+        links[0].test,
+        links[0].signature,
+        undefined,
+        { linkId: 'link-alpha-1', requireCryptographicSeal: true }
+      );
+      links[1] = ComplianceEngine.evaluateTraceLink(
+        { ...links[1].hazard, id: 'haz-b2', key: 'HAZ-B2' },
+        links[1].spec,
+        { ...links[1].work, id: 'beta-2', key: 'BETA-2' },
+        { ...links[1].test, status: 'UNTESTED' },
+        links[1].signature,
+        undefined,
+        { linkId: 'link-beta-2' }
+      );
+      const multi = ComplianceEngine.generateComplianceReport(links, 'LIVE', 'Multi Tenant', {
+        initialized: true,
+      });
+      await SeederService.saveComplianceSuite(multi, 0);
+
+      const alphaScoped = await SeederService.getActiveComplianceSuite({
+        issueKeyFilter: 'ALPHA-1',
+        projectKey: 'ALPHA',
+      });
+      assert.strictEqual(alphaScoped.traceLinks.length, 1);
+      assert.strictEqual(alphaScoped.traceLinks[0].work.key, 'ALPHA-1');
+      assert.strictEqual(alphaScoped.totalHazards, 1);
+      assert.strictEqual(alphaScoped.releaseBlocked, false);
+      assert.deepStrictEqual(alphaScoped.blockingReasons, []);
+
+      const crossMiss = await SeederService.getActiveComplianceSuite({
+        issueKeyFilter: 'BETA-2',
+        projectKey: 'ALPHA',
+      });
+      assert.strictEqual(crossMiss.traceLinks.length, 0);
+      assert.strictEqual(crossMiss.totalHazards, 1);
+      assert.deepStrictEqual(crossMiss.blockingReasons, []);
+    });
+  });
+
+  test.it('buildMetaAndShardItems shards overflowing blockingReasons while keeping suite_meta <= 128 KiB', () => {
+    const reasonText = 'R'.repeat(600);
+    const links1200 = makeSyntheticLinks(1200).map((link, idx) => ({
+      ...link,
+      violations: idx < 60 ? [`${idx}:${reasonText}`] : [],
+      complianceState: idx < 60 ? 'INCOMPLETE' : 'VERIFIED',
+    }));
+    const largeSuite = ComplianceEngine.generateComplianceReport(links1200, 'LIVE', 'Reasons Overflow', {
+      initialized: true,
+    });
+    const fakeKeys = links1200.map((_, idx) => `medtrace:compliance:link:v1:haz-${idx}-med-${idx + 1}`);
+    const { meta, metaShardItems } = buildMetaAndShardItems(largeSuite, fakeKeys, 1);
+
+    assert.ok(measureJsonBytes(meta) <= 128 * 1024);
+    assert.deepStrictEqual(meta.blockingReasons, []);
+    assert.ok(Array.isArray(meta.blockingReasonShardKeys) && meta.blockingReasonShardKeys.length >= 1);
+    assert.ok(metaShardItems.some((item) => meta.blockingReasonShardKeys.includes(item.key)));
   });
 });

@@ -127,6 +127,6 @@ returns the lineage card; follow with "verify IEC 62304 compliance" → `verify-
 - [ ] Record the functioning app, publish it on YouTube, and add the public URL to `devpost_submission_draft.md` (currently a blocker, no URL present).
 - [ ] Confirm separate judge-facing Jira and Confluence install links on a fresh site.
 - [ ] Provide least-privilege demo accounts; never submit a production webtrigger secret.
-- [ ] Re-run `npm run test:all` and verify the final test count (`200`: `166` backend + `34` frontend) matches the draft.
+- [ ] Re-run `npm run test:all` and verify the final test count (`202`: `168` backend + `34` frontend) matches the draft.
 - [ ] Screenshot the `DEMO DATASET` badge + honest error banner — use one in the Devpost gallery
       images; it's a differentiator, not a weakness.

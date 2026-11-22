@@ -7,7 +7,7 @@ const { ComplianceEngine } = require('../dist/compliance-engine');
 const { AuditLogService, setAuditStorageAdapter, resetInMemoryAuditStorage } = require('../dist/audit-log');
 const seederMod = require('../dist/seeder');
 const { SeederService } = seederMod;
-const { TeamworkGraphService, resolveCloudId } = require('../dist/teamwork-graph');
+const { TeamworkGraphService, resolveCloudId, resolveConfluenceCloudId } = require('../dist/teamwork-graph');
 const ingestionMod = require('../dist/ingestion');
 const { LiveIngestionService } = ingestionMod;
 const { PART11_ATTESTATION_PHRASE } = require('../dist/types');
@@ -474,6 +474,50 @@ test.describe('TeamworkGraphService Unit Tests (CS-08)', () => {
       },
       async () => {
         assert.strictEqual(resolveCloudId(undefined), undefined);
+        assert.strictEqual(resolveConfluenceCloudId(undefined), confUuid);
+      }
+    );
+
+    // Split Jira & Confluence UUIDs: includeSpecOwners queries TWG with Confluence UUID, not Jira UUID
+    const twgIds = [];
+    await withForgeMocks(
+      {
+        appContext: {
+          installation: {
+            contexts: [
+              { cloudId: ctxJiraUuid, toString: () => `ari:cloud:jira::site/${ctxJiraUuid}` },
+              { cloudId: confUuid, toString: () => `ari:cloud:confluence::site/${confUuid}` },
+            ],
+          },
+        },
+        asUserImpl: () => ({
+          requestJira: async (routeObj) => {
+            const r = String(routeObj?.value || routeObj);
+            if (r.includes('/remotelink')) {
+              return makeJsonResponse(200, [
+                {
+                  application: { type: 'com.atlassian.confluence' },
+                  globalId: 'appId=c1&pageId=81001',
+                  object: { title: 'SRS-81001', url: 'https://example.atlassian.net/wiki/pages/81001' },
+                },
+              ]);
+            }
+            return makeJsonResponse(200, {
+              id: '10901',
+              key: 'MED-901',
+              self: `https://api.atlassian.com/ex/jira/${jiraUuid}/rest/api/3/issue/10901`,
+              fields: { summary: 'Test', status: { name: 'In Progress' }, issuelinks: [] },
+            });
+          },
+          requestTeamworkGraph: async (_q, vars) => {
+            twgIds.push(vars.id);
+            return makeJsonResponse(200, { data: { confluencePageOwners: { edges: [] } } });
+          },
+        }),
+      },
+      async () => {
+        await TeamworkGraphService.queryIssueGraphContext('MED-901', { includeSpecOwners: true });
+        assert.deepStrictEqual(twgIds, [`ari:cloud:confluence:${confUuid}:page/81001`]);
       }
     );
   });

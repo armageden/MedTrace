@@ -2,7 +2,7 @@ import api, { route } from '@forge/api';
 import { ComplianceEngine } from './compliance-engine';
 import { isForgeRuntime } from './runtime';
 import { SeederService } from './seeder';
-import { fetchSpecOwnersFromTeamworkGraph } from './teamwork-graph';
+import { fetchSpecOwnersFromTeamworkGraph, resolveConfluenceCloudId } from './teamwork-graph';
 import {
   BlastRadiusReport,
   ComplianceSummary,
@@ -805,7 +805,11 @@ export async function rovoActionHandler(
 
     if (actionKey === 'get-hazard-lineage-action' || actionKey === 'get-hazard-lineage') {
       const rawCloudId = context?.cloudId ?? payloadCtx?.cloudId;
-      const cloudId = typeof rawCloudId === 'string' && rawCloudId.trim() ? rawCloudId.trim() : undefined;
+      const contextCloudId = typeof rawCloudId === 'string' && rawCloudId.trim() ? rawCloudId.trim() : undefined;
+      const extensionType = String(ctx.extension?.type ?? payloadCtx?.extension?.type ?? '').toLowerCase();
+      const cloudId = extensionType.startsWith('confluence')
+        ? contextCloudId
+        : resolveConfluenceCloudId() ?? contextCloudId;
       return await McpToolService.getHazardLineage(
         {
           issueKey: sanitizedInputs.issueKey,
