@@ -2770,6 +2770,63 @@ test.describe('Task 1C-Ingestion: Confluence Revert Non-Resurrection & 3-Attempt
           resumedRun.summary.traceLinks.map((l) => l.work.key).sort(),
           ['RES-1', 'RES-2', 'RES-3', 'RES-4', 'RES-5', 'RES-6', 'RES-7']
         );
+
+        // 3. Cross-partition Confluence drift reconciliation invalidates signature when Confluence page changes
+        const prevSecret = process.env.MEDTRACE_PART11_SECRET;
+        process.env.MEDTRACE_PART11_SECRET = 'reconcile-secret-001';
+        try {
+          const v1Body = '<p>Limit 5.0 mL/hr</p>';
+          const v1Hash = sha256Hex(v1Body);
+          const signedAt = '2026-11-24T10:00:00Z';
+          const seal = ComplianceEngine.computePart11Seal(
+            {
+              hazardKey: 'HAZ-REC-1',
+              specId: '71001',
+              artifactSha256: v1Hash,
+              signedByAccountId: 'acc-res',
+              signedBy: 'QA Lead',
+              role: 'QA',
+              meaning: 'Approved 5.0',
+              signedAt,
+              authMethod: 'PART11_ATTESTATION',
+            },
+            process.env.MEDTRACE_PART11_SECRET
+          );
+          const cleanLink = ComplianceEngine.evaluateTraceLink(
+            { id: 'haz-rec-1', key: 'HAZ-REC-1', title: 'Bolus', riskClass: 'CLASS_C', mitigationRequirementId: '71001', status: 'MITIGATED' },
+            { id: '71001', pageId: '71001', title: 'SRS-71001', version: 1, sha256Hash: v1Hash, lastSignedHash: v1Hash, isSignatureInvalidated: false, contentSnippet: 'Limit 5.0 mL/hr', lastUpdated: signedAt },
+            { id: 'w-rec-1', key: 'REC-1', title: 'Bolus Work', status: 'Done', assignee: 'Dev' },
+            { id: 't-rec-1', testKey: 'TEST-REC-1', title: 'HIL', testType: 'Automated HIL (Hardware-in-Loop)', status: 'PASSED', evidenceUrl: 'https://ci.example/rec-1', executionDate: signedAt },
+            { id: 'sig-rec-1', signedBy: 'QA Lead', signedByAccountId: 'acc-res', signedAt, role: 'QA', meaning: 'Approved 5.0', artifactSha256: v1Hash, isValid: true, authMethod: 'PART11_ATTESTATION', signatureAlgorithm: 'HMAC-SHA256-SEAL-V1', signatureSeal: seal },
+            undefined,
+            { linkId: 'link-rec-1', part11Secret: process.env.MEDTRACE_PART11_SECRET, requireCryptographicSeal: true, requireTestEvidence: true }
+          );
+          const cleanSuite = ComplianceEngine.generateComplianceReport([cleanLink], 'LIVE', 'Reconcile Project', { initialized: true });
+          const { version: currentVer } = await SeederService.getSuiteWithVersion();
+          await SeederService.saveComplianceSuite(cleanSuite, currentVer);
+
+          const driftedClient = () => ({
+            requestConfluence: async () =>
+              makeJsonResponse(200, {
+                id: '71001',
+                title: 'SRS-71001: Bolus Limit',
+                version: { number: 2, createdAt: '2026-11-24T12:00:00Z' },
+                body: { storage: { value: '<p>Limit 5.5 mL/hr</p>' } },
+              }),
+          });
+          await withForgeMocks({ kvsMock, asUserImpl: driftedClient }, async () => {
+            const reconciled = await LiveIngestionService.reconcileConfluenceSpecs(cleanSuite, {
+              actorAccountId: 'acc-res',
+            });
+            assert.strictEqual(reconciled.traceLinks[0].complianceState, 'SIGNATURE_DRIFT');
+            assert.strictEqual(reconciled.traceLinks[0].signature.isValid, false);
+            assert.strictEqual(reconciled.traceLinks[0].spec.version, 2);
+            assert.strictEqual(reconciled.releaseBlocked, true);
+          });
+        } finally {
+          if (prevSecret === undefined) delete process.env.MEDTRACE_PART11_SECRET;
+          else process.env.MEDTRACE_PART11_SECRET = prevSecret;
+        }
       });
     } finally {
       Date.now = origDateNow;

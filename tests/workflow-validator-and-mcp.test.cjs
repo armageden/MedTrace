@@ -1498,7 +1498,46 @@ test.describe('McpToolService & rovoActionHandler Integration Tests', () => {
       assert.strictEqual(nonReleaseRes.result, false);
       assert.match(nonReleaseRes.errorMessage || '', /must be "Done"/i);
 
-      // 6. Global release gate stays blocked while syncIncomplete === true
+      // 6. ID-only Forge workflowValidator payload ({ transition: { from: { id }, to: { id } } }) resolves via /rest/api/3/status/{id}
+      await withForgeMocks(
+        {
+          asAppImpl: () => ({
+            requestJira: async (routeObj) => {
+              const url = String(routeObj?.value_ || routeObj || '');
+              if (url === '/rest/api/3/status/10002') {
+                return makeJsonResponse(200, {
+                  id: '10002',
+                  name: 'Done',
+                  statusCategory: { key: 'done', name: 'Done' },
+                });
+              }
+              if (url === '/rest/api/3/status/3') {
+                return makeJsonResponse(200, {
+                  id: '3',
+                  name: 'In Progress',
+                  statusCategory: { key: 'indeterminate', name: 'In Progress' },
+                });
+              }
+              return makeJsonResponse(404, {});
+            },
+          }),
+        },
+        async () => {
+          const idDoneRes = await workflowValidatorHandler({
+            issue: { key: 'MED-REV-1' },
+            transition: { from: { id: '10019' }, to: { id: '10002' } },
+          });
+          assert.strictEqual(idDoneRes.result, true);
+
+          const idNonDoneRes = await workflowValidatorHandler({
+            issue: { key: 'MED-REV-1' },
+            transition: { from: { id: '10032' }, to: { id: '3' } },
+          });
+          assert.strictEqual(idNonDoneRes.result, false);
+        }
+      );
+
+      // 7. Global release gate stays blocked while syncIncomplete === true
       const incompleteSuite = ComplianceEngine.generateComplianceReport(
         [compliantUnderReview],
         'LIVE',

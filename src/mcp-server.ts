@@ -1,5 +1,6 @@
 import api, { route } from '@forge/api';
 import { ComplianceEngine } from './compliance-engine';
+import { LiveIngestionService } from './ingestion';
 import { isForgeRuntime } from './runtime';
 import { SeederService } from './seeder';
 import {
@@ -838,6 +839,29 @@ export async function rovoActionHandler(
       await assertRovoUserReadAccess(accountId, extensionScope);
       const rawSuite = await SeederService.getActiveComplianceSuite();
       scopedAuth = await scopeSuiteForRovoCaller(rawSuite, sanitizedInputs, extensionScope);
+      if (
+        actionKey !== 'create-reverification-task-action' &&
+        actionKey !== 'create-reverification-task'
+      ) {
+        const accessiblePageIds = scopedAuth.unredactedSuite.traceLinks
+          .map((l) => l.spec?.pageId)
+          .filter(
+            (pid): pid is string =>
+              typeof pid === 'string' && pid.trim().length > 0 && !scopedAuth!.restrictedPageIds.has(pid)
+          );
+        if (accessiblePageIds.length > 0) {
+          const reconciled = await LiveIngestionService.reconcileConfluenceSpecs(
+            scopedAuth.unredactedSuite,
+            {
+              targetPageIds: accessiblePageIds,
+              actorAccountId: accountId,
+            }
+          );
+          if (reconciled !== scopedAuth.unredactedSuite) {
+            scopedAuth = await scopeSuiteForRovoCaller(reconciled, sanitizedInputs, extensionScope);
+          }
+        }
+      }
     }
 
     if (

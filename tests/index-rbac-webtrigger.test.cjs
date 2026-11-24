@@ -2442,7 +2442,7 @@ test.describe('SEC-01 & SEC-03: Resolver RBAC, Confused-Deputy, Part 11 & Webtri
             return makeHttpResponse(200, { accountId: 'op-acme', displayName: 'ACME Op', active: true });
           }
           if (url.startsWith('/rest/api/3/mypermissions')) {
-            const disallowed = url.includes('MED');
+            const disallowed = url.includes('MED') || url.includes('SRS');
             return makeHttpResponse(200, {
               permissions: {
                 BROWSE_PROJECTS: { havePermission: !disallowed },
@@ -2724,6 +2724,26 @@ test.describe('SEC-01 & SEC-03: Resolver RBAC, Confused-Deputy, Part 11 & Webtri
         );
         assert.strictEqual(firstTask.createdIssueKey, 'ACME-99');
         assert.strictEqual(revCreateCount, 1);
+
+        // Regression: audit entries referencing Confluence specId "srs-9199" must NOT treat "SRS" as a foreign Jira project
+        await AuditLogService.append({
+          actorAccountId: 'op-acme',
+          action: 'PART11_SIGNOFF',
+          targetKey: 'HAZ-ACME-11',
+          details: { projectKey: 'ACME', hazardKey: 'HAZ-ACME-11', workKey: 'ACME-11', specId: 'srs-9199' },
+          authMethod: 'PART11_ATTESTATION',
+        });
+        const acmeLogsWithSpecId = await resolverHandler(
+          {
+            call: { functionKey: 'getAuditLog', payload: { limit: 20 } },
+            context: { extension: { type: 'jira:projectPage', project: { key: 'ACME' } } },
+          },
+          { principal: { accountId: 'op-acme' } }
+        );
+        assert.ok(
+          acmeLogsWithSpecId.some((e) => e.action === 'PART11_SIGNOFF' && e.targetKey === 'HAZ-ACME-11'),
+          'PART11_SIGNOFF with specId srs-9199 must remain visible to ACME caller'
+        );
 
         const secondTask = await resolverHandler(
           {

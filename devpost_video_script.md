@@ -32,9 +32,10 @@ with the live `jira:workflowValidator` attached. Transition succeeds.
 
 ### Shot 4 — Confluence Drift & Blast Radius (1:30–2:10) · screen: Confluence edit → MedTrace graph
 **Action:** Edit `SRS-201` in Confluence (`5.0` → `5.5` mL/hr) and publish. Return to MedTrace:
-`avi:confluence:updated:page` automatically revokes the signature (`SIGNATURE_DRIFT`). Run
+cross-partition Confluence hash reconciliation (complementing `avi:confluence:updated:page`)
+automatically revokes the signature (`SIGNATURE_DRIFT`). Run
 `Blast Radius` to highlight the full transitive impact path across shared hazards and work items.
-> **NARRATION:** "Now SRS-201 changes from 5.0 to 5.5. The Confluence trigger recomputes the hash,
+> **NARRATION:** "Now SRS-201 changes from 5.0 to 5.5. Live Confluence hash reconciliation recomputes the digest,
 > revokes the stale signature automatically, and traces the complete transitive blast radius."
 
 ### Shot 5 — Gate Enforcement Alongside Compliant Case (2:10–2:40) · screen: Jira transition blocked
@@ -78,8 +79,8 @@ and Export Dossier. Repeat the winning thesis.
    same `(hazardKey, specId)` baseline updates too), then transition MEDTRACE-1 to `Done` in Jira
    with `MedTrace Safety Gate` (`medtrace-safety-validator`) attached.
 3. **Confluence drift trigger (10 min):** edit SRS-201 (`5.0` → `5.5` mL/hr) and publish →
-   confirm `avi:confluence:updated:page` fires and the signature is revoked → run `Blast Radius`.
-   Check `forge logs -e production` for the trigger event if nothing changes.
+   reload MedTrace (cross-partition `reconcileConfluenceSpecs`, complementing `avi:confluence:updated:page`) and confirm the signature is revoked → run `Blast Radius`.
+   Check `forge logs -e production` for the trigger/reconciliation event if nothing changes.
 4. **Negative gate check (5 min):** attempt to transition an affected/incomplete Jira issue to
    `Done` using the live Jira workflow validator and verify it blocks with the exact violation
    alongside the earlier `Done` issue.

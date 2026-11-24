@@ -1,6 +1,6 @@
 import api, { route } from '@forge/api';
 import { ComplianceEngine } from './compliance-engine';
-import { isSafetyTrackedIssue } from './ingestion';
+import { isSafetyTrackedIssue, LiveIngestionService } from './ingestion';
 import { isForgeRuntime } from './runtime';
 import { SeederService } from './seeder';
 import { ComplianceSummary, TransitionResult } from './types';
@@ -20,10 +20,26 @@ export interface WorkflowValidatorPayload {
   issueKey?: string;
   key?: string;
   transition?: {
+    id?: string | number;
     name?: string;
-    from?: { id?: string; name?: string; statusCategory?: { key?: string; name?: string } };
-    to?: { id?: string; name?: string; statusCategory?: { key?: string; name?: string } };
+    from?: string | { id?: string | number; name?: string; statusCategory?: { key?: string; name?: string } };
+    to?: string | { id?: string | number; name?: string; statusCategory?: { key?: string; name?: string } };
   };
+  transitionId?: string | number;
+}
+
+const RELEASE_STATUS_NAME_RE = /^(done|closed|resolved|released|ready for release)$/i;
+const RELEASE_TRANSITION_NAME_RE =
+  /^(done|mark(ed)?( as)? done|move to done|release|ready for release|complete(d)?|close(d)?|resolve(d)?)$/i;
+const statusDoneCache = new Map<string, boolean>();
+
+function isDoneStatusLike(status?: { name?: string; statusCategory?: { key?: string } } | null): boolean | undefined {
+  if (!status || typeof status !== 'object') return undefined;
+  const cat = typeof status.statusCategory?.key === 'string' ? status.statusCategory.key.trim().toLowerCase() : '';
+  if (cat) return cat === 'done';
+  const name = typeof status.name === 'string' ? status.name.trim().toLowerCase() : '';
+  if (name) return RELEASE_STATUS_NAME_RE.test(name);
+  return undefined;
 }
 
 export function isReleaseTransitionPayload(payload?: WorkflowValidatorPayload | null): boolean {
@@ -31,26 +47,96 @@ export function isReleaseTransitionPayload(payload?: WorkflowValidatorPayload | 
   if (!t || typeof t !== 'object') {
     return false;
   }
-  const toCat =
-    typeof t.to?.statusCategory?.key === 'string'
-      ? t.to.statusCategory.key.trim().toLowerCase()
-      : '';
-  if (toCat) {
-    return toCat === 'done';
-  }
-  const toName = typeof t.to?.name === 'string' ? t.to.name.trim().toLowerCase() : '';
-  if (toName) {
-    return /^(done|closed|resolved|released|ready for release)$/i.test(toName);
+  if (t.to && typeof t.to === 'object') {
+    const resolved = isDoneStatusLike(t.to);
+    if (resolved !== undefined) {
+      return resolved;
+    }
   }
   const transName = typeof t.name === 'string' ? t.name.trim().toLowerCase() : '';
   if (!transName) {
     return false;
   }
-  return (
-    /^(done|mark(ed)?( as)? done|move to done|release|ready for release|complete(d)?|close(d)?|resolve(d)?)$/i.test(
-      transName
-    ) || /(?:->|→|\bto)\s*done\b/i.test(transName)
-  );
+  return RELEASE_TRANSITION_NAME_RE.test(transName) || /(?:->|→|\bto)\s*done\b/i.test(transName);
+}
+
+async function resolveTransitionToDone(
+  payload?: WorkflowValidatorPayload | null,
+  issueKey?: string
+): Promise<boolean> {
+  if (isReleaseTransitionPayload(payload)) {
+    return true;
+  }
+  const t = payload?.transition;
+  if (!t || typeof t !== 'object') {
+    return false;
+  }
+  if (t.to && typeof t.to === 'object' && isDoneStatusLike(t.to) === false) {
+    return false;
+  }
+  if (!isForgeRuntime()) {
+    return false;
+  }
+
+  const rawToId =
+    typeof t.to === 'string'
+      ? t.to.trim()
+      : t.to && typeof t.to === 'object' && (typeof t.to.id === 'string' || typeof t.to.id === 'number')
+        ? String(t.to.id).trim()
+        : '';
+
+  if (rawToId) {
+    const cached = statusDoneCache.get(rawToId);
+    if (cached !== undefined) {
+      return cached;
+    }
+    try {
+      const resp = await api.asApp().requestJira(route`/rest/api/3/status/${rawToId}`);
+      if (resp.status === 200) {
+        const statusData = (await resp.json().catch(() => null)) as {
+          name?: string;
+          statusCategory?: { key?: string };
+        } | null;
+        const isDone = isDoneStatusLike(statusData) === true;
+        statusDoneCache.set(rawToId, isDone);
+        return isDone;
+      }
+    } catch {
+      return false;
+    }
+  }
+
+  const rawTransId = t.id ?? payload?.transitionId;
+  if (rawTransId !== undefined && rawTransId !== null && issueKey) {
+    const transIdStr = String(rawTransId).trim();
+    if (transIdStr) {
+      try {
+        const resp = await api.asApp().requestJira(route`/rest/api/3/issue/${issueKey}/transitions`);
+        if (resp.status === 200) {
+          const data = (await resp.json().catch(() => null)) as {
+            transitions?: Array<{
+              id?: string | number;
+              name?: string;
+              to?: { id?: string | number; name?: string; statusCategory?: { key?: string } };
+            }>;
+          } | null;
+          const matched = Array.isArray(data?.transitions)
+            ? data.transitions.find((item) => String(item?.id ?? '') === transIdStr)
+            : undefined;
+          if (matched) {
+            const byStatus = isDoneStatusLike(matched.to);
+            if (byStatus !== undefined) return byStatus;
+            const mName = typeof matched.name === 'string' ? matched.name.trim().toLowerCase() : '';
+            if (mName) return RELEASE_TRANSITION_NAME_RE.test(mName);
+          }
+        }
+      } catch {
+        return false;
+      }
+    }
+  }
+
+  return false;
 }
 
 function normalizeIssueKey(payload?: WorkflowValidatorPayload | null): string | undefined {
@@ -169,10 +255,14 @@ export async function workflowValidatorHandler(
     const issueKey = normalizeIssueKey(payload);
     console.log(
       '[MedTrace WorkflowValidator] Intercepting human transition attempt:',
-      issueKey || 'global'
+      issueKey || 'global',
+      JSON.stringify({
+        keys: payload && typeof payload === 'object' ? Object.keys(payload) : [],
+        transition: payload?.transition ?? null,
+      })
     );
 
-    const suite = await SeederService.getActiveComplianceSuite(
+    let suite = await SeederService.getActiveComplianceSuite(
       issueKey ? { issueKeyFilter: issueKey } : undefined
     );
 
@@ -187,7 +277,26 @@ export async function workflowValidatorHandler(
       safetyProbe = await probeUnsyncedSafetyIssue(issueKey, payload);
     }
 
-    const transitionToDone = isReleaseTransitionPayload(payload);
+    if (issueKey && isInitialized && isForgeRuntime() && isMatchedInSuite(issueKey, suite)) {
+      const cleanIssue = issueKey.trim().toUpperCase();
+      const targetPageIds = suite.traceLinks
+        .filter(
+          (l) =>
+            (l.work?.key || '').toUpperCase() === cleanIssue ||
+            (l.hazard?.key || '').toUpperCase() === cleanIssue
+        )
+        .map((l) => l.spec?.pageId)
+        .filter((p): p is string => typeof p === 'string' && p.trim().length > 0);
+      if (targetPageIds.length > 0) {
+        suite = await LiveIngestionService.reconcileConfluenceSpecs(suite, {
+          targetPageIds,
+          issueKeyFilter: issueKey,
+          allowAppFallback: true,
+        });
+      }
+    }
+
+    const transitionToDone = await resolveTransitionToDone(payload, issueKey);
     const outcome: TransitionResult = ComplianceEngine.evaluateIssueReleaseGate(
       issueKey,
       suite,

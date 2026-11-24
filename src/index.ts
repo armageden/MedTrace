@@ -661,13 +661,28 @@ function extractAuditEntryProjectKeys(entry: AuditLogEntry, index: LinkProjectIn
     }
   };
 
+  const addFromSpecOrPageKey = (val: unknown) => {
+    if (typeof val !== 'string') return;
+    const trimmed = val.trim();
+    if (!trimmed) return;
+    const mapped = index.bySpecOrPage.get(trimmed.toLowerCase());
+    if (mapped) {
+      for (const p of mapped) projects.add(p);
+    }
+  };
+
   const addFromArtifactKey = (val: unknown) => {
     if (typeof val !== 'string') return;
     const trimmed = val.trim();
     if (!trimmed) return;
+    const lower = trimmed.toLowerCase();
+    if (lower.startsWith('srs-') || lower.startsWith('page:') || lower.startsWith('unlinked-')) {
+      addFromSpecOrPageKey(trimmed);
+      return;
+    }
     const directProj = extractJiraProjectKeyFromRawKey(trimmed);
     if (directProj) projects.add(directProj);
-    const mapped = index.byKey.get(trimmed.toLowerCase()) || index.bySpecOrPage.get(trimmed.toLowerCase());
+    const mapped = index.byKey.get(lower) || index.bySpecOrPage.get(lower);
     if (mapped) {
       for (const p of mapped) projects.add(p);
     }
@@ -690,10 +705,11 @@ function extractAuditEntryProjectKeys(entry: AuditLogEntry, index: LinkProjectIn
     details.newIssueKey,
     details.createdIssueKey,
     details.issueKey,
-    details.specId,
-    details.pageId,
   ]) {
     addFromArtifactKey(field);
+  }
+  for (const specField of [details.specId, details.pageId]) {
+    addFromSpecOrPageKey(specField);
   }
   for (const arrField of [details.affectedHazards, details.affectedWorkKeys, details.linkedIssueKeys]) {
     if (Array.isArray(arrField)) {
@@ -919,7 +935,11 @@ function defineTypedResolver<K extends keyof MedTraceResolverMap & string>(
 
 defineTypedResolver('getComplianceSuite', async (req) => {
   const caller = await assertAuthorizedReader(req);
-  const suite = await SeederService.getActiveComplianceSuite({ projectKey: caller.projectKey });
+  const rawSuite = await SeederService.getActiveComplianceSuite({ projectKey: caller.projectKey });
+  const suite = await LiveIngestionService.reconcileConfluenceSpecs(rawSuite, {
+    actorAccountId: caller.accountId,
+    projectKey: caller.projectKey,
+  });
   return filterLiveSuiteForCaller(caller, suite);
 });
 
@@ -1319,7 +1339,11 @@ defineTypedResolver('analyzeBlastRadius', async (req) => {
   if (!triggerKey) {
     throw new Error('Bad Request: triggerKey is required.');
   }
-  const rawSuite = await SeederService.getActiveComplianceSuite({ projectKey: caller.projectKey });
+  const initialSuite = await SeederService.getActiveComplianceSuite({ projectKey: caller.projectKey });
+  const rawSuite = await LiveIngestionService.reconcileConfluenceSpecs(initialSuite, {
+    actorAccountId: caller.accountId,
+    projectKey: caller.projectKey,
+  });
   if (
     rawSuite.datasetMode !== 'LIVE' ||
     rawSuite.initialized === false ||

@@ -13,6 +13,7 @@ import {
 } from './seeder';
 import { TeamworkGraphService } from './teamwork-graph';
 import {
+  ComplianceSummary,
   ConfluenceSpec,
   GraphMetadata,
   IsoHazard,
@@ -84,6 +85,13 @@ export interface ConfluencePageUpdatedEvent {
   context?: { accountId?: string };
   contentHash?: string;
   storageBody?: string;
+  prefetchedPageContent?: {
+    newHash: string;
+    newVersion?: number;
+    newTitle?: string;
+    newSnippet?: string;
+  };
+  authMethod?: 'CONFLUENCE_EVENT_TRIGGER' | 'FORGE_USER_SESSION';
 }
 
 export interface ConfluencePageUpdatedResult {
@@ -1811,11 +1819,16 @@ export class LiveIngestionService {
       });
 
       if (matchingIndices.length === 0) {
+        if (isForgeRuntime()) {
+          console.log(`[MedTrace ConfluenceTrigger] Page ${pageId} matched 0 links in current KVS partition.`);
+        }
         return { processed: false, pageId, affectedHazards: [] };
       }
 
       if (!fetchedPageContent) {
-        if (isForgeRuntime()) {
+        if (event.prefetchedPageContent) {
+          fetchedPageContent = event.prefetchedPageContent;
+        } else if (isForgeRuntime()) {
           const resp = await api
             .asApp()
             .requestConfluence(route`/wiki/api/v2/pages/${pageId}?body-format=storage`);
@@ -1969,7 +1982,11 @@ export class LiveIngestionService {
         updatedLinks,
         suite.datasetMode,
         suite.projectName,
-        { initialized: suite.initialized ?? true, lastSyncedAt: suite.lastSyncedAt }
+        {
+          initialized: suite.initialized ?? true,
+          lastSyncedAt: suite.lastSyncedAt,
+          syncIncomplete: suite.syncIncomplete,
+        }
       );
 
       try {
@@ -1990,7 +2007,7 @@ export class LiveIngestionService {
               affectedWorkKeys,
               projectKeys: affectedProjectKeys,
             },
-            authMethod: 'CONFLUENCE_EVENT_TRIGGER',
+            authMethod: event.authMethod || 'CONFLUENCE_EVENT_TRIGGER',
           },
         });
         return { processed: true, pageId, affectedHazards };
@@ -2003,6 +2020,148 @@ export class LiveIngestionService {
     }
 
     throw new Error(`Failed to persist Confluence page drift for ${pageId} after ${MAX_CAS_RETRY_ATTEMPTS} attempts.`);
+  }
+
+  /**
+   * Reconciles live Confluence SRS hashes in the current product's KVS partition on read/gate paths
+   * so edits made in Confluence invalidate approvals inside Jira's separate Forge KVS partition
+   * even when `avi:confluence:updated:page` fires on Confluence's isolated partition.
+   */
+  public static async reconcileConfluenceSpecs(
+    suite: ComplianceSummary,
+    options?: {
+      targetPageIds?: string[];
+      actorAccountId?: string;
+      projectKey?: string;
+      issueKeyFilter?: string;
+      allowAppFallback?: boolean;
+    }
+  ): Promise<ComplianceSummary> {
+    if (
+      !isForgeRuntime() ||
+      suite.datasetMode !== 'LIVE' ||
+      suite.initialized === false ||
+      suite.traceLinks.length === 0
+    ) {
+      return suite;
+    }
+
+    const filterSet = options?.targetPageIds
+      ? new Set(options.targetPageIds.map((p) => p.trim()).filter(Boolean))
+      : undefined;
+
+    const linksByPageId = new Map<string, TraceLink[]>();
+    for (const link of suite.traceLinks) {
+      const pid = typeof link.spec?.pageId === 'string' ? link.spec.pageId.trim() : '';
+      if (!pid || !/^\d+$/.test(pid) || link.spec?.isMissingSentinel || link.spec?.specRestricted) {
+        continue;
+      }
+      if (filterSet && !filterSet.has(pid)) {
+        continue;
+      }
+      const existing = linksByPageId.get(pid);
+      if (existing) {
+        existing.push(link);
+      } else if (linksByPageId.size < 20) {
+        linksByPageId.set(pid, [link]);
+      }
+    }
+
+    if (linksByPageId.size === 0) {
+      return suite;
+    }
+
+    const fetchPage = async (pageId: string): Promise<ConfluencePageData | undefined> => {
+      const pageRoute = route`/wiki/api/v2/pages/${pageId}?body-format=storage`;
+      try {
+        const userResp = await api.asUser().requestConfluence(pageRoute);
+        if (userResp.status === 200) {
+          return (await userResp.json()) as ConfluencePageData;
+        }
+        return undefined;
+      } catch {
+        if (options?.allowAppFallback) {
+          try {
+            const appResp = await api.asApp().requestConfluence(pageRoute);
+            if (appResp.status === 200) {
+              return (await appResp.json()) as ConfluencePageData;
+            }
+          } catch {
+            return undefined;
+          }
+        }
+        return undefined;
+      }
+    };
+
+    const driftedPages: Array<{
+      pageId: string;
+      newHash: string;
+      newVersion: number;
+      newTitle?: string;
+      newSnippet?: string;
+    }> = [];
+
+    await Promise.all(
+      Array.from(linksByPageId.entries()).map(async ([pageId, links]) => {
+        const pageData = await fetchPage(pageId);
+        if (!pageData || typeof pageData?.body?.storage?.value !== 'string') {
+          return;
+        }
+        const bodyValue = pageData.body.storage.value;
+        const newHash = sha256Hex(bodyValue);
+        const newVersion = Number(pageData?.version?.number || 1);
+        const hasChange = links.some(
+          (l) =>
+            l.spec.sha256Hash !== newHash ||
+            (Number.isFinite(newVersion) && newVersion > 0 && l.spec.version !== newVersion)
+        );
+        if (hasChange) {
+          driftedPages.push({
+            pageId,
+            newHash,
+            newVersion,
+            newTitle: pageData.title,
+            newSnippet: stripStorageMarkup(bodyValue),
+          });
+        }
+      })
+    );
+
+    if (driftedPages.length === 0) {
+      return suite;
+    }
+
+    let updatedAny = false;
+    for (const item of driftedPages) {
+      try {
+        const res = await this.handleConfluencePageUpdated({
+          content: { id: item.pageId },
+          atlassianId: options?.actorAccountId || 'confluence-drift-reconcile',
+          prefetchedPageContent: {
+            newHash: item.newHash,
+            newVersion: item.newVersion,
+            newTitle: item.newTitle,
+            newSnippet: item.newSnippet,
+          },
+          authMethod: 'FORGE_USER_SESSION',
+        });
+        if (res.processed) {
+          updatedAny = true;
+        }
+      } catch {
+        // Non-fatal per page; remaining pages still checked
+      }
+    }
+
+    if (!updatedAny) {
+      return suite;
+    }
+
+    return SeederService.getActiveComplianceSuite({
+      ...(options?.projectKey ? { projectKey: options.projectKey } : {}),
+      ...(options?.issueKeyFilter ? { issueKeyFilter: options.issueKeyFilter } : {}),
+    });
   }
 
   /**
