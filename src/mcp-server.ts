@@ -275,6 +275,26 @@ function extractProjectKeyFromJiraKey(key?: string): string | undefined {
   return clean.split('-')[0];
 }
 
+function extractTargetProjectForRovoSync(
+  inputs: RovoActionInputs,
+  extensionScope: RovoExtensionScope
+): string | undefined {
+  if (extensionScope.projectKey) return extensionScope.projectKey;
+  for (const candidate of [inputs.issueKey, inputs.hazardKey]) {
+    if (typeof candidate !== 'string') continue;
+    const stripped = candidate.trim().toUpperCase().replace(/^(?:HAZ|TEST)-/, '');
+    const proj = extractProjectKeyFromJiraKey(stripped);
+    if (proj) return proj;
+  }
+  if (typeof inputs.prDiff === 'string') {
+    const match = inputs.prDiff.match(/\b(?:HAZ-|TEST-)?([A-Z][A-Z0-9_]{0,20})-\d+\b/i);
+    if (match?.[1] && JIRA_PROJECT_KEY_RE.test(match[1].toUpperCase())) {
+      return match[1].toUpperCase();
+    }
+  }
+  return undefined;
+}
+
 async function checkJiraBrowsePermission(target?: {
   issueKey?: string;
   projectKey?: string;
@@ -837,7 +857,21 @@ export async function rovoActionHandler(
       }
       const extensionScope = extractRovoExtensionScope(ctx, payloadCtx);
       await assertRovoUserReadAccess(accountId, extensionScope);
-      const rawSuite = await SeederService.getActiveComplianceSuite();
+      let rawSuite = await SeederService.getActiveComplianceSuite();
+      if (!rawSuite.initialized) {
+        const syncProjectKey = extractTargetProjectForRovoSync(sanitizedInputs, extensionScope);
+        if (syncProjectKey) {
+          try {
+            await LiveIngestionService.syncFromAtlassian(
+              { projectKey: syncProjectKey, callerMode: 'USER', resumeFromCursor: true },
+              accountId
+            );
+            rawSuite = await SeederService.getActiveComplianceSuite();
+          } catch (syncErr) {
+            console.warn('[MedTrace RovoAction] Scoped live auto-sync skipped:', syncErr);
+          }
+        }
+      }
       scopedAuth = await scopeSuiteForRovoCaller(rawSuite, sanitizedInputs, extensionScope);
       if (
         actionKey !== 'create-reverification-task-action' &&

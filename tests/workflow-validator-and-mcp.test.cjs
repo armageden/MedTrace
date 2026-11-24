@@ -8,6 +8,7 @@ const { workflowValidatorHandler } = require('../dist/workflow-validator');
 const { McpToolService, rovoActionHandler } = require('../dist/mcp-server');
 const indexModule = require('../dist/index');
 const { SeederService } = require('../dist/seeder');
+const { LiveIngestionService } = require('../dist/ingestion');
 const { setAuditStorageAdapter, resetInMemoryAuditStorage } = require('../dist/audit-log');
 
 const { mcpWebtriggerHandler, getNonceStore, setNonceStore, createInMemoryNonceStore } = indexModule;
@@ -1649,5 +1650,74 @@ test.describe('McpToolService & rovoActionHandler Integration Tests', () => {
       assert.deepStrictEqual(reuseMissingLinks.missingLinkKeys, ['MED-42', 'MED-10']);
       assert.match(reuseMissingLinks.message, /missing\/unverified: MED-42, MED-10/i);
     });
+  });
+
+  test.it('rovoActionHandler auto-hydrates an uninitialized Forge partition when a target project or issue key is scoped', async () => {
+    const { blockedLink } = buildSampleLinks();
+    const syncedSuite = ComplianceEngine.generateComplianceReport([blockedLink], 'LIVE', 'MED');
+    const originalSyncFromAtlassian = LiveIngestionService.syncFromAtlassian;
+    const originalGetActive = SeederService.getActiveComplianceSuite;
+    const syncCalls = [];
+    let isSynced = false;
+
+    SeederService.getActiveComplianceSuite = async () =>
+      isSynced ? syncedSuite : SeederService.getUninitializedLiveSuite();
+    LiveIngestionService.syncFromAtlassian = async (opts, actorAccountId) => {
+      syncCalls.push({ opts, actorAccountId });
+      isSynced = true;
+      return {
+        success: true,
+        summary: syncedSuite,
+        jiraIssuesScanned: 1,
+        confluencePagesScanned: 1,
+        linkedPairsFound: 1,
+        driftDetectedCount: 0,
+        lastSyncedAt: new Date().toISOString(),
+        warnings: [],
+      };
+    };
+
+    try {
+      await withForgeMocks(
+        {
+          kvsMock: createLocalMockKvs(),
+          asAppImpl: () => ({
+            requestJira: async () => makeJsonResponse(404, {}),
+          }),
+          asUserImpl: () => ({
+            requestJira: async () => makeJsonResponse(200, { active: true, permissions: { BROWSE_PROJECTS: { havePermission: true } } }),
+            requestConfluence: async () => makeJsonResponse(200, { accountId: 'acc-rovo-sync' }),
+          }),
+        },
+        async () => {
+          // 1. Unscoped call without target key stays fail-closed (no unbounded sync)
+          const emptyRes = await rovoActionHandler(
+            { actionKey: 'get-hazard-lineage-action', inputs: {} },
+            { accountId: 'acc-rovo-sync' }
+          );
+          assert.strictEqual(emptyRes.initialized, false);
+          assert.strictEqual(syncCalls.length, 0);
+
+          // 2. Scoped call (HAZ-MED-42 -> MED) auto-hydrates the uninitialized product partition as USER
+          const scopedRes = await rovoActionHandler(
+            {
+              actionKey: 'verify-iec-compliance-action',
+              inputs: { hazardKey: 'HAZ-MED-42', prDiff: 'Change impacting MED-42 bolus driver' },
+            },
+            { accountId: 'acc-rovo-sync' }
+          );
+          assert.strictEqual(syncCalls.length, 1);
+          assert.deepStrictEqual(syncCalls[0], {
+            opts: { projectKey: 'MED', callerMode: 'USER', resumeFromCursor: true },
+            actorAccountId: 'acc-rovo-sync',
+          });
+          assert.strictEqual(scopedRes.initialized, true);
+          assert.strictEqual(scopedRes.touchesSafetyCriticalCode, true);
+        }
+      );
+    } finally {
+      LiveIngestionService.syncFromAtlassian = originalSyncFromAtlassian;
+      SeederService.getActiveComplianceSuite = originalGetActive;
+    }
   });
 });
