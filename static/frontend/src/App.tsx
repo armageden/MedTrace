@@ -171,6 +171,7 @@ export const App: React.FC = () => {
   const lastFocusFetchRef = useRef(0);
   const autoSelectedForContextRef = useRef(false);
   const userToggledViewRef = useRef(false);
+  const pollPausedRef = useRef(false);
   const LARGE_WORKSPACE_MATRIX_THRESHOLD = 25;
 
   const commitSummary = useCallback((next: ComplianceSummary) => {
@@ -195,6 +196,7 @@ export const App: React.FC = () => {
       const reqSeq = ++suiteRequestSeqRef.current;
       const mutEpoch = mutationEpochRef.current;
       if (mode === 'initial') {
+        pollPausedRef.current = false;
         setIsInitialLoading(true);
       }
 
@@ -209,6 +211,7 @@ export const App: React.FC = () => {
         }
 
         if (isComplianceSummary(result)) {
+          pollPausedRef.current = false;
           if (mode === 'poll') {
             const prev = summaryRef.current;
             if (!prev || JSON.stringify(prev) !== JSON.stringify(result)) {
@@ -250,11 +253,17 @@ export const App: React.FC = () => {
         ) {
           return;
         }
+        const detail = err instanceof Error ? err.message : 'Forge bridge invoke failed';
+        if (
+          summaryRef.current === null ||
+          /auth|consent|401|403|token|session|expired|unauthor/i.test(detail)
+        ) {
+          pollPausedRef.current = true;
+        }
         if (mode === 'poll') {
           // Silent background poll preserves current verified state and any active error notices
           return;
         }
-        const detail = err instanceof Error ? err.message : 'Forge bridge invoke failed';
         if (summaryRef.current !== null) {
           setNotice({
             kind: 'warning',
@@ -331,7 +340,7 @@ export const App: React.FC = () => {
       if (typeof document !== 'undefined' && document.visibilityState !== 'visible') {
         return;
       }
-      if (activeMutationRef.current) return;
+      if (activeMutationRef.current || pollPausedRef.current) return;
       void fetchAndApplySuite('poll');
     }, 8000);
 
@@ -339,7 +348,7 @@ export const App: React.FC = () => {
       if (typeof document !== 'undefined' && document.visibilityState !== 'visible') {
         return;
       }
-      if (activeMutationRef.current) return;
+      if (activeMutationRef.current || pollPausedRef.current) return;
       const now = Date.now();
       if (now - lastFocusFetchRef.current < 1500) {
         return;

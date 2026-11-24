@@ -973,6 +973,14 @@ export async function rovoActionHandler(
             ? `Created Jira re-verification task ${created.createdIssueKey} in project ${created.projectKey} linked to ${created.linkedIssueKeys.join(', ')}.`
             : `Created Jira re-verification task ${created.createdIssueKey} in project ${created.projectKey} (no native Jira issues were linked).`;
       }
+      console.log('[MedTrace RovoAction] Completed:', {
+        actionKey,
+        success: created.success,
+        createdIssueKey: created.createdIssueKey,
+        alreadyExisted: Boolean(created.alreadyExisted),
+        fullyLinked: created.fullyLinked ?? null,
+        projectKey: created.projectKey,
+      });
       return {
         success: created.success,
         ...(created.partialSuccess ? { partialSuccess: true } : {}),
@@ -996,7 +1004,7 @@ export async function rovoActionHandler(
       const cloudId = extensionType.startsWith('confluence')
         ? contextCloudId
         : resolveConfluenceCloudId() ?? contextCloudId;
-      return await McpToolService.getHazardLineage(
+      const res = await McpToolService.getHazardLineage(
         {
           issueKey: sanitizedInputs.issueKey,
           hazardKey: sanitizedInputs.hazardKey,
@@ -1008,9 +1016,17 @@ export async function rovoActionHandler(
             }
           : undefined
       );
+      console.log('[MedTrace RovoAction] Completed:', {
+        actionKey,
+        initialized: res.initialized,
+        datasetMode: res.datasetMode,
+        found: 'found' in res ? res.found : true,
+        totalHazards: 'totalHazards' in res ? res.totalHazards : undefined,
+      });
+      return res;
     }
 
-    return await McpToolService.verifyIecCompliance(
+    const res = await McpToolService.verifyIecCompliance(
       {
         prDiff: sanitizedInputs.prDiff,
         componentName: sanitizedInputs.componentName,
@@ -1024,6 +1040,15 @@ export async function rovoActionHandler(
           }
         : undefined
     );
+    console.log('[MedTrace RovoAction] Completed:', {
+      actionKey,
+      initialized: res.initialized,
+      datasetMode: res.datasetMode,
+      configuredChecksPassed: res.configuredChecksPassed,
+      touchesSafetyCriticalCode: res.touchesSafetyCriticalCode,
+      signatureDriftDetected: res.signatureDriftDetected,
+    });
+    return res;
   } catch (err: unknown) {
     if (err instanceof RovoAuthError) {
       return { error: err.message };

@@ -917,4 +917,47 @@ describe('FE-01..FE-04 & FE-07: App races, bridge errors, confirm seed, and tran
       await screen.findByText(/Created Jira re-verification task MED-301, but failed to link: HAZ-9/i)
     ).toBeInTheDocument();
   });
+
+  it('pauses background 8s polling when initial/auth load fails and resumes on Retry Live Load', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    let suiteCalls = 0;
+    let shouldFail = true;
+    const recoveredSuite = makeSuite({ datasetMode: 'LIVE', traceLinks: [] });
+
+    mockedInvokeResolver.mockImplementation(async (key) => {
+      if (key === 'getComplianceSuite') {
+        suiteCalls += 1;
+        if (shouldFail) {
+          throw new Error('NEEDS_AUTHENTICATION_ERR: 401');
+        }
+        return recoveredSuite;
+      }
+      if (key === 'queryGraphContext') return null;
+      return null;
+    });
+
+    try {
+      render(<App />);
+      await screen.findByText(/Live compliance suite could not be loaded/i);
+      const callsAfterFailure = suiteCalls;
+
+      await act(async () => {
+        vi.advanceTimersByTime(24000);
+      });
+      expect(suiteCalls).toBe(callsAfterFailure);
+
+      shouldFail = false;
+      await user.click(screen.getByRole('button', { name: /Retry Live Load/i }));
+      await screen.findByText('PumpGuard Live');
+      const callsAfterRetry = suiteCalls;
+
+      await act(async () => {
+        vi.advanceTimersByTime(8000);
+      });
+      expect(suiteCalls).toBeGreaterThan(callsAfterRetry);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
