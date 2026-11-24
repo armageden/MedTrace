@@ -169,6 +169,51 @@ export interface GetSuiteOptions {
   projectKey?: string;
 }
 
+export interface CreateReverificationTaskParams {
+  hazardKey?: string;
+  linkId?: string;
+  issueKey?: string;
+  summary?: string;
+  reason?: string;
+  force?: boolean;
+  actorAccountId: string;
+  callerMode?: 'USER' | 'APP';
+  authMethod?: AuditAuthMethod;
+}
+
+export interface CreateReverificationTaskResult {
+  success: boolean;
+  partialSuccess?: boolean;
+  fullyLinked?: boolean;
+  linksVerified?: boolean;
+  createdIssueKey: string;
+  linkedIssueKeys: string[];
+  failedLinkKeys?: string[];
+  linkErrors?: Array<{ issueKey: string; error: string }>;
+  missingLinkKeys?: string[];
+  projectKey: string;
+  alreadyExisted?: boolean;
+  summary: ComplianceSummary;
+}
+
+const JIRA_ISSUE_KEY_PATTERN = /^[A-Z][A-Z0-9_]{0,20}-\d+$/;
+
+function extractProjectKeyFromTraceLink(link: TraceLink): string | undefined {
+  const workKey = link.work?.key?.trim().toUpperCase();
+  if (workKey && JIRA_ISSUE_KEY_PATTERN.test(workKey)) {
+    return workKey.split('-')[0];
+  }
+  const hazDerived = link.hazard?.key?.trim().toUpperCase().replace(/^HAZ-/i, '');
+  if (hazDerived && JIRA_ISSUE_KEY_PATTERN.test(hazDerived)) {
+    return hazDerived.split('-')[0];
+  }
+  const testDerived = link.test?.testKey?.trim().toUpperCase().replace(/^TEST-/i, '');
+  if (testDerived && JIRA_ISSUE_KEY_PATTERN.test(testDerived)) {
+    return testDerived.split('-')[0];
+  }
+  return undefined;
+}
+
 /**
  * Manages MedTrace compliance suite persistence, 21 CFR Part 11 sign-off workflows,
  * verification test recording, Jira issue binding, and demo fixtures.
@@ -622,6 +667,8 @@ export class SeederService {
         signatureDriftCount: meta.signatureDriftCount,
         traceLinks,
         lastAuditTimestamp: meta.lastAuditTimestamp,
+        ...(meta.lastSyncedAt ? { lastSyncedAt: meta.lastSyncedAt } : {}),
+        ...(meta.syncIncomplete === true ? { syncIncomplete: true } : {}),
         storageFormat: 'SHARDED_V2',
         auditEntryCount: auditHead.lastSeq,
         auditHeadHash: auditHead.headHash,
@@ -1037,6 +1084,8 @@ export class SeederService {
         auditEntryCount: suite.auditEntryCount,
         auditHeadHash: suite.auditHeadHash,
         initialized: true,
+        lastSyncedAt: suite.lastSyncedAt,
+        syncIncomplete: suite.syncIncomplete,
       }
     );
   }
@@ -1133,6 +1182,8 @@ export class SeederService {
       signatureDriftCount: meta.signatureDriftCount,
       traceLinks,
       lastAuditTimestamp: meta.lastAuditTimestamp,
+      ...(meta.lastSyncedAt ? { lastSyncedAt: meta.lastSyncedAt } : {}),
+      ...(meta.syncIncomplete === true ? { syncIncomplete: true } : {}),
       storageFormat: 'SHARDED_V2',
       auditEntryCount: auditHead.lastSeq,
       auditHeadHash: auditHead.headHash,
@@ -1301,6 +1352,7 @@ export class SeederService {
         part11Secret: process.env.MEDTRACE_PART11_SECRET,
         requireCryptographicSeal: true,
         requireTestEvidence: current.datasetMode === 'LIVE',
+        reverificationTaskKey: targetLink.reverificationTaskKey,
       }
     );
     evaluated.hazard.status = ComplianceEngine.deriveHazardStatus(evaluated.complianceState);
@@ -1310,7 +1362,7 @@ export class SeederService {
       current.traceLinks,
       current.datasetMode ?? 'LIVE',
       current.projectName,
-      { initialized: current.initialized ?? true }
+      { initialized: current.initialized ?? true, lastSyncedAt: current.lastSyncedAt, syncIncomplete: current.syncIncomplete }
     );
 
     return await this.commitSuiteMutation({
@@ -1320,7 +1372,12 @@ export class SeederService {
         actorAccountId,
         action: 'BIND_ISSUE',
         targetKey: targetLink.hazard.key,
-        details: { previousIssueKey, newIssueKey: targetLink.work.key },
+        details: {
+          previousIssueKey,
+          newIssueKey: targetLink.work.key,
+          workKey: targetLink.work.key,
+          projectKey: extractProjectKeyFromTraceLink(evaluated) || null,
+        },
         authMethod,
       },
     });
@@ -1396,6 +1453,7 @@ export class SeederService {
         part11Secret: process.env.MEDTRACE_PART11_SECRET,
         requireCryptographicSeal: true,
         requireTestEvidence: current.datasetMode === 'LIVE',
+        reverificationTaskKey: targetLink.reverificationTaskKey,
       }
     );
     evaluated.hazard.status = ComplianceEngine.deriveHazardStatus(evaluated.complianceState);
@@ -1405,7 +1463,7 @@ export class SeederService {
       current.traceLinks,
       current.datasetMode ?? 'LIVE',
       current.projectName,
-      { initialized: current.initialized ?? true }
+      { initialized: current.initialized ?? true, lastSyncedAt: current.lastSyncedAt, syncIncomplete: current.syncIncomplete }
     );
 
     return await this.commitSuiteMutation({
@@ -1417,6 +1475,8 @@ export class SeederService {
         targetKey: targetLink.test.testKey,
         details: {
           hazardKey: targetLink.hazard.key,
+          workKey: targetLink.work?.key || null,
+          projectKey: extractProjectKeyFromTraceLink(evaluated) || null,
           previousStatus,
           newStatus: params.status,
           evidenceUrl: targetLink.test.evidenceUrl || null,
@@ -1568,50 +1628,78 @@ export class SeederService {
       part11Secret
     );
 
-    targetLink.signature.artifactSha256 = targetLink.spec.sha256Hash;
-    targetLink.signature.isValid = true;
-    targetLink.signature.signedAt = signedAt;
-    targetLink.signature.signedBy = signedBy;
-    targetLink.signature.signedByAccountId = signedByAccountId;
-    targetLink.signature.role = role;
-    targetLink.signature.meaning = meaning;
-    targetLink.signature.authMethod = authMethod;
-    targetLink.signature.signatureAlgorithm = signatureAlgorithm;
-    targetLink.signature.signatureSeal = signatureSeal;
-    targetLink.signature.sealKeyId = 'env:MEDTRACE_PART11_SECRET';
-    if (hasHybridInput) {
-      targetLink.signature.clientPublicKeySpki = rawClientPub;
-      targetLink.signature.clientSignatureBase64 = rawClientSig;
-      targetLink.signature.clientKeyFingerprint = clientKeyFingerprint;
-    } else {
-      targetLink.signature.clientPublicKeySpki = undefined;
-      targetLink.signature.clientSignatureBase64 = undefined;
-      targetLink.signature.clientKeyFingerprint = undefined;
-    }
-    targetLink.signature.invalidatedAt = undefined;
-    targetLink.signature.invalidationReason = undefined;
-    targetLink.spec.lastSignedHash = targetLink.spec.sha256Hash;
-    targetLink.spec.isSignatureInvalidated = false;
+    const targetHazardLower = targetLink.hazard.key.trim().toLowerCase();
+    const targetSpecLower = targetLink.spec.id.trim().toLowerCase();
+    const targetPageLower = (targetLink.spec.pageId || '').trim().toLowerCase();
+    const signedHash = targetLink.spec.sha256Hash;
+    const affectedWorkKeys: string[] = [];
 
-    const evaluated = ComplianceEngine.evaluateTraceLink(
-      targetLink.hazard,
-      targetLink.spec,
-      targetLink.work,
-      targetLink.test,
-      targetLink.signature,
-      targetLink.graphMetadata,
-      {
-        linkId: targetLink.id,
-        part11Secret,
-        requireCryptographicSeal: true,
-        requireTestEvidence: current.datasetMode === 'LIVE',
+    for (let i = 0; i < current.traceLinks.length; i++) {
+      const candidate = current.traceLinks[i];
+      const sameBaseline =
+        i === idx ||
+        (candidate.hazard.key.trim().toLowerCase() === targetHazardLower &&
+          (candidate.spec.id.trim().toLowerCase() === targetSpecLower ||
+            (targetPageLower !== '' &&
+              (candidate.spec.pageId || '').trim().toLowerCase() === targetPageLower)) &&
+          candidate.spec.isMissingSentinel !== true &&
+          candidate.spec.sha256Hash === signedHash);
+
+      if (!sameBaseline) {
+        continue;
       }
-    );
-    evaluated.hazard.status = ComplianceEngine.deriveHazardStatus(evaluated.complianceState);
-    current.traceLinks[idx] = evaluated;
+
+      candidate.signature.artifactSha256 = signedHash;
+      candidate.signature.isValid = true;
+      candidate.signature.signedAt = signedAt;
+      candidate.signature.signedBy = signedBy;
+      candidate.signature.signedByAccountId = signedByAccountId;
+      candidate.signature.role = role;
+      candidate.signature.meaning = meaning;
+      candidate.signature.authMethod = authMethod;
+      candidate.signature.signatureAlgorithm = signatureAlgorithm;
+      candidate.signature.signatureSeal = signatureSeal;
+      candidate.signature.sealKeyId = 'env:MEDTRACE_PART11_SECRET';
+      if (hasHybridInput) {
+        candidate.signature.clientPublicKeySpki = rawClientPub;
+        candidate.signature.clientSignatureBase64 = rawClientSig;
+        candidate.signature.clientKeyFingerprint = clientKeyFingerprint;
+      } else {
+        candidate.signature.clientPublicKeySpki = undefined;
+        candidate.signature.clientSignatureBase64 = undefined;
+        candidate.signature.clientKeyFingerprint = undefined;
+      }
+      candidate.signature.invalidatedAt = undefined;
+      candidate.signature.invalidationReason = undefined;
+      candidate.spec.lastSignedHash = signedHash;
+      candidate.spec.isSignatureInvalidated = false;
+
+      const evaluated = ComplianceEngine.evaluateTraceLink(
+        candidate.hazard,
+        candidate.spec,
+        candidate.work,
+        candidate.test,
+        candidate.signature,
+        candidate.graphMetadata,
+        {
+          linkId: candidate.id,
+          part11Secret,
+          requireCryptographicSeal: true,
+          requireTestEvidence: current.datasetMode === 'LIVE',
+          reverificationTaskKey: candidate.reverificationTaskKey,
+        }
+      );
+      evaluated.hazard.status = ComplianceEngine.deriveHazardStatus(evaluated.complianceState);
+      current.traceLinks[i] = evaluated;
+      if (evaluated.work?.key && !affectedWorkKeys.includes(evaluated.work.key)) {
+        affectedWorkKeys.push(evaluated.work.key);
+      }
+    }
+
+    const evaluatedTarget = current.traceLinks[idx];
 
     const baselineRecord = buildSignedBaselineRecord(
-      targetLink,
+      evaluatedTarget,
       signedBy,
       signedByAccountId,
       signedAt,
@@ -1633,7 +1721,7 @@ export class SeederService {
       current.traceLinks,
       current.datasetMode ?? 'LIVE',
       current.projectName,
-      { initialized: current.initialized ?? true }
+      { initialized: current.initialized ?? true, lastSyncedAt: current.lastSyncedAt, syncIncomplete: current.syncIncomplete }
     );
 
     return await this.commitSuiteMutation({
@@ -1643,10 +1731,13 @@ export class SeederService {
       auditEntry: {
         actorAccountId: signedByAccountId,
         action: 'PART11_SIGNOFF',
-        targetKey: targetLink.hazard.key,
+        targetKey: evaluatedTarget.hazard.key,
         details: {
-          specId: targetLink.spec.id,
-          artifactSha256: targetLink.spec.sha256Hash,
+          specId: evaluatedTarget.spec.id,
+          workKey: evaluatedTarget.work?.key || null,
+          affectedWorkKeys,
+          projectKey: extractProjectKeyFromTraceLink(evaluatedTarget) || null,
+          artifactSha256: evaluatedTarget.spec.sha256Hash,
           signedBy,
           signedByAccountId,
           role,
@@ -1657,6 +1748,376 @@ export class SeederService {
         authMethod,
       },
     });
+  }
+
+  /**
+   * Creates a linked Jira re-verification task under the invoking user's permissions (`api.asUser()`)
+   * when a trace link has approval drift or verification gaps, links it to affected Jira artifacts,
+   * persists `reverificationTaskKey` on the link, and records an immutable audit trail entry.
+   */
+  static async createReverificationTask(
+    params: CreateReverificationTaskParams
+  ): Promise<CreateReverificationTaskResult> {
+    if (!isForgeRuntime()) {
+      throw new Error('SeederService.createReverificationTask requires an active Atlassian Forge runtime.');
+    }
+    const actor = (params.actorAccountId || '').trim();
+    if (!actor) {
+      throw new Error('Authenticated actorAccountId is required to create a re-verification Jira task.');
+    }
+
+    const { summary: current, version } = await this.getSuiteWithVersion();
+    if (current.datasetMode !== 'LIVE' || current.initialized === false) {
+      throw new Error(
+        'Re-verification Jira tasks can only be created on an initialized LIVE compliance suite.'
+      );
+    }
+
+    const cleanLinkId = params.linkId?.trim();
+    const cleanHazard = params.hazardKey?.trim().toLowerCase();
+    const cleanIssue = params.issueKey?.trim().toLowerCase();
+    const idx = cleanLinkId
+      ? current.traceLinks.findIndex((l) => l.id === cleanLinkId)
+      : current.traceLinks.findIndex(
+          (l) =>
+            (cleanHazard && l.hazard.key.toLowerCase() === cleanHazard) ||
+            (cleanIssue &&
+              ((l.work?.key || '').toLowerCase() === cleanIssue ||
+                (l.hazard?.key || '').toLowerCase() === cleanIssue ||
+                (l.test?.testKey || '').toLowerCase() === cleanIssue))
+        );
+
+    if (idx < 0) {
+      throw new Error(
+        `Target trace link not found (${params.linkId || params.hazardKey || params.issueKey || 'unspecified'}).`
+      );
+    }
+
+    const targetLink = current.traceLinks[idx];
+    const targetProjectKey =
+      extractProjectKeyFromTraceLink(targetLink) ||
+      (params.issueKey && JIRA_ISSUE_KEY_PATTERN.test(params.issueKey.trim().toUpperCase())
+        ? params.issueKey.trim().toUpperCase().split('-')[0]
+        : undefined);
+
+    if (!targetProjectKey) {
+      throw new Error(
+        `Cannot determine target Jira projectKey for ${targetLink.hazard.key}; bind a Jira issue first.`
+      );
+    }
+
+    const requester = params.callerMode === 'APP' ? api.asApp() : api.asUser();
+
+    // 1. Verify caller holds CREATE_ISSUES in target project
+    const permResp = await requester.requestJira(
+      route`/rest/api/3/mypermissions?projectKey=${targetProjectKey}&permissions=CREATE_ISSUES`
+    );
+    if (permResp.status !== 200) {
+      throw new Error(
+        `Forbidden: Unable to verify Jira CREATE_ISSUES permission in project ${targetProjectKey} (HTTP ${permResp.status}).`
+      );
+    }
+    const permJson = (await permResp.json().catch(() => ({}))) as {
+      permissions?: { CREATE_ISSUES?: { havePermission?: boolean } };
+    };
+    if (permJson?.permissions?.CREATE_ISSUES?.havePermission !== true) {
+      throw new Error(
+        `Forbidden: Requires Jira CREATE_ISSUES permission in project ${targetProjectKey}.`
+      );
+    }
+
+    const getCandidateLinkTargets = (excludedKey?: string): string[] => {
+      const excluded = (excludedKey || '').trim().toUpperCase();
+      const rawTargets = [
+        targetLink.work?.key,
+        targetLink.hazard?.source === 'JIRA_ISSUE' ? targetLink.hazard?.key : undefined,
+        targetLink.test?.source === 'JIRA_ISSUE' ? targetLink.test?.testKey : undefined,
+      ];
+      return Array.from(
+        new Set(
+          rawTargets
+            .map((k) => (typeof k === 'string' ? k.trim().toUpperCase() : ''))
+            .filter((k) => k && k !== excluded && JIRA_ISSUE_KEY_PATTERN.test(k))
+        )
+      );
+    };
+
+    // 1b. Open-task reuse guard: reuse an existing open re-verification Jira task and verify actual issuelinks
+    if (targetLink.reverificationTaskKey && !params.force) {
+      let existingResp: { status: number; json: () => Promise<unknown> };
+      try {
+        existingResp = await requester.requestJira(
+          route`/rest/api/3/issue/${targetLink.reverificationTaskKey}?fields=status,issuelinks`
+        );
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        throw new Error(
+          `Unable to verify status of existing re-verification task ${targetLink.reverificationTaskKey}: ${msg}`
+        );
+      }
+
+      if (existingResp.status === 200) {
+        const existingJson = (await existingResp.json().catch(() => ({}))) as {
+          fields?: {
+            status?: { name?: string; statusCategory?: { key?: string; name?: string } };
+            issuelinks?: Array<{
+              inwardIssue?: { key?: string };
+              outwardIssue?: { key?: string };
+            }>;
+          };
+        };
+        const catKey = String(existingJson?.fields?.status?.statusCategory?.key || '')
+          .trim()
+          .toLowerCase();
+        const statusName = String(existingJson?.fields?.status?.name || '')
+          .trim()
+          .toLowerCase();
+        const isClosed =
+          catKey === 'done' ||
+          statusName === 'done' ||
+          statusName === 'closed' ||
+          statusName === 'resolved';
+        if (!isClosed) {
+          const expectedTargets = getCandidateLinkTargets(targetLink.reverificationTaskKey);
+          const hasIssueLinksField = Array.isArray(existingJson?.fields?.issuelinks);
+          const actualLinkedSet = new Set<string>();
+          if (hasIssueLinksField) {
+            for (const entry of existingJson.fields!.issuelinks!) {
+              const inward = typeof entry?.inwardIssue?.key === 'string' ? entry.inwardIssue.key.trim().toUpperCase() : '';
+              const outward = typeof entry?.outwardIssue?.key === 'string' ? entry.outwardIssue.key.trim().toUpperCase() : '';
+              if (inward) actualLinkedSet.add(inward);
+              if (outward) actualLinkedSet.add(outward);
+            }
+          }
+          const linkedIssueKeys = hasIssueLinksField
+            ? expectedTargets.length > 0
+              ? expectedTargets.filter((k) => actualLinkedSet.has(k))
+              : Array.from(actualLinkedSet)
+            : [];
+          const missingLinkKeys = hasIssueLinksField
+            ? expectedTargets.filter((k) => !actualLinkedSet.has(k))
+            : expectedTargets;
+          const fullyLinked = hasIssueLinksField && missingLinkKeys.length === 0;
+          return {
+            success: fullyLinked,
+            fullyLinked,
+            linksVerified: hasIssueLinksField,
+            createdIssueKey: targetLink.reverificationTaskKey,
+            linkedIssueKeys,
+            ...(missingLinkKeys.length > 0 ? { missingLinkKeys } : {}),
+            projectKey: targetProjectKey,
+            alreadyExisted: true,
+            summary: current,
+          };
+        }
+      } else if (existingResp.status !== 404) {
+        throw new Error(
+          `Unable to verify status of existing re-verification task ${targetLink.reverificationTaskKey} (HTTP ${existingResp.status}); refusing duplicate creation.`
+        );
+      }
+    }
+
+    // 2. Resolve a valid non-subtask Jira issueType for the target project (prefer Task)
+    let issueTypeRef: { id?: string; name?: string } = { name: 'Task' };
+    try {
+      const metaResp = await requester.requestJira(
+        route`/rest/api/3/issue/createmeta/${targetProjectKey}/issuetypes`
+      );
+      if (metaResp.status === 200) {
+        const metaJson = (await metaResp.json().catch(() => ({}))) as {
+          issueTypes?: Array<{ id?: string; name?: string; subtask?: boolean }>;
+          values?: Array<{ id?: string; name?: string; subtask?: boolean }>;
+        };
+        const list = Array.isArray(metaJson.issueTypes)
+          ? metaJson.issueTypes
+          : Array.isArray(metaJson.values)
+            ? metaJson.values
+            : [];
+        const candidates = list.filter((it) => it && it.subtask !== true);
+        const preferred =
+          candidates.find((it) => String(it.name || '').toLowerCase() === 'task') ||
+          candidates.find((it) => String(it.name || '').toLowerCase() === 'story') ||
+          candidates[0];
+        if (preferred?.id) {
+          issueTypeRef = { id: String(preferred.id) };
+        } else if (preferred?.name) {
+          issueTypeRef = { name: String(preferred.name) };
+        }
+      }
+    } catch {
+      // Fall back to { name: 'Task' }
+    }
+
+    const customSummary = typeof params.summary === 'string' ? params.summary.trim() : '';
+    const issueSummary = (
+      customSummary ||
+      `[MedTrace Re-Verification] ${targetLink.hazard.key}: ${targetLink.spec.title || targetLink.work.title || targetLink.work.key}`
+    ).slice(0, 240);
+
+    const reasonText =
+      (typeof params.reason === 'string' && params.reason.trim()) ||
+      targetLink.signature.invalidationReason ||
+      targetLink.violations[0] ||
+      `Re-verification required after requirement or verification state change (${targetLink.complianceState}).`;
+
+    const descriptionParagraphs = [
+      `Automated MedTrace re-verification work item created for ${targetLink.hazard.key} (${targetLink.hazard.riskClass.replace('_', ' ')}).`,
+      `Trigger Reason: ${reasonText}`,
+      `Confluence SRS: ${targetLink.spec.title || targetLink.spec.id} (Current SHA-256: ${targetLink.spec.sha256Hash || 'none'}, Last Signed SHA-256: ${targetLink.spec.lastSignedHash || 'none'})`,
+      `Affected Jira Work Item: ${targetLink.work.key || 'Unbound'} | Verification Test: ${targetLink.test.testKey} (${targetLink.test.status})`,
+      `Action Required: Review risk mitigation, execute verification test ${targetLink.test.testKey} with https:// evidence, and re-execute Part 11 attestation sign-off in MedTrace.`,
+    ];
+
+    const createResp = await requester.requestJira(route`/rest/api/3/issue`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify({
+        fields: {
+          project: { key: targetProjectKey },
+          issuetype: issueTypeRef,
+          summary: issueSummary,
+          labels: [
+            'medtrace-reverification',
+            targetLink.hazard.riskClass.toLowerCase().replace('_', '-'),
+          ],
+          description: {
+            type: 'doc',
+            version: 1,
+            content: descriptionParagraphs.map((text) => ({
+              type: 'paragraph',
+              content: [{ type: 'text', text }],
+            })),
+          },
+        },
+      }),
+    });
+
+    if (createResp.status !== 200 && createResp.status !== 201) {
+      const errBody = await createResp.text().catch(() => '');
+      throw new Error(
+        `Failed to create Jira re-verification task in ${targetProjectKey} (HTTP ${createResp.status}): ${errBody.slice(0, 200)}`
+      );
+    }
+
+    const createdJson = (await createResp.json().catch(() => ({}))) as { key?: string; id?: string };
+    const createdIssueKey = typeof createdJson?.key === 'string' ? createdJson.key.trim().toUpperCase() : '';
+    if (!createdIssueKey) {
+      throw new Error('Jira issue creation succeeded without returning an issue key.');
+    }
+
+    // 3. Link newly created task to affected native Jira issues (work, plus native Jira hazard/test issues when source === 'JIRA_ISSUE')
+    const candidateLinkTargets = getCandidateLinkTargets(createdIssueKey);
+
+    let linkTypeName = 'Relates';
+    if (candidateLinkTargets.length > 0) {
+      try {
+        const ltResp = await requester.requestJira(route`/rest/api/3/issueLinkType`);
+        if (ltResp.status === 200) {
+          const ltJson = (await ltResp.json().catch(() => ({}))) as {
+            issueLinkTypes?: Array<{ name?: string }>;
+          };
+          const types = Array.isArray(ltJson.issueLinkTypes) ? ltJson.issueLinkTypes : [];
+          const relates = types.find((t) => String(t.name || '').toLowerCase() === 'relates');
+          if (relates?.name) {
+            linkTypeName = relates.name;
+          } else if (types[0]?.name) {
+            linkTypeName = String(types[0].name);
+          }
+        }
+      } catch {
+        // Keep 'Relates' default
+      }
+    }
+
+    const linkedIssueKeys: string[] = [];
+    const failedLinkKeys: string[] = [];
+    const linkErrors: Array<{ issueKey: string; error: string }> = [];
+    for (const targetKey of candidateLinkTargets) {
+      try {
+        const linkResp = await requester.requestJira(route`/rest/api/3/issueLink`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+          body: JSON.stringify({
+            type: { name: linkTypeName },
+            inwardIssue: { key: createdIssueKey },
+            outwardIssue: { key: targetKey },
+          }),
+        });
+        if (linkResp.status === 200 || linkResp.status === 201 || linkResp.status === 204) {
+          linkedIssueKeys.push(targetKey);
+        } else {
+          const errText = await linkResp.text().catch(() => '');
+          failedLinkKeys.push(targetKey);
+          linkErrors.push({
+            issueKey: targetKey,
+            error: `HTTP ${linkResp.status}${errText ? `: ${errText.slice(0, 120)}` : ''}`,
+          });
+        }
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        failedLinkKeys.push(targetKey);
+        linkErrors.push({ issueKey: targetKey, error: msg.slice(0, 120) });
+      }
+    }
+
+    targetLink.reverificationTaskKey = createdIssueKey;
+    const evaluated = ComplianceEngine.evaluateTraceLink(
+      targetLink.hazard,
+      targetLink.spec,
+      targetLink.work,
+      targetLink.test,
+      targetLink.signature,
+      targetLink.graphMetadata,
+      {
+        linkId: targetLink.id,
+        part11Secret: process.env.MEDTRACE_PART11_SECRET,
+        requireCryptographicSeal: true,
+        requireTestEvidence: true,
+        reverificationTaskKey: createdIssueKey,
+      }
+    );
+    evaluated.hazard.status = ComplianceEngine.deriveHazardStatus(evaluated.complianceState);
+    current.traceLinks[idx] = evaluated;
+
+    const updated = ComplianceEngine.generateComplianceReport(
+      current.traceLinks,
+      current.datasetMode ?? 'LIVE',
+      current.projectName,
+      { initialized: current.initialized ?? true, lastSyncedAt: current.lastSyncedAt, syncIncomplete: current.syncIncomplete }
+    );
+
+    const committed = await this.commitSuiteMutation({
+      summary: updated,
+      expectedVersion: version,
+      auditEntry: {
+        actorAccountId: actor,
+        action: 'CREATE_REVERIFICATION_TASK',
+        targetKey: createdIssueKey,
+        details: {
+          projectKey: targetProjectKey,
+          hazardKey: targetLink.hazard.key,
+          workKey: targetLink.work?.key || null,
+          testKey: targetLink.test?.testKey || null,
+          specId: targetLink.spec.id,
+          createdIssueKey,
+          linkedIssueKeys,
+          ...(failedLinkKeys.length > 0 ? { failedLinkKeys } : {}),
+          reason: reasonText,
+        },
+        authMethod: params.authMethod || 'FORGE_USER_SESSION',
+      },
+    });
+
+    const fullyLinked = failedLinkKeys.length === 0;
+    return {
+      success: fullyLinked,
+      ...(failedLinkKeys.length > 0 ? { partialSuccess: true, failedLinkKeys, linkErrors } : {}),
+      fullyLinked,
+      createdIssueKey,
+      linkedIssueKeys,
+      projectKey: targetProjectKey,
+      summary: committed,
+    };
   }
 
   /**

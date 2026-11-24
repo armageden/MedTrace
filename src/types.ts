@@ -8,10 +8,11 @@ export interface IsoHazard {
   title: string;
   riskClass: RiskClass;
   safetyClassAssigned?: boolean;
-  severity: 'CATASTROPHIC' | 'CRITICAL' | 'SERIOUS' | 'MINOR';
-  probability: 'FREQUENT' | 'PROBABLE' | 'OCCASIONAL' | 'REMOTE' | 'IMPROBABLE';
+  severity?: 'CATASTROPHIC' | 'CRITICAL' | 'SERIOUS' | 'MINOR';
+  probability?: 'FREQUENT' | 'PROBABLE' | 'OCCASIONAL' | 'REMOTE' | 'IMPROBABLE';
   mitigationRequirementId: string;
   status: 'MITIGATED' | 'UNVERIFIED_RISK' | 'ACTION_REQUIRED';
+  source?: 'JIRA_ISSUE' | 'APP_MANAGED';
 }
 
 export interface ConfluenceSpec {
@@ -23,6 +24,7 @@ export interface ConfluenceSpec {
   lastSignedHash: string;
   isSignatureInvalidated: boolean;
   isMissingSentinel?: boolean;
+  specRestricted?: boolean;
   contentSnippet: string;
   lastUpdated: string;
 }
@@ -47,6 +49,7 @@ export interface VerificationTest {
   evidenceUrl?: string;
   recordedBy?: string;
   notes?: string;
+  source?: 'JIRA_ISSUE' | 'APP_MANAGED';
 }
 
 export interface Part11Signature {
@@ -87,6 +90,7 @@ export interface TraceLink {
   complianceState: 'VERIFIED' | 'SAFETY_VIOLATION' | 'SIGNATURE_DRIFT' | 'INCOMPLETE';
   violations: string[];
   graphMetadata?: GraphMetadata;
+  reverificationTaskKey?: string;
 }
 
 export interface ComplianceSummary {
@@ -104,6 +108,8 @@ export interface ComplianceSummary {
   signatureDriftCount: number;
   traceLinks: TraceLink[];
   lastAuditTimestamp: string;
+  lastSyncedAt?: string;
+  syncIncomplete?: boolean;
   storageFormat?: 'SHARDED_V2' | 'SINGLE_KEY_V1';
   auditEntryCount?: number;
   auditHeadHash?: string;
@@ -143,13 +149,15 @@ export type AuditActionType =
   | 'RECORD_TEST_RESULT'
   | 'PART11_SIGNOFF'
   | 'DEMO_SIMULATION'
-  | 'CONFLUENCE_PAGE_DRIFT';
+  | 'CONFLUENCE_PAGE_DRIFT'
+  | 'CREATE_REVERIFICATION_TASK';
 
 export type AuditAuthMethod =
   | 'FORGE_USER_SESSION'
   | 'PART11_ATTESTATION'
   | 'HMAC_WEBTRIGGER'
   | 'CONFLUENCE_EVENT_TRIGGER'
+  | 'JIRA_EVENT_TRIGGER'
   | 'SYSTEM_INIT';
 
 export interface AuditLogEntry {
@@ -272,6 +280,21 @@ export interface BindIssueResponse {
   error?: string;
 }
 
+export interface CreateReverificationTaskResponse {
+  success: boolean;
+  partialSuccess?: boolean;
+  fullyLinked?: boolean;
+  linksVerified?: boolean;
+  createdIssueKey: string;
+  linkedIssueKeys: string[];
+  failedLinkKeys?: string[];
+  linkErrors?: Array<{ issueKey: string; error: string }>;
+  missingLinkKeys?: string[];
+  projectKey: string;
+  alreadyExisted?: boolean;
+  summary: ComplianceSummary;
+}
+
 export interface TransitionResult {
   result: boolean;
   errorMessage?: string;
@@ -338,6 +361,16 @@ export interface MedTraceResolverMap {
       linkId?: string;
     };
     response: BindIssueResponse;
+  };
+  createReverificationTask: {
+    payload: {
+      hazardKey?: string;
+      linkId?: string;
+      issueKey?: string;
+      summary?: string;
+      reason?: string;
+    };
+    response: CreateReverificationTaskResponse;
   };
   simulateTransition: {
     payload: {

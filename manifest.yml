@@ -36,6 +36,12 @@ modules:
       events:
         - avi:confluence:updated:page
       function: confluence-trigger-fn
+    - key: medtrace-jira-issue-updated
+      events:
+        - avi:jira:updated:issue
+        - avi:jira:created:issuelink
+        - avi:jira:deleted:issuelink
+      function: jira-trigger-fn
   rovo:agent:
     - key: medtrace-regulatory-auditor
       name: MedTrace Auditor
@@ -51,10 +57,12 @@ modules:
       actions:
         - get-hazard-lineage-action
         - verify-iec-compliance-action
+        - create-reverification-task-action
       conversationStarters:
         - Audit current sprint for traceability gaps
         - Inspect Class C hazard lineage and test status
         - Verify specification approval hash status
+        - Create re-verification task for drifted hazard
   action:
     - key: get-hazard-lineage-action
       name: Get Hazard Lineage
@@ -88,12 +96,39 @@ modules:
           type: string
           required: false
           description: Optional component or subsystem name.
+    - key: create-reverification-task-action
+      name: Create Re-Verification Task
+      description: Creates a linked Jira re-verification task for a hazard or work item affected by approval drift or traceability gaps under the caller's Jira permissions.
+      actionVerb: CREATE
+      function: rovo-action-fn
+      inputs:
+        hazardKey:
+          title: Hazard Key
+          type: string
+          required: false
+          description: Hazard key affected by signature drift or verification gap (e.g. MEDTRACE-10 or HAZ-101).
+        issueKey:
+          title: Issue Key
+          type: string
+          required: false
+          description: Jira work or test issue key to link with the re-verification task (e.g. MEDTRACE-1).
+        summary:
+          title: Task Summary
+          type: string
+          required: false
+          description: Optional custom summary for the created Jira re-verification task.
+        reason:
+          title: Drift or Gap Reason
+          type: string
+          required: false
+          description: Optional explanation of the requirement change or compliance gap triggering re-verification.
   rovo:mcp:
     - key: medtrace-mcp-server
       name: MedTrace MCP Server
       tools:
         - get-hazard-lineage-action
         - verify-iec-compliance-action
+        - create-reverification-task-action
   webtrigger:
     - key: mcp-sync-webtrigger
       function: mcp-webtrigger-fn
@@ -108,6 +143,8 @@ modules:
       handler: index.mcpWebtriggerHandler
     - key: confluence-trigger-fn
       handler: index.confluencePageUpdatedTrigger
+    - key: jira-trigger-fn
+      handler: index.jiraIssueUpdatedTrigger
 resources:
   - key: main
     path: static/frontend/dist
@@ -115,8 +152,9 @@ resources:
     path: static/icons
 permissions:
   scopes:
-    # Jira read scopes (TeamworkGraphService queries Jira REST issue metadata and remotelinks under read:jira-work)
+    # Jira read + write scopes (TeamworkGraphService / LiveIngestionService + user-scoped re-verification task creation)
     - read:jira-work
+    - write:jira-work
     - read:jira-user
     # Teamwork Graph curated query confluencePageOwners for spec owners
     - read:graph:page:confluence

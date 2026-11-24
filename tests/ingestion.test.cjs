@@ -2262,4 +2262,517 @@ test.describe('Task 1C-Ingestion: Confluence Revert Non-Resurrection & 3-Attempt
       );
     });
   });
+
+  test.it('resolves real Jira issuelinks into native Hazard and Verification Test nodes and syncs avi:jira:updated:issue', async () => {
+    const kvsMock = createFullMockForgeKvs();
+    const srsBody = '<p>Clause 4.2.1: Bolus limit 5.0 mL/hr</p>';
+
+    const workIssue = {
+      id: '10001',
+      key: 'MEDTRACE-1',
+      self: 'https://api.atlassian.com/ex/jira/11111111-1111-1111-1111-111111111111/rest/api/3/issue/10001',
+      fields: {
+        summary: 'Implement Bolus Clamp',
+        status: { name: 'In Progress', statusCategory: { key: 'indeterminate', name: 'In Progress' } },
+        assignee: { displayName: 'Dr. Lin' },
+        labels: ['class-c'],
+        issuetype: { name: 'Story' },
+        project: { key: 'MEDTRACE', name: 'MedTrace Live' },
+        issuelinks: [
+          {
+            type: { name: 'Mitigates', inward: 'is mitigated by', outward: 'mitigates' },
+            outwardIssue: {
+              id: '10010',
+              key: 'MEDTRACE-10',
+              fields: {
+                summary: 'Over-Infusion Bolus Hazard',
+                status: { name: 'Open' },
+                issuetype: { name: 'Hazard' },
+              },
+            },
+          },
+          {
+            type: { name: 'Tests', inward: 'is tested by', outward: 'tests' },
+            inwardIssue: {
+              id: '10020',
+              key: 'MEDTRACE-20',
+              fields: {
+                summary: 'HIL Over-Infusion Bench Test',
+                status: { name: 'To Do' },
+                issuetype: { name: 'Test' },
+              },
+            },
+          },
+        ],
+      },
+    };
+    const hazardIssue = {
+      id: '10010',
+      key: 'MEDTRACE-10',
+      fields: {
+        summary: 'Over-Infusion Bolus Hazard',
+        status: { name: 'Open' },
+        labels: ['class-c', 'medtrace-hazard'],
+        issuetype: { name: 'Hazard' },
+        project: { key: 'MEDTRACE', name: 'MedTrace Live' },
+        issuelinks: [],
+      },
+    };
+    const testIssue = {
+      id: '10020',
+      key: 'MEDTRACE-20',
+      fields: {
+        summary: 'HIL Over-Infusion Bench Test',
+        status: { name: 'To Do' },
+        labels: ['medtrace-test', 'hil-test'],
+        issuetype: { name: 'Test' },
+        project: { key: 'MEDTRACE', name: 'MedTrace Live' },
+        issuelinks: [],
+      },
+    };
+
+    let currentWorkStatus = 'In Progress';
+
+    const mockClient = () => ({
+      requestJira: async (routeObj) => {
+        const r = String(routeObj?.value || routeObj);
+        if (r.includes('/rest/api/3/search/jql')) {
+          return makeJsonResponse(200, { issues: [workIssue, hazardIssue, testIssue], isLast: true });
+        }
+        if (r.includes('/rest/api/3/issue/MEDTRACE-1/remotelink')) {
+          return makeJsonResponse(200, [
+            { object: { url: 'https://site.atlassian.net/wiki/spaces/MT/pages/7701', title: 'SRS-201' } },
+          ]);
+        }
+        if (r.includes('/rest/api/3/issue/MEDTRACE-1')) {
+          return makeJsonResponse(200, {
+            id: '10001',
+            key: 'MEDTRACE-1',
+            self: workIssue.self,
+            fields: {
+              ...workIssue.fields,
+              status: {
+                name: currentWorkStatus,
+                statusCategory: { key: currentWorkStatus === 'Done' ? 'done' : 'indeterminate', name: currentWorkStatus },
+              },
+            },
+          });
+        }
+        return makeJsonResponse(200, []);
+      },
+      requestConfluence: async (routeObj) => {
+        const r = String(routeObj?.value || routeObj);
+        if (r.includes('/wiki/api/v2/pages/7701')) {
+          return makeJsonResponse(200, {
+            id: '7701',
+            title: 'SRS-201 Bolus Clamp',
+            version: { number: 1, createdAt: '2026-11-10T00:00:00Z' },
+            body: { storage: { value: srsBody } },
+          });
+        }
+        return makeJsonResponse(404, {});
+      },
+    });
+
+    await withForgeMocks({ kvsMock, asUserImpl: mockClient, asAppImpl: mockClient }, async () => {
+      const syncRes = await LiveIngestionService.syncFromAtlassian(
+        { projectKey: 'MEDTRACE', callerMode: 'USER' },
+        'acc-native'
+      );
+      assert.strictEqual(syncRes.success, true);
+      assert.strictEqual(
+        syncRes.summary.traceLinks.length,
+        1,
+        'Linked Hazard MEDTRACE-10 and Test MEDTRACE-20 must not emit duplicate standalone trace links'
+      );
+      const link = syncRes.summary.traceLinks[0];
+      assert.strictEqual(link.hazard.key, 'MEDTRACE-10');
+      assert.strictEqual(link.hazard.source, 'JIRA_ISSUE');
+      assert.strictEqual(link.work.key, 'MEDTRACE-1');
+      assert.strictEqual(link.test.testKey, 'MEDTRACE-20');
+      assert.strictEqual(link.test.source, 'JIRA_ISSUE');
+      assert.strictEqual(link.test.testType, 'Automated HIL (Hardware-in-Loop)');
+      assert.ok(link.graphMetadata.hazardAri.includes(':issue/10010'));
+      assert.ok(syncRes.summary.lastSyncedAt);
+
+      // Simulate Jira issue transition event (avi:jira:updated:issue) moving MEDTRACE-1 -> Done
+      currentWorkStatus = 'Done';
+      const triggerRes = await LiveIngestionService.handleJiraIssueUpdated({
+        eventType: 'avi:jira:updated:issue',
+        issue: { key: 'MEDTRACE-1' },
+        atlassianId: 'acc-native',
+      });
+      assert.strictEqual(triggerRes.processed, true);
+      assert.strictEqual(triggerRes.issueKey, 'MEDTRACE-1');
+      assert.deepStrictEqual(triggerRes.affectedHazards, ['MEDTRACE-10']);
+
+      const refreshed = await SeederService.getActiveComplianceSuite();
+      assert.strictEqual(refreshed.traceLinks[0].work.status, 'Done');
+    });
+  });
+
+  test.it('handleJiraIssueUpdated upgrades on created issuelink and downgrades/clears removed native Hazard, Test, and Reverification links on deleted issuelink', async () => {
+    const kvsMock = createFullMockForgeKvs();
+
+    let workLinks = [];
+    const workIssue = {
+      id: '10001',
+      key: 'MEDTRACE-1',
+      self: 'https://api.atlassian.com/ex/jira/11111111-2222-3333-4444-555555555555/rest/api/3/issue/10001',
+      fields: {
+        summary: 'Pump Rate Controller',
+        status: { name: 'In Progress', statusCategory: { key: 'indeterminate', name: 'In Progress' } },
+        assignee: { displayName: 'Engineer' },
+        labels: ['class-c'],
+        issuetype: { name: 'Story' },
+        project: { key: 'MEDTRACE', name: 'MedTrace' },
+      },
+    };
+    const hazardIssue = {
+      id: '10010',
+      key: 'MEDTRACE-10',
+      self: 'https://api.atlassian.com/ex/jira/11111111-2222-3333-4444-555555555555/rest/api/3/issue/10010',
+      fields: {
+        summary: 'Over-infusion Hazard',
+        status: { name: 'Open', statusCategory: { key: 'new', name: 'To Do' } },
+        labels: ['class-c', 'medtrace-hazard'],
+        issuetype: { name: 'Hazard' },
+        project: { key: 'MEDTRACE', name: 'MedTrace' },
+        issuelinks: [],
+      },
+    };
+    const testIssue = {
+      id: '10020',
+      key: 'MEDTRACE-20',
+      self: 'https://api.atlassian.com/ex/jira/11111111-2222-3333-4444-555555555555/rest/api/3/issue/10020',
+      fields: {
+        summary: 'HIL Over-infusion Suite',
+        status: { name: 'In Progress', statusCategory: { key: 'indeterminate', name: 'In Progress' } },
+        labels: ['hil-test', 'medtrace-test'],
+        issuetype: { name: 'Test' },
+        project: { key: 'MEDTRACE', name: 'MedTrace' },
+        issuelinks: [],
+      },
+    };
+    const revIssue = {
+      id: '10030',
+      key: 'MEDTRACE-30',
+      self: 'https://api.atlassian.com/ex/jira/11111111-2222-3333-4444-555555555555/rest/api/3/issue/10030',
+      fields: {
+        summary: '[MedTrace Re-Verification] MEDTRACE-10',
+        status: { name: 'To Do', statusCategory: { key: 'new', name: 'To Do' } },
+        labels: ['medtrace-reverification'],
+        issuetype: { name: 'Task' },
+        project: { key: 'MEDTRACE', name: 'MedTrace' },
+        issuelinks: [],
+      },
+    };
+
+    const seedLink = ComplianceEngine.evaluateTraceLink(
+      {
+        id: 'haz-medtrace-1',
+        key: 'HAZ-MEDTRACE-1',
+        title: 'Pump Rate Controller',
+        riskClass: 'CLASS_C',
+        severity: 'CATASTROPHIC',
+        probability: 'OCCASIONAL',
+        mitigationRequirementId: '7701',
+        status: 'ACTION_REQUIRED',
+        source: 'APP_MANAGED',
+      },
+      {
+        id: '7701',
+        pageId: '7701',
+        title: 'SRS-201',
+        version: 1,
+        sha256Hash: sha256Hex('<p>5.0 mL/hr</p>'),
+        lastSignedHash: '',
+        isSignatureInvalidated: false,
+        contentSnippet: '5.0 mL/hr',
+        lastUpdated: '2026-11-10T00:00:00Z',
+      },
+      { id: '10001', key: 'MEDTRACE-1', title: 'Pump Rate Controller', status: 'In Progress', assignee: 'Engineer' },
+      { id: 'test-medtrace-1', testKey: 'TEST-MEDTRACE-1', title: 'Verification Test for MEDTRACE-1', testType: 'Automated HIL (Hardware-in-Loop)', status: 'UNTESTED', source: 'APP_MANAGED' },
+      { id: 'sig-1', signedBy: '', signedAt: '', role: 'QA', meaning: '', artifactSha256: '', isValid: false },
+      {
+        hazardAri: 'ari:cloud:medtrace::iso14971-hazard/HAZ-MEDTRACE-1',
+        specAri: 'ari:cloud:confluence::page/7701',
+        workAri: 'jira:issue:MEDTRACE-1',
+        edgeType: 'mitigates',
+        traversalStatus: 'LIVE (JIRA_REST)',
+      },
+      { linkId: 'link-medtrace-1', requireTestEvidence: true }
+    );
+
+    const byRef = (ref) => {
+      if (ref === '10001' || ref === 'MEDTRACE-1') {
+        return { ...workIssue, fields: { ...workIssue.fields, issuelinks: workLinks } };
+      }
+      if (ref === '10010' || ref === 'MEDTRACE-10') return hazardIssue;
+      if (ref === '10020' || ref === 'MEDTRACE-20') return testIssue;
+      if (ref === '10030' || ref === 'MEDTRACE-30') return revIssue;
+      return null;
+    };
+
+    const mockClient = () => ({
+      requestJira: async (routeObj) => {
+        const r = String(routeObj?.value_ || routeObj?.value || routeObj);
+        const m = r.match(/\/rest\/api\/3\/issue\/([^?]+)/);
+        if (m) {
+          const found = byRef(m[1]);
+          return found ? makeJsonResponse(200, found) : makeJsonResponse(404, {});
+        }
+        return makeJsonResponse(404, {});
+      },
+      requestConfluence: async () => makeJsonResponse(404, {}),
+    });
+
+    await withForgeMocks({ kvsMock, asAppImpl: mockClient }, async () => {
+      await SeederService.saveComplianceSuite(
+        ComplianceEngine.generateComplianceReport([seedLink], 'LIVE', 'Link Trigger Suite', { initialized: true }),
+        0
+      );
+
+      // 1. created:issuelink (source=10010 hazard -> destination=10001 work; plus test 10020 & reverification 10030)
+      workLinks = [
+        { type: { name: 'Mitigates', inward: 'mitigates', outward: 'is mitigated by' }, inwardIssue: hazardIssue },
+        { type: { name: 'Verification', inward: 'tests', outward: 'is verified by' }, inwardIssue: testIssue },
+        { type: { name: 'Relates', inward: 'relates to', outward: 'relates to' }, inwardIssue: revIssue },
+      ];
+      const createdRes = await LiveIngestionService.handleJiraIssueUpdated({
+        eventType: 'avi:jira:created:issuelink',
+        issueLink: { sourceIssueId: '10010', destinationIssueId: '10001' },
+        atlassianId: 'acc-trigger',
+      });
+      assert.strictEqual(createdRes.processed, true);
+      let suite = await SeederService.getActiveComplianceSuite();
+      assert.strictEqual(suite.traceLinks[0].hazard.key, 'MEDTRACE-10');
+      assert.strictEqual(suite.traceLinks[0].hazard.source, 'JIRA_ISSUE');
+      assert.strictEqual(suite.traceLinks[0].test.testKey, 'MEDTRACE-20');
+      assert.strictEqual(suite.traceLinks[0].test.source, 'JIRA_ISSUE');
+      assert.strictEqual(suite.traceLinks[0].reverificationTaskKey, 'MEDTRACE-30');
+
+      // 2. deleted:issuelink (hazard 10010 unlinked, direction source=10010, dest=10001) -> downgrades hazard to APP_MANAGED, keeps MEDTRACE-20
+      workLinks = [
+        { type: { name: 'Verification', inward: 'tests', outward: 'is verified by' }, inwardIssue: testIssue },
+        { type: { name: 'Relates', inward: 'relates to', outward: 'relates to' }, inwardIssue: revIssue },
+      ];
+      const delHazRes = await LiveIngestionService.handleJiraIssueUpdated({
+        eventType: 'avi:jira:deleted:issuelink',
+        issueLink: { sourceIssueId: '10010', destinationIssueId: '10001' },
+        atlassianId: 'acc-trigger',
+      });
+      assert.strictEqual(delHazRes.processed, true);
+      suite = await SeederService.getActiveComplianceSuite();
+      assert.strictEqual(suite.traceLinks[0].hazard.key, 'HAZ-MEDTRACE-1');
+      assert.strictEqual(suite.traceLinks[0].hazard.source, 'APP_MANAGED');
+      assert.strictEqual(suite.traceLinks[0].test.testKey, 'MEDTRACE-20');
+      assert.strictEqual(suite.traceLinks[0].reverificationTaskKey, 'MEDTRACE-30');
+
+      // 3. deleted:issuelink (reverse direction source=10001 work, dest=10020 test; reverification 10030 also removed)
+      workLinks = [];
+      const delTestRes = await LiveIngestionService.handleJiraIssueUpdated({
+        eventType: 'avi:jira:deleted:issuelink',
+        issueLink: { sourceIssueId: '10001', destinationIssueId: '10020' },
+        atlassianId: 'acc-trigger',
+      });
+      assert.strictEqual(delTestRes.processed, true);
+      suite = await SeederService.getActiveComplianceSuite();
+      assert.strictEqual(suite.traceLinks[0].test.testKey, 'TEST-MEDTRACE-1');
+      assert.strictEqual(suite.traceLinks[0].test.source, 'APP_MANAGED');
+      assert.strictEqual(suite.traceLinks[0].test.status, 'UNTESTED');
+      assert.strictEqual(suite.traceLinks[0].reverificationTaskKey, undefined);
+    });
+  });
+
+  test.it('syncFromAtlassian resumes across multi-page + mid-enrichment timeout, blocks global gate while syncIncomplete, and omits fabricated severity/probability', async () => {
+    const kvsMock = createFullMockForgeKvs();
+    const page1Issues = [
+      {
+        id: '20001',
+        key: 'RES-1',
+        fields: {
+          summary: 'Page 1 Issue 1',
+          status: { name: 'Done', statusCategory: { key: 'done' } },
+          labels: ['class-c'],
+          issuetype: { name: 'Story' },
+          project: { key: 'RES', name: 'Resume Project' },
+          issuelinks: [],
+        },
+      },
+      {
+        id: '20002',
+        key: 'RES-2',
+        fields: {
+          summary: 'Page 1 Issue 2',
+          status: { name: 'Done', statusCategory: { key: 'done' } },
+          labels: ['class-b'],
+          issuetype: { name: 'Story' },
+          project: { key: 'RES', name: 'Resume Project' },
+          issuelinks: [],
+        },
+      },
+      {
+        id: '20003',
+        key: 'RES-3',
+        fields: {
+          summary: 'Page 1 Issue 3',
+          status: { name: 'Done', statusCategory: { key: 'done' } },
+          labels: ['class-a'],
+          issuetype: { name: 'Story' },
+          project: { key: 'RES', name: 'Resume Project' },
+          issuelinks: [],
+        },
+      },
+      {
+        id: '20004',
+        key: 'RES-4',
+        fields: {
+          summary: 'Page 1 Issue 4',
+          status: { name: 'Done', statusCategory: { key: 'done' } },
+          labels: ['class-a'],
+          issuetype: { name: 'Story' },
+          project: { key: 'RES', name: 'Resume Project' },
+          issuelinks: [],
+        },
+      },
+      {
+        id: '20005',
+        key: 'RES-5',
+        fields: {
+          summary: 'Page 1 Issue 5',
+          status: { name: 'Done', statusCategory: { key: 'done' } },
+          labels: ['class-a'],
+          issuetype: { name: 'Story' },
+          project: { key: 'RES', name: 'Resume Project' },
+          issuelinks: [],
+        },
+      },
+      {
+        id: '20006',
+        key: 'RES-6',
+        fields: {
+          summary: 'Page 1 Issue 6 (unprocessed on timeout)',
+          status: { name: 'Done', statusCategory: { key: 'done' } },
+          labels: ['class-c'],
+          issuetype: { name: 'Story' },
+          project: { key: 'RES', name: 'Resume Project' },
+          issuelinks: [],
+        },
+      },
+    ];
+    const page2Issues = [
+      {
+        id: '20007',
+        key: 'RES-7',
+        fields: {
+          summary: 'Page 2 Issue 7',
+          status: { name: 'Done', statusCategory: { key: 'done' } },
+          labels: ['class-b'],
+          issuetype: { name: 'Story' },
+          project: { key: 'RES', name: 'Resume Project' },
+          issuelinks: [],
+        },
+      },
+    ];
+
+    const origDateNow = Date.now;
+    let fakeNow = 1_700_000_000_000;
+    let remoteLinksSeen = 0;
+    Date.now = () => fakeNow;
+
+    const mockClient = () => ({
+      requestJira: async (routeObj) => {
+        const r = String(routeObj?.value_ || routeObj?.value || routeObj);
+        if (r.includes('/rest/api/3/search/jql')) {
+          if (r.includes('key%20in') || r.includes('key in')) {
+            return makeJsonResponse(200, { issues: [page1Issues[5]], isLast: true });
+          }
+          if (r.includes('nextPageToken=page2-tok')) {
+            return makeJsonResponse(200, { issues: page2Issues, isLast: true });
+          }
+          return makeJsonResponse(200, {
+            issues: page1Issues,
+            nextPageToken: 'page2-tok',
+            isLast: false,
+          });
+        }
+        if (r.includes('/remotelink')) {
+          remoteLinksSeen += 1;
+          // After first enrichment batch (5 issues -> 5 remotelink calls), trigger budget timeout before batch 2 (RES-6)
+          if (remoteLinksSeen >= 5) {
+            fakeNow += 20_000;
+          }
+          return makeJsonResponse(200, [
+            {
+              object: {
+                url: 'https://example.atlassian.net/wiki/spaces/RES/pages/71001/SRS-71001',
+                title: 'SRS-71001',
+              },
+            },
+          ]);
+        }
+        return makeJsonResponse(404, {});
+      },
+      requestConfluence: async (routeObj) => {
+        const r = String(routeObj?.value_ || routeObj?.value || routeObj);
+        if (r.includes('/wiki/api/v2/pages/71001')) {
+          return makeJsonResponse(200, {
+            id: '71001',
+            title: 'SRS-71001: Bolus Limit',
+            version: { number: 1, createdAt: '2026-11-20T00:00:00Z' },
+            body: { storage: { value: '<p>Limit 5.0 mL/hr</p>' } },
+          });
+        }
+        return makeJsonResponse(200, { results: [] });
+      },
+    });
+
+    try {
+      await withForgeMocks({ kvsMock, asUserImpl: mockClient }, async () => {
+        // 1. Initial sync (maxIssues: 6) fetches page 1 + receives page2-tok, times out mid-enrichment before RES-6
+        const firstRun = await LiveIngestionService.syncFromAtlassian(
+          { projectKey: 'RES', maxIssues: 6, callerMode: 'USER' },
+          'acc-res'
+        );
+        assert.strictEqual(firstRun.truncated, true);
+        assert.strictEqual(firstRun.summary.syncIncomplete, true);
+        assert.deepStrictEqual(
+          firstRun.summary.traceLinks.map((l) => l.work.key).sort(),
+          ['RES-1', 'RES-2', 'RES-3', 'RES-4', 'RES-5']
+        );
+
+        // Ingested live hazards must NOT fabricate severity or probability
+        assert.strictEqual(firstRun.summary.traceLinks[0].hazard.severity, undefined);
+        assert.strictEqual(firstRun.summary.traceLinks[0].hazard.probability, undefined);
+
+        // Global release gate remains blocked while syncIncomplete === true
+        const globalGate = ComplianceEngine.evaluateIssueReleaseGate(undefined, firstRun.summary);
+        assert.strictEqual(globalGate.result, false);
+        assert.match(globalGate.errorMessage || '', /synchronization is incomplete|Resume Sync/i);
+
+        const savedCursor = kvsMock.store.get('medtrace:ingestion:cursor:RES');
+        assert.strictEqual(savedCursor?.nextPageToken, 'page2-tok');
+        assert.deepStrictEqual(savedCursor?.pendingIssueKeys, ['RES-6']);
+
+        // 2. Resume Sync finishes pending RES-6 + page 2 RES-7, clears cursor & syncIncomplete
+        fakeNow = 1_700_000_000_000;
+        remoteLinksSeen = -100; // no timeout on resumed run
+        const resumedRun = await LiveIngestionService.syncFromAtlassian(
+          { projectKey: 'RES', resumeFromCursor: true, callerMode: 'USER' },
+          'acc-res'
+        );
+        assert.strictEqual(resumedRun.truncated, false);
+        assert.strictEqual(resumedRun.resumedFromCursor, true);
+        assert.strictEqual(resumedRun.summary.syncIncomplete, undefined);
+        assert.strictEqual(kvsMock.store.has('medtrace:ingestion:cursor:RES'), false);
+        assert.deepStrictEqual(
+          resumedRun.summary.traceLinks.map((l) => l.work.key).sort(),
+          ['RES-1', 'RES-2', 'RES-3', 'RES-4', 'RES-5', 'RES-6', 'RES-7']
+        );
+      });
+    } finally {
+      Date.now = origDateNow;
+    }
+  });
 });

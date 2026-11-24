@@ -19,6 +19,7 @@ export interface AuditHeaderProps {
   onToggleView: (view: 'graph' | 'table') => void;
   onSeed: () => void;
   onSyncLive: () => void;
+  onResumeSync?: () => void;
   onOpenAuditLog: () => void;
   onOpenExport: () => void;
   onTestTransition: () => void;
@@ -38,6 +39,7 @@ export const AuditHeader: React.FC<AuditHeaderProps> = ({
   onToggleView,
   onSeed,
   onSyncLive,
+  onResumeSync,
   onOpenAuditLog,
   onOpenExport,
   onTestTransition,
@@ -57,13 +59,32 @@ export const AuditHeader: React.FC<AuditHeaderProps> = ({
   const compact = isCompactPanel ?? panelContext.isCompactPanel;
   const mutationBusy = Boolean(isBusy || isMutating || isSeeding || isSyncingLive);
   const isLive = summary.datasetMode === 'LIVE';
+  const isSyncIncomplete = isLive && summary.syncIncomplete === true;
   const isUninitialized = summary.initialized === false || summary.totalHazards === 0;
-  const verifiedCount = summary.traceLinks.filter((l) => l.complianceState === 'VERIFIED').length;
+  const verifiedCount = (() => {
+    const hazMap = new Map<string, boolean>();
+    for (const link of summary.traceLinks) {
+      const k = (link.hazard?.key || link.hazard?.id || link.id || '').trim().toUpperCase();
+      const ok = link.complianceState === 'VERIFIED';
+      hazMap.set(k, (hazMap.get(k) ?? true) && ok);
+    }
+    let count = 0;
+    for (const ok of hazMap.values()) {
+      if (ok) count++;
+    }
+    return count;
+  })();
   const invalidSigCount = summary.traceLinks.filter((l) => !l.signature?.isValid).length;
   const driftCount = summary.signatureDriftCount;
   const unsignedOrInvalidCount = Math.max(0, invalidSigCount - driftCount);
   const blockingCount = summary.blockingReasons.length;
   const gateBlocked = isUninitialized || summary.releaseBlocked;
+  const snapshotLabel = (() => {
+    const raw = summary.lastSyncedAt || (isLive ? summary.lastAuditTimestamp : undefined);
+    if (!raw) return null;
+    const parsed = new Date(raw);
+    return Number.isNaN(parsed.getTime()) ? raw : parsed.toLocaleString();
+  })();
 
   useEffect(() => {
     if (!compact && isActionsMenuOpen) {
@@ -215,20 +236,39 @@ export const AuditHeader: React.FC<AuditHeaderProps> = ({
                   {isLive ? 'UNINITIALIZED (NO DATA)' : 'DEMO — UNINITIALIZED (NO DATA)'}
                 </span>
               ) : isLive ? (
-                <span
-                  style={{
-                    padding: '1px 7px',
-                    borderRadius: 3,
-                    background: 'var(--mt-success-bg)',
-                    border: '1px solid var(--mt-success-border)',
-                    color: 'var(--mt-success-text)',
-                    fontWeight: 800,
-                    fontSize: 9,
-                    letterSpacing: '0.4px',
-                  }}
-                >
-                  LIVE ATLASSIAN DATA
-                </span>
+                <>
+                  <span
+                    style={{
+                      padding: '1px 7px',
+                      borderRadius: 3,
+                      background: 'var(--mt-success-bg)',
+                      border: '1px solid var(--mt-success-border)',
+                      color: 'var(--mt-success-text)',
+                      fontWeight: 800,
+                      fontSize: 9,
+                      letterSpacing: '0.4px',
+                    }}
+                  >
+                    LIVE ATLASSIAN SNAPSHOT{snapshotLabel ? ` • ${snapshotLabel}` : ''}
+                  </span>
+                  {isSyncIncomplete && (
+                    <span
+                      style={{
+                        padding: '1px 7px',
+                        borderRadius: 3,
+                        background: 'var(--mt-warning-bg)',
+                        border: '1px solid var(--mt-warning-border)',
+                        color: 'var(--mt-warning-text)',
+                        fontWeight: 800,
+                        fontSize: 9,
+                        letterSpacing: '0.4px',
+                      }}
+                      title="Live sync was truncated before completing. Global release gate remains blocked until Resume Sync finishes."
+                    >
+                      SYNC INCOMPLETE — GLOBAL GATE BLOCKED
+                    </span>
+                  )}
+                </>
               ) : (
                 <span
                   style={{
@@ -303,6 +343,23 @@ export const AuditHeader: React.FC<AuditHeaderProps> = ({
                 <RefreshCw size={14} />
                 {isSyncingLive ? 'Syncing Tenant...' : 'Sync Live Atlassian'}
               </button>
+
+              {isSyncIncomplete && onResumeSync && (
+                <button
+                  type="button"
+                  onClick={onResumeSync}
+                  disabled={mutationBusy}
+                  className="mt-btn"
+                  style={{
+                    border: '1.5px solid var(--mt-warning-border)',
+                    background: 'var(--mt-warning-bg)',
+                    color: 'var(--mt-warning-text)',
+                  }}
+                >
+                  <RefreshCw size={14} />
+                  {isSyncingLive ? 'Resuming...' : 'Resume Sync'}
+                </button>
+              )}
 
               <button
                 type="button"
@@ -402,6 +459,19 @@ export const AuditHeader: React.FC<AuditHeaderProps> = ({
                     <RefreshCw size={14} />
                     {isSyncingLive ? 'Syncing Tenant...' : 'Sync Live Atlassian'}
                   </button>
+                  {isSyncIncomplete && onResumeSync && (
+                    <button
+                      type="button"
+                      role="menuitem"
+                      disabled={mutationBusy}
+                      onClick={() => runMenuAction(onResumeSync)}
+                      className="mt-btn"
+                      style={menuItemStyle}
+                    >
+                      <RefreshCw size={14} />
+                      {isSyncingLive ? 'Resuming...' : 'Resume Sync'}
+                    </button>
+                  )}
                   <button
                     type="button"
                     role="menuitem"
@@ -499,7 +569,11 @@ export const AuditHeader: React.FC<AuditHeaderProps> = ({
               {summary.verifiedPercentage}%
             </span>
             <span style={{ fontSize: 11, color: 'var(--mt-text-muted)' }}>
-              ({verifiedCount}/{summary.totalHazards} Hazards)
+              ({verifiedCount}/{summary.totalHazards} Hazards
+              {summary.traceLinks.length !== summary.totalHazards
+                ? ` • ${summary.traceLinks.length} Links`
+                : ''}
+              )
             </span>
           </div>
         </div>
@@ -548,7 +622,7 @@ export const AuditHeader: React.FC<AuditHeaderProps> = ({
               <>
                 <ShieldCheck size={18} color="var(--mt-success-text)" />
                 <span style={{ fontSize: 13, fontWeight: 800, color: 'var(--mt-success-text)' }}>
-                  AUDIT READY (ZERO GAPS)
+                  CONFIGURED CHECKS PASSED
                 </span>
               </>
             )}

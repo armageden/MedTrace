@@ -620,7 +620,7 @@ test.describe('McpToolService & rovoActionHandler Integration Tests', () => {
     // Whitespace lookupKey falls back to full project summary
     const summaryRes = await McpToolService.getHazardLineage({ issueKey: '   ' });
     assert.strictEqual(summaryRes.initialized, true);
-    assert.strictEqual(summaryRes.totalHazards, 4);
+    assert.strictEqual(summaryRes.totalHazards, 3);
     assert.strictEqual(summaryRes.traceLinks.length, 4);
 
     // Unknown key surfaces availableKeys
@@ -751,6 +751,7 @@ test.describe('McpToolService & rovoActionHandler Integration Tests', () => {
     assert.deepStrictEqual(unknownRes.availableTools, [
       'get-hazard-lineage-action',
       'verify-iec-compliance-action',
+      'create-reverification-task-action',
     ]);
 
     const { blockedLink, verifiedLink } = buildSampleLinks();
@@ -1034,5 +1035,580 @@ test.describe('McpToolService & rovoActionHandler Integration Tests', () => {
       if (origRuntime === undefined) delete globalThis.__forge_runtime__;
       else globalThis.__forge_runtime__ = origRuntime;
     }
+  });
+
+  test.it('rovoActionHandler supports create-reverification-task-action with CREATE_ISSUES RBAC and Jira issue linking', async () => {
+    const kvsMock = createLocalMockKvs();
+    const { blockedLink } = buildSampleLinks();
+    const liveSuite = ComplianceEngine.generateComplianceReport([blockedLink], 'LIVE', 'Live Pump', {
+      initialized: true,
+    });
+
+    const createdPayloads = [];
+    const linkPayloads = [];
+    let allowCreate = true;
+
+    const asUserImpl = () => ({
+      requestJira: async (routeObj, opts) => {
+        const url = String(routeObj?.value_ || routeObj || '');
+        if (url.startsWith('/rest/api/3/mypermissions')) {
+          return makeJsonResponse(200, {
+            permissions: {
+              BROWSE_PROJECTS: { havePermission: true },
+              EDIT_ISSUES: { havePermission: true },
+              CREATE_ISSUES: { havePermission: allowCreate },
+            },
+          });
+        }
+        if (url === '/rest/api/3/issue/MED-150?fields=status,issuelinks') {
+          return makeJsonResponse(200, {
+            id: '50001',
+            key: 'MED-150',
+            fields: {
+              status: { name: 'To Do', statusCategory: { key: 'new', name: 'To Do' } },
+              issuelinks: [{ outwardIssue: { key: 'MED-42' } }],
+            },
+          });
+        }
+        if (url === '/rest/api/3/issue/createmeta/MED/issuetypes') {
+          return makeJsonResponse(200, { issueTypes: [{ id: '10002', name: 'Task', subtask: false }] });
+        }
+        if (url === '/rest/api/3/issue' && opts?.method === 'POST') {
+          createdPayloads.push(JSON.parse(opts.body));
+          return makeJsonResponse(201, { id: '50001', key: 'MED-150' });
+        }
+        if (url === '/rest/api/3/issueLinkType') {
+          return makeJsonResponse(200, { issueLinkTypes: [{ name: 'Relates' }] });
+        }
+        if (url === '/rest/api/3/issueLink' && opts?.method === 'POST') {
+          linkPayloads.push(JSON.parse(opts.body));
+          return makeJsonResponse(201, {});
+        }
+        return makeJsonResponse(404, {});
+      },
+    });
+
+    await withForgeMocks({ kvsMock, asUserImpl }, async () => {
+      await SeederService.saveComplianceSuite(liveSuite, 0);
+
+      // 1. Fails closed when caller lacks CREATE_ISSUES
+      allowCreate = false;
+      const denied = await rovoActionHandler(
+        {
+          actionKey: 'create-reverification-task-action',
+          inputs: { hazardKey: 'HAZ-101', issueKey: 'MED-42' },
+        },
+        { accountId: 'acc-rovo-no-create', extension: { type: 'jira:projectPage', project: { key: 'MED' } } }
+      );
+      assert.match(denied.error, /CREATE_ISSUES/);
+
+      // 2. Creates and links MED-150 when authorized
+      allowCreate = true;
+      const created = await rovoActionHandler(
+        {
+          actionKey: 'create-reverification-task-action',
+          inputs: { hazardKey: 'HAZ-101', issueKey: 'MED-42', reason: 'SRS-104 drift 5.0 -> 5.5' },
+        },
+        { accountId: 'acc-rovo-op', extension: { type: 'jira:projectPage', project: { key: 'MED' } } }
+      );
+      assert.strictEqual(created.success, true);
+      assert.strictEqual(created.createdIssueKey, 'MED-150');
+      assert.deepStrictEqual(created.linkedIssueKeys, ['MED-42']);
+      assert.strictEqual(createdPayloads.length, 1);
+      assert.strictEqual(linkPayloads.length, 1);
+
+      // 3. Reuses open MED-150 idempotently on repeat invocation without creating a duplicate Jira issue
+      const reused = await rovoActionHandler(
+        {
+          actionKey: 'create-reverification-task-action',
+          inputs: { hazardKey: 'HAZ-101', issueKey: 'MED-42' },
+        },
+        { accountId: 'acc-rovo-op', extension: { type: 'jira:projectPage', project: { key: 'MED' } } }
+      );
+      assert.strictEqual(reused.success, true);
+      assert.strictEqual(reused.createdIssueKey, 'MED-150');
+      assert.strictEqual(reused.alreadyExisted, true);
+      assert.strictEqual(createdPayloads.length, 1);
+    });
+  });
+
+  test.it('rovoActionHandler blocks secondary-artifact IDOR across work/hazard/test projects and redacts restricted Confluence pages', async () => {
+    const kvsMock = createLocalMockKvs();
+    const { ComplianceEngine } = require('../dist/compliance-engine');
+
+    const crossProjectLink = ComplianceEngine.evaluateTraceLink(
+      {
+        id: 'haz-med-10',
+        key: 'MED-10',
+        title: 'Secret MED-10 Hazard',
+        riskClass: 'CLASS_C',
+        severity: 'CATASTROPHIC',
+        probability: 'REMOTE',
+        mitigationRequirementId: 'srs-999',
+        status: 'ACTION_REQUIRED',
+        source: 'JIRA_ISSUE',
+      },
+      {
+        id: 'srs-999',
+        pageId: '999',
+        title: 'Confidential Restricted SRS-999',
+        version: 3,
+        sha256Hash: 'f'.repeat(64),
+        lastSignedHash: 'f'.repeat(64),
+        isSignatureInvalidated: false,
+        contentSnippet: 'ULTRA_SECRET_CONFLUENCE_EXCERPT',
+        lastUpdated: '2026-11-20T00:00:00Z',
+      },
+      {
+        id: 'w-acme-1',
+        key: 'ACME-1',
+        title: 'ACME Firmware Feature',
+        status: 'In Progress',
+        assignee: 'Alice',
+      },
+      {
+        id: 't-qa-11',
+        testKey: 'QA-11',
+        title: 'QA-11 HIL Test',
+        testType: 'Automated HIL (Hardware-in-Loop)',
+        status: 'UNTESTED',
+        source: 'JIRA_ISSUE',
+      },
+      {
+        id: 'sig-1',
+        signedBy: '',
+        signedAt: '',
+        role: 'QA',
+        meaning: '',
+        artifactSha256: '',
+        isValid: false,
+      },
+      undefined,
+      { linkId: 'link-cross-1', requireTestEvidence: true }
+    );
+
+    const sameProjRestrictedConfLink = ComplianceEngine.evaluateTraceLink(
+      {
+        id: 'haz-acme-2',
+        key: 'HAZ-ACME-2',
+        title: 'ACME-2 Hazard',
+        riskClass: 'CLASS_A',
+        severity: 'MINOR',
+        probability: 'REMOTE',
+        mitigationRequirementId: 'srs-999',
+        status: 'UNVERIFIED_RISK',
+      },
+      {
+        id: 'srs-999',
+        pageId: '999',
+        title: 'Confidential Restricted SRS-999',
+        version: 3,
+        sha256Hash: 'f'.repeat(64),
+        lastSignedHash: 'f'.repeat(64),
+        isSignatureInvalidated: false,
+        contentSnippet: 'ULTRA_SECRET_CONFLUENCE_EXCERPT',
+        lastUpdated: '2026-11-20T00:00:00Z',
+      },
+      {
+        id: 'w-acme-2',
+        key: 'ACME-2',
+        title: 'ACME Restricted Spec Issue',
+        status: 'Done',
+        assignee: 'Bob',
+      },
+      {
+        id: 't-acme-2',
+        testKey: 'TEST-ACME-2',
+        title: 'Test ACME-2',
+        testType: 'Unit Test',
+        status: 'PASSED',
+        evidenceUrl: 'https://ci.example/acme-2',
+        executionDate: '2026-11-20T00:00:00Z',
+      },
+      {
+        id: 'sig-2',
+        signedBy: '',
+        signedAt: '',
+        role: 'QA',
+        meaning: '',
+        artifactSha256: '',
+        isValid: false,
+      },
+      undefined,
+      { linkId: 'link-acme-2', requireTestEvidence: true }
+    );
+
+    const suite = ComplianceEngine.generateComplianceReport(
+      [crossProjectLink, sameProjRestrictedConfLink],
+      'LIVE',
+      'Multi-Permission Suite',
+      { initialized: true }
+    );
+
+    const deniedProjects = new Set(['MED', 'QA']);
+    const asUserImpl = () => ({
+      requestJira: async (routeObj) => {
+        const url = String(routeObj?.value_ || routeObj || '');
+        const match = url.match(/(?:projectKey|issueKey)=([A-Z0-9_-]+)/i);
+        const keyOrProj = match ? match[1].toUpperCase().split('-')[0] : '';
+        const allowed = !keyOrProj || !deniedProjects.has(keyOrProj);
+        return makeJsonResponse(200, {
+          active: true,
+          permissions: { BROWSE_PROJECTS: { havePermission: allowed } },
+        });
+      },
+      requestConfluence: async (routeObj) => {
+        const url = String(routeObj?.value_ || routeObj || '');
+        if (url === '/wiki/rest/api/user/current') {
+          return makeJsonResponse(200, { accountId: 'acc-acme-only' });
+        }
+        if (url.includes('/wiki/api/v2/pages/999')) {
+          return makeJsonResponse(403, { message: 'Forbidden page' });
+        }
+        return makeJsonResponse(200, {});
+      },
+    });
+
+    await withForgeMocks({ kvsMock, asUserImpl }, async () => {
+      await SeederService.saveComplianceSuite(suite, 0);
+
+      // 1. Caller can browse ACME-1, but NOT linked hazard MED-10 or test QA-11 -> fails closed
+      const directAcme = await rovoActionHandler(
+        { issueKey: 'ACME-1' },
+        { moduleKey: 'get-hazard-lineage-action', accountId: 'acc-acme-only', extension: { type: 'jira:globalPage' } }
+      );
+      assert.match(directAcme.error, /Forbidden.*(?:MED-10|QA-11)/i);
+
+      const directMedHazard = await rovoActionHandler(
+        { hazardKey: 'MED-10' },
+        { moduleKey: 'get-hazard-lineage-action', accountId: 'acc-acme-only', extension: { type: 'jira:globalPage' } }
+      );
+      assert.match(directMedHazard.error, /Forbidden/i);
+
+      const diffAcme = await rovoActionHandler(
+        { prDiff: 'fix bug in ACME-1' },
+        { moduleKey: 'verify-iec-compliance-action', accountId: 'acc-acme-only', extension: { type: 'jira:globalPage' } }
+      );
+      assert.match(diffAcme.error, /Forbidden/i);
+
+      // 2. Unfiltered summary drops ACME-1 (secondary MED/QA IDOR), keeps ACME-2, AND redacts restricted page 999
+      const summary = await rovoActionHandler(
+        {},
+        { moduleKey: 'get-hazard-lineage-action', accountId: 'acc-acme-only', extension: { type: 'jira:globalPage' } }
+      );
+      assert.strictEqual(summary.traceLinks.length, 1);
+      assert.strictEqual(summary.traceLinks[0].workKey, 'ACME-2');
+      assert.ok(!JSON.stringify(summary).includes('ULTRA_SECRET_CONFLUENCE_EXCERPT'));
+      assert.ok(!JSON.stringify(summary).includes('Confidential Restricted SRS-999'));
+
+      const acme2Lineage = await rovoActionHandler(
+        { issueKey: 'ACME-2' },
+        { moduleKey: 'get-hazard-lineage-action', accountId: 'acc-acme-only', extension: { type: 'jira:projectPage', project: { key: 'ACME' } } }
+      );
+      assert.strictEqual(acme2Lineage.found, true);
+      assert.strictEqual(acme2Lineage.spec.specRestricted, true);
+      assert.strictEqual(acme2Lineage.spec.title, 'Restricted Confluence Specification');
+      assert.strictEqual(acme2Lineage.spec.sha256Hash, '');
+      assert.strictEqual(acme2Lineage.signature.artifactSha256, '');
+      assert.strictEqual(acme2Lineage.safetyRequirement, 'Restricted Confluence Specification');
+      assert.ok(!JSON.stringify(acme2Lineage).includes('ULTRA_SECRET_CONFLUENCE_EXCERPT'));
+      assert.strictEqual(acme2Lineage.specOwners, undefined);
+
+      // Verify restricted Confluence spec does not manufacture signatureDriftDetected in verify-iec-compliance
+      const acme2Verify = await rovoActionHandler(
+        { issueKey: 'ACME-2' },
+        { moduleKey: 'verify-iec-compliance-action', accountId: 'acc-acme-only', extension: { type: 'jira:projectPage', project: { key: 'ACME' } } }
+      );
+      assert.ok(!JSON.stringify(acme2Verify).includes('Confidential Restricted SRS-999'));
+      assert.ok(!JSON.stringify(acme2Verify).includes('ffffff'));
+    });
+  });
+
+  test.it('workflowValidatorHandler evaluates Under Review -> Done transition-aware rules and blocks incomplete sync globally', async () => {
+    const prevSecret = process.env.MEDTRACE_PART11_SECRET;
+    process.env.MEDTRACE_PART11_SECRET = 'wf-transition-secret-001';
+    try {
+      const specHash = 'e'.repeat(64);
+      const signedAt = '2026-11-20T12:00:00Z';
+      const validSeal = ComplianceEngine.computePart11Seal(
+        {
+          hazardKey: 'HAZ-REV-1',
+          specId: 'srs-rev-1',
+          artifactSha256: specHash,
+          signedByAccountId: 'acc-qa',
+          signedBy: 'Dr. QA',
+          role: 'QA Lead',
+          meaning: 'Approved SRS',
+          signedAt,
+          authMethod: 'PART11_ATTESTATION',
+        },
+        process.env.MEDTRACE_PART11_SECRET
+      );
+      const baseHazard = {
+        id: 'haz-rev-1',
+        key: 'HAZ-REV-1',
+        title: 'Bolus Limit',
+        riskClass: 'CLASS_C',
+        mitigationRequirementId: 'srs-rev-1',
+        status: 'ACTION_REQUIRED',
+      };
+      const baseSpec = {
+        id: 'srs-rev-1',
+        pageId: '99101',
+        title: 'SRS-99101',
+        version: 2,
+        sha256Hash: specHash,
+        lastSignedHash: specHash,
+        isSignatureInvalidated: false,
+        contentSnippet: 'Limit 5.0 mL/hr',
+        lastUpdated: '2026-11-20T11:00:00Z',
+      };
+      const underReviewWork = {
+        id: 'w-rev-1',
+        key: 'MED-REV-1',
+        title: 'Bolus Implementation',
+        status: 'Under Review',
+        assignee: 'Dev',
+      };
+      const validTest = {
+        id: 't-rev-1',
+        testKey: 'TEST-REV-1',
+        title: 'HIL Test',
+        testType: 'Automated HIL (Hardware-in-Loop)',
+        status: 'PASSED',
+        evidenceUrl: 'https://ci.example/runs/rev-1',
+        executionDate: '2026-11-20T11:30:00Z',
+      };
+      const validSig = {
+        id: 'sig-rev-1',
+        signedBy: 'Dr. QA',
+        signedByAccountId: 'acc-qa',
+        signedAt,
+        role: 'QA Lead',
+        meaning: 'Approved SRS',
+        artifactSha256: specHash,
+        isValid: true,
+        authMethod: 'PART11_ATTESTATION',
+        signatureAlgorithm: 'HMAC-SHA256-SEAL-V1',
+        signatureSeal: validSeal,
+      };
+      const evalOpts = {
+        part11Secret: process.env.MEDTRACE_PART11_SECRET,
+        requireCryptographicSeal: true,
+        requireTestEvidence: true,
+      };
+
+      const compliantUnderReview = ComplianceEngine.evaluateTraceLink(
+        baseHazard,
+        baseSpec,
+        underReviewWork,
+        validTest,
+        validSig,
+        undefined,
+        evalOpts
+      );
+      const missingEvidenceUnderReview = ComplianceEngine.evaluateTraceLink(
+        { ...baseHazard, id: 'haz-rev-2', key: 'HAZ-REV-2' },
+        baseSpec,
+        { ...underReviewWork, id: 'w-rev-2', key: 'MED-REV-2' },
+        { ...validTest, evidenceUrl: undefined },
+        validSig,
+        undefined,
+        evalOpts
+      );
+      const invalidSigUnderReview = ComplianceEngine.evaluateTraceLink(
+        { ...baseHazard, id: 'haz-rev-3', key: 'HAZ-REV-3' },
+        baseSpec,
+        { ...underReviewWork, id: 'w-rev-3', key: 'MED-REV-3' },
+        validTest,
+        { ...validSig, signatureSeal: 'bad-seal' },
+        undefined,
+        evalOpts
+      );
+      const unclassifiedSeal = ComplianceEngine.computePart11Seal(
+        {
+          hazardKey: 'HAZ-REV-4',
+          specId: 'srs-rev-1',
+          artifactSha256: specHash,
+          signedByAccountId: 'acc-qa',
+          signedBy: 'Dr. QA',
+          role: 'QA Lead',
+          meaning: 'Approved SRS',
+          signedAt,
+          authMethod: 'PART11_ATTESTATION',
+        },
+        process.env.MEDTRACE_PART11_SECRET
+      );
+      const unclassifiedUnderReview = ComplianceEngine.evaluateTraceLink(
+        { ...baseHazard, id: 'haz-rev-4', key: 'HAZ-REV-4', safetyClassAssigned: false },
+        baseSpec,
+        { ...underReviewWork, id: 'w-rev-4', key: 'MED-REV-4' },
+        validTest,
+        { ...validSig, signatureSeal: unclassifiedSeal },
+        undefined,
+        evalOpts
+      );
+
+      const suite = ComplianceEngine.generateComplianceReport(
+        [compliantUnderReview, missingEvidenceUnderReview, invalidSigUnderReview, unclassifiedUnderReview],
+        'LIVE',
+        'Transition Suite',
+        { initialized: true }
+      );
+      SeederService.getActiveComplianceSuite = async () => suite;
+
+      const toDonePayload = (key) => ({
+        issue: { key },
+        transition: {
+          name: 'Done',
+          from: { name: 'Under Review', statusCategory: { key: 'indeterminate' } },
+          to: { name: 'Done', statusCategory: { key: 'done' } },
+        },
+      });
+
+      // 1. Valid evidence + valid signature + Under Review -> Done: ALLOWED
+      const allowedRes = await workflowValidatorHandler(toDonePayload('MED-REV-1'));
+      assert.strictEqual(allowedRes.result, true);
+      assert.strictEqual(allowedRes.errorMessage, undefined);
+
+      // 2. Missing evidence + Under Review -> Done: BLOCKED
+      const noEvRes = await workflowValidatorHandler(toDonePayload('MED-REV-2'));
+      assert.strictEqual(noEvRes.result, false);
+      assert.match(noEvRes.errorMessage || '', /evidenceUrl/i);
+
+      // 3. Invalid signature + Under Review -> Done: BLOCKED
+      const badSigRes = await workflowValidatorHandler(toDonePayload('MED-REV-3'));
+      assert.strictEqual(badSigRes.result, false);
+      assert.match(badSigRes.errorMessage || '', /Seal Violation|Part 11/i);
+
+      // 4. Unclassified safety issue + Under Review -> Done: BLOCKED
+      const unclassRes = await workflowValidatorHandler(toDonePayload('MED-REV-4'));
+      assert.strictEqual(unclassRes.result, false);
+      assert.match(unclassRes.errorMessage || '', /Classification Gap/i);
+
+      // 5. Other non-release transitions retain existing blocking behavior on non-Done work items
+      const nonReleaseRes = await workflowValidatorHandler({
+        issue: { key: 'MED-REV-1' },
+        transition: {
+          name: 'Start Progress',
+          from: { name: 'To Do', statusCategory: { key: 'new' } },
+          to: { name: 'In Progress', statusCategory: { key: 'indeterminate' } },
+        },
+      });
+      assert.strictEqual(nonReleaseRes.result, false);
+      assert.match(nonReleaseRes.errorMessage || '', /must be "Done"/i);
+
+      // 6. Global release gate stays blocked while syncIncomplete === true
+      const incompleteSuite = ComplianceEngine.generateComplianceReport(
+        [compliantUnderReview],
+        'LIVE',
+        'Incomplete Sync Suite',
+        { initialized: true, syncIncomplete: true }
+      );
+      SeederService.getActiveComplianceSuite = async () => incompleteSuite;
+      const globalBlocked = await workflowValidatorHandler({});
+      assert.strictEqual(globalBlocked.result, false);
+      assert.match(globalBlocked.errorMessage || '', /synchronization is incomplete|Resume Sync/i);
+    } finally {
+      if (prevSecret === undefined) delete process.env.MEDTRACE_PART11_SECRET;
+      else process.env.MEDTRACE_PART11_SECRET = prevSecret;
+    }
+  });
+
+  test.it('createReverificationTask reports failed Jira issue links honestly and checks issuelinks on reuse', async () => {
+    const kvsMock = createLocalMockKvs();
+    const { blockedLink } = buildSampleLinks();
+    const nativeHazardLink = {
+      ...blockedLink,
+      id: 'link-native-haz',
+      hazard: { ...blockedLink.hazard, key: 'MED-10', source: 'JIRA_ISSUE' },
+      work: { ...blockedLink.work, key: 'MED-42' },
+    };
+    const liveSuite = ComplianceEngine.generateComplianceReport([nativeHazardLink], 'LIVE', 'Honest Link Pump', {
+      initialized: true,
+    });
+
+    let failLinkForMed10 = true;
+    let existingIssueLinks = [];
+
+    const asUserImpl = () => ({
+      requestJira: async (routeObj, opts) => {
+        const url = String(routeObj?.value_ || routeObj || '');
+        if (url.startsWith('/rest/api/3/mypermissions')) {
+          return makeJsonResponse(200, {
+            permissions: {
+              BROWSE_PROJECTS: { havePermission: true },
+              EDIT_ISSUES: { havePermission: true },
+              CREATE_ISSUES: { havePermission: true },
+            },
+          });
+        }
+        if (url === '/rest/api/3/issue/MED-151?fields=status,issuelinks') {
+          return makeJsonResponse(200, {
+            id: '50002',
+            key: 'MED-151',
+            fields: {
+              status: { name: 'To Do', statusCategory: { key: 'new', name: 'To Do' } },
+              issuelinks: existingIssueLinks,
+            },
+          });
+        }
+        if (url === '/rest/api/3/issue/createmeta/MED/issuetypes') {
+          return makeJsonResponse(200, { issueTypes: [{ id: '10002', name: 'Task', subtask: false }] });
+        }
+        if (url === '/rest/api/3/issue' && opts?.method === 'POST') {
+          return makeJsonResponse(201, { id: '50002', key: 'MED-151' });
+        }
+        if (url === '/rest/api/3/issueLinkType') {
+          return makeJsonResponse(200, { issueLinkTypes: [{ name: 'Relates' }] });
+        }
+        if (url === '/rest/api/3/issueLink' && opts?.method === 'POST') {
+          const payload = JSON.parse(opts.body);
+          if (failLinkForMed10 && payload.outwardIssue?.key === 'MED-10') {
+            return makeJsonResponse(403, { errorMessages: ['Link permission denied'] });
+          }
+          return makeJsonResponse(201, {});
+        }
+        return makeJsonResponse(404, {});
+      },
+    });
+
+    await withForgeMocks({ kvsMock, asUserImpl }, async () => {
+      await SeederService.saveComplianceSuite(liveSuite, 0);
+
+      // 1. Task created, MED-42 linked, MED-10 link fails -> NOT labeled complete success; failedLinkKeys explicitly reported
+      const partialRes = await rovoActionHandler(
+        {
+          actionKey: 'create-reverification-task-action',
+          inputs: { hazardKey: 'MED-10', issueKey: 'MED-42' },
+        },
+        { accountId: 'acc-honest-op', extension: { type: 'jira:projectPage', project: { key: 'MED' } } }
+      );
+      assert.strictEqual(partialRes.success, false);
+      assert.strictEqual(partialRes.partialSuccess, true);
+      assert.strictEqual(partialRes.fullyLinked, false);
+      assert.strictEqual(partialRes.createdIssueKey, 'MED-151');
+      assert.deepStrictEqual(partialRes.linkedIssueKeys, ['MED-42']);
+      assert.deepStrictEqual(partialRes.failedLinkKeys, ['MED-10']);
+      assert.ok(Array.isArray(partialRes.linkErrors) && partialRes.linkErrors.length === 1);
+      assert.match(partialRes.message, /failed to link: MED-10/i);
+
+      // 2. Task reuse with empty issuelinks must NOT fabricate existing links
+      existingIssueLinks = [];
+      const reuseMissingLinks = await rovoActionHandler(
+        {
+          actionKey: 'create-reverification-task-action',
+          inputs: { hazardKey: 'MED-10', issueKey: 'MED-42' },
+        },
+        { accountId: 'acc-honest-op', extension: { type: 'jira:projectPage', project: { key: 'MED' } } }
+      );
+      assert.strictEqual(reuseMissingLinks.alreadyExisted, true);
+      assert.strictEqual(reuseMissingLinks.success, false);
+      assert.strictEqual(reuseMissingLinks.fullyLinked, false);
+      assert.strictEqual(reuseMissingLinks.linksVerified, true);
+      assert.deepStrictEqual(reuseMissingLinks.linkedIssueKeys, []);
+      assert.deepStrictEqual(reuseMissingLinks.missingLinkKeys, ['MED-42', 'MED-10']);
+      assert.match(reuseMissingLinks.message, /missing\/unverified: MED-42, MED-10/i);
+    });
   });
 });

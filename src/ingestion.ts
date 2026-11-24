@@ -3,6 +3,7 @@ import { kvs } from '@forge/kvs';
 import { ComplianceEngine } from './compliance-engine';
 import { isKvsConflictError, sha256Hex } from './crypto-utils';
 import { isForgeRuntime } from './runtime';
+import { JIRA_ISSUE_KEY_RE } from './seeder-identity';
 import {
   BaselineMutationRecord,
   commitSuiteMutation,
@@ -91,9 +92,34 @@ export interface ConfluencePageUpdatedResult {
   affectedHazards: string[];
 }
 
+export interface JiraIssueUpdatedEvent {
+  eventType?: string;
+  issue?: { id?: string | number; key?: string };
+  issueLink?: {
+    sourceIssueId?: string | number;
+    destinationIssueId?: string | number;
+  };
+  atlassianId?: string;
+  context?: { accountId?: string };
+}
+
+export interface JiraIssueUpdatedResult {
+  processed: boolean;
+  issueKey?: string;
+  affectedHazards: string[];
+}
+
+interface JiraIssueLinkEntry {
+  id?: string;
+  type?: { name?: string; inward?: string; outward?: string };
+  inwardIssue?: JiraApiIssue;
+  outwardIssue?: JiraApiIssue;
+}
+
 interface JiraApiIssue {
   id?: string | number;
   key?: string;
+  self?: string;
   fields?: {
     summary?: string;
     status?: {
@@ -105,6 +131,7 @@ interface JiraApiIssue {
     priority?: { name?: string };
     issuetype?: { name?: string };
     project?: { name?: string; key?: string };
+    issuelinks?: unknown[];
   };
 }
 
@@ -123,28 +150,34 @@ function stripStorageMarkup(storageHtml: string): string {
 
 function inferRiskClass(labels: string[]): {
   riskClass: RiskClass;
-  severity: IsoHazard['severity'];
-  probability: IsoHazard['probability'];
   safetyClassAssigned?: boolean;
 } {
   const lowerLabels = labels.map((l) => l.toLowerCase());
 
   if (lowerLabels.some((l) => l.includes('class-c') || l.includes('class_c') || l.includes('critical-safety'))) {
-    return { riskClass: 'CLASS_C', severity: 'CATASTROPHIC', probability: 'OCCASIONAL' };
+    return { riskClass: 'CLASS_C' };
   }
   if (lowerLabels.some((l) => l.includes('class-b') || l.includes('class_b'))) {
-    return { riskClass: 'CLASS_B', severity: 'CRITICAL', probability: 'REMOTE' };
+    return { riskClass: 'CLASS_B' };
   }
   if (lowerLabels.some((l) => l.includes('class-a') || l.includes('class_a'))) {
-    return { riskClass: 'CLASS_A', severity: 'MINOR', probability: 'IMPROBABLE' };
+    return { riskClass: 'CLASS_A' };
   }
   return {
     riskClass: 'CLASS_C',
-    severity: 'CATASTROPHIC',
-    probability: 'OCCASIONAL',
     safetyClassAssigned: false,
   };
 }
+
+const DEFAULT_TEST_ISSUE_TYPES = new Set<string>([
+  'test',
+  'verification',
+  'verification test',
+  'test case',
+  'test execution',
+  'qa test',
+  'sub-test',
+]);
 
 function normalizeStringArray(values: unknown): string[] {
   if (!Array.isArray(values)) return [];
@@ -156,6 +189,170 @@ function normalizeStringArray(values: unknown): string[] {
     }
   }
   return out;
+}
+
+interface ResolvedJiraLinkedIssue {
+  key: string;
+  id: string;
+  summary: string;
+  statusName: string;
+  statusObj?: NonNullable<JiraApiIssue['fields']>['status'];
+  issueTypeName: string;
+  labels: string[];
+  linkTypeName: string;
+  linkDirection: 'inward' | 'outward';
+  relationshipLabel: string;
+  self?: string;
+}
+
+function isPureHazardIssue(issue: { issueTypeName?: string; labels?: string[] }): boolean {
+  const typeLower = (issue.issueTypeName || '').trim().toLowerCase();
+  if (typeLower && DEFAULT_HAZARD_ISSUE_TYPES.has(typeLower)) {
+    return true;
+  }
+  const labelsLower = (issue.labels || []).map((l) => l.toLowerCase());
+  return labelsLower.some(
+    (l) => l === 'medtrace-hazard' || l === 'hazard' || l === 'iso-14971-hazard'
+  );
+}
+
+function isPureVerificationTestIssue(issue: { issueTypeName?: string; labels?: string[] }): boolean {
+  const typeLower = (issue.issueTypeName || '').trim().toLowerCase();
+  if (typeLower && DEFAULT_TEST_ISSUE_TYPES.has(typeLower)) {
+    return true;
+  }
+  const labelsLower = (issue.labels || []).map((l) => l.toLowerCase());
+  return labelsLower.some(
+    (l) =>
+      l === 'medtrace-test' ||
+      l === 'verification-test' ||
+      l === 'hil-test' ||
+      l === 'medtrace-reverification'
+  );
+}
+
+function extractLinkedIssueCandidates(
+  rawLinks: unknown[],
+  issueByKey: Map<string, JiraApiIssue>
+): ResolvedJiraLinkedIssue[] {
+  if (!Array.isArray(rawLinks) || rawLinks.length === 0) return [];
+  const out: ResolvedJiraLinkedIssue[] = [];
+  const seen = new Set<string>();
+
+  for (const raw of rawLinks) {
+    if (!raw || typeof raw !== 'object') continue;
+    const entry = raw as JiraIssueLinkEntry;
+    const linkTypeName = String(entry.type?.name || '').trim();
+    const inwardLabel = String(entry.type?.inward || '').trim();
+    const outwardLabel = String(entry.type?.outward || '').trim();
+
+    const pairs: Array<{
+      issue?: JiraApiIssue;
+      direction: 'inward' | 'outward';
+      relLabel: string;
+    }> = [
+      { issue: entry.inwardIssue, direction: 'inward', relLabel: inwardLabel || linkTypeName },
+      { issue: entry.outwardIssue, direction: 'outward', relLabel: outwardLabel || linkTypeName },
+    ];
+
+    for (const pair of pairs) {
+      const key = typeof pair.issue?.key === 'string' ? pair.issue.key.trim().toUpperCase() : '';
+      if (!key || seen.has(`${key}:${pair.direction}`)) continue;
+      seen.add(`${key}:${pair.direction}`);
+
+      const enriched = issueByKey.get(key);
+      const fields = pair.issue?.fields || {};
+      const enrichedFields = enriched?.fields || {};
+      const summary =
+        (typeof enrichedFields.summary === 'string' && enrichedFields.summary) ||
+        (typeof fields.summary === 'string' && fields.summary) ||
+        key;
+      const statusObj = enrichedFields.status || fields.status;
+      const statusName = String(statusObj?.name || '').trim();
+      const issueTypeName = String(
+        enrichedFields.issuetype?.name || fields.issuetype?.name || ''
+      ).trim();
+      const labels = normalizeStringArray(enrichedFields.labels ?? fields.labels);
+      const id = String(enriched?.id || pair.issue?.id || key.toLowerCase());
+      const self = enriched?.self || pair.issue?.self;
+
+      out.push({
+        key,
+        id,
+        summary,
+        statusName,
+        statusObj,
+        issueTypeName,
+        labels,
+        linkTypeName,
+        linkDirection: pair.direction,
+        relationshipLabel: pair.relLabel,
+        ...(self ? { self } : {}),
+      });
+    }
+  }
+
+  return out;
+}
+
+function resolveLinkedHazardAndTest(
+  linkedIssues: ResolvedJiraLinkedIssue[]
+): {
+  linkedHazard?: ResolvedJiraLinkedIssue;
+  linkedTest?: ResolvedJiraLinkedIssue;
+  linkedReverification?: ResolvedJiraLinkedIssue;
+} {
+  let linkedHazard: ResolvedJiraLinkedIssue | undefined;
+  let linkedTest: ResolvedJiraLinkedIssue | undefined;
+  let linkedReverification: ResolvedJiraLinkedIssue | undefined;
+
+  for (const item of linkedIssues) {
+    const rel = `${item.linkTypeName} ${item.relationshipLabel}`.toLowerCase();
+    const isRev = item.labels.some((l) => l.toLowerCase() === 'medtrace-reverification');
+    if (isRev && !linkedReverification) {
+      linkedReverification = item;
+    }
+
+    const itemIsTest = isPureVerificationTestIssue(item);
+    const itemIsHazard = isPureHazardIssue(item);
+
+    if (
+      !linkedHazard &&
+      !itemIsTest &&
+      (itemIsHazard || /\b(mitigat|hazard|risk)\b/i.test(rel))
+    ) {
+      linkedHazard = item;
+      continue;
+    }
+
+    if (
+      !linkedTest &&
+      !itemIsHazard &&
+      (itemIsTest || /\b(test(s|ed|ing)?|verif(y|ies|ied|ication))\b/i.test(rel))
+    ) {
+      linkedTest = item;
+    }
+  }
+
+  return { linkedHazard, linkedTest, linkedReverification };
+}
+
+function inferTestTypeFromIssue(
+  riskClass: RiskClass,
+  labels: string[],
+  issueTypeName?: string
+): VerificationTest['testType'] {
+  const combined = `${issueTypeName || ''} ${labels.join(' ')}`.toLowerCase();
+  if (combined.includes('hil')) return 'Automated HIL (Hardware-in-Loop)';
+  if (combined.includes('clinical')) return 'Clinical Validation';
+  if (combined.includes('unit')) return 'Unit Test';
+  return riskClass === 'CLASS_C' ? 'Automated HIL (Hardware-in-Loop)' : 'Integration Test';
+}
+
+function extractCloudIdFromSelfUrl(selfUrl?: string): string | undefined {
+  if (typeof selfUrl !== 'string') return undefined;
+  const match = selfUrl.match(/\/ex\/jira\/([0-9a-f-]{8,})/i);
+  return match?.[1];
 }
 
 /**
@@ -352,8 +549,8 @@ async function fetchAllJiraIssues(
     }
 
     const jiraRoute = nextPageToken
-      ? route`/rest/api/3/search/jql?jql=${jql}&maxResults=${JIRA_PAGE_SIZE}&fields=summary,status,assignee,labels,issuetype,project&nextPageToken=${nextPageToken}`
-      : route`/rest/api/3/search/jql?jql=${jql}&maxResults=${JIRA_PAGE_SIZE}&fields=summary,status,assignee,labels,issuetype,project`;
+      ? route`/rest/api/3/search/jql?jql=${jql}&maxResults=${JIRA_PAGE_SIZE}&fields=summary,status,assignee,labels,issuetype,project,issuelinks&nextPageToken=${nextPageToken}`
+      : route`/rest/api/3/search/jql?jql=${jql}&maxResults=${JIRA_PAGE_SIZE}&fields=summary,status,assignee,labels,issuetype,project,issuelinks`;
 
     const jiraResp = await client.requestJira(jiraRoute);
     if (jiraResp.status !== 200) {
@@ -407,6 +604,44 @@ async function fetchAllJiraIssues(
     truncated,
     ...(truncated && resumePageToken ? { nextPageToken: resumePageToken } : {}),
   };
+}
+
+async function fetchJiraIssuesByKeys(
+  client: ForgeApiClient,
+  keys: string[],
+  startedAt: number,
+  warnings: string[]
+): Promise<{ issues: JiraApiIssue[]; remainingKeys: string[]; truncated: boolean }> {
+  const cleanKeys = Array.from(
+    new Set(
+      keys
+        .map((k) => (typeof k === 'string' ? k.trim().toUpperCase() : ''))
+        .filter((k) => JIRA_ISSUE_KEY_RE.test(k))
+    )
+  );
+  const issues: JiraApiIssue[] = [];
+  for (let i = 0; i < cleanKeys.length; i += JIRA_PAGE_SIZE) {
+    if (i > 0 && Date.now() - startedAt >= LIVE_SYNC_BUDGET_MS) {
+      warnings.push(
+        `Live sync exceeded ${LIVE_SYNC_BUDGET_MS}ms fetch budget while resuming pending issues; results truncated.`
+      );
+      return { issues, remainingKeys: cleanKeys.slice(i), truncated: true };
+    }
+    const batchKeys = cleanKeys.slice(i, i + JIRA_PAGE_SIZE);
+    const jql = `key in (${batchKeys.map((k) => `"${k}"`).join(', ')})`;
+    const jiraResp = await client.requestJira(
+      route`/rest/api/3/search/jql?jql=${jql}&maxResults=${JIRA_PAGE_SIZE}&fields=summary,status,assignee,labels,issuetype,project,issuelinks`
+    );
+    if (jiraResp.status !== 200) {
+      const errText = await jiraResp.text();
+      throw new Error(`Jira resume search failed (HTTP ${jiraResp.status}): ${errText.slice(0, 200)}`);
+    }
+    const jiraJson = (await jiraResp.json()) as { issues?: JiraApiIssue[] };
+    if (Array.isArray(jiraJson?.issues)) {
+      issues.push(...jiraJson.issues);
+    }
+  }
+  return { issues, remainingKeys: [], truncated: false };
 }
 
 async function fetchAllConfluencePages(
@@ -521,35 +756,67 @@ export class LiveIngestionService {
     const cursorKey = getSyncCursorKey(normalized.projectKey);
 
     let initialPageToken = normalized.pageToken;
+    let pendingIssueKeys: string[] = [];
+    let pendingCoversInitialPage = false;
     let resumedFromCursor = Boolean(initialPageToken);
     if (!initialPageToken && normalized.resumeFromCursor) {
       try {
-        const storedCursor = await kvs.get<{ nextPageToken?: string; jql?: string }>(cursorKey);
+        const storedCursor = await kvs.get<{
+          nextPageToken?: string;
+          pendingIssueKeys?: string[];
+          pendingCoversInitialPage?: boolean;
+          jql?: string;
+        }>(cursorKey);
         if (
           storedCursor &&
-          typeof storedCursor.nextPageToken === 'string' &&
-          storedCursor.nextPageToken.trim() !== '' &&
           (!storedCursor.jql || storedCursor.jql === normalized.jql)
         ) {
-          initialPageToken = storedCursor.nextPageToken.trim();
-          resumedFromCursor = true;
+          if (typeof storedCursor.nextPageToken === 'string' && storedCursor.nextPageToken.trim() !== '') {
+            initialPageToken = storedCursor.nextPageToken.trim();
+          }
+          if (Array.isArray(storedCursor.pendingIssueKeys)) {
+            pendingIssueKeys = storedCursor.pendingIssueKeys
+              .map((k) => (typeof k === 'string' ? k.trim().toUpperCase() : ''))
+              .filter((k) => JIRA_ISSUE_KEY_RE.test(k));
+          }
+          pendingCoversInitialPage = storedCursor.pendingCoversInitialPage === true;
+          resumedFromCursor = Boolean(initialPageToken || pendingIssueKeys.length > 0);
         }
       } catch {
         // Ignore missing/unreadable cursor and start cleanly from page 1.
       }
     }
 
-    // 1. Paginate Jira issues via Jira REST v3 /search/jql (nextPageToken)
-    const jiraResult = await fetchAllJiraIssues(
-      client,
-      normalized.jql,
-      normalized.maxIssues,
-      startedAt,
-      warnings,
-      initialPageToken
-    );
-    const issues = jiraResult.issues;
-    let truncated = jiraResult.truncated;
+    // 1. Fetch pending unprocessed issues (if resuming from mid-enrichment timeout) and/or paginate Jira issues
+    let pendingIssues: JiraApiIssue[] = [];
+    let remainingFetchKeys: string[] = [];
+    let pendingTruncated = false;
+    if (pendingIssueKeys.length > 0) {
+      const pendingRes = await fetchJiraIssuesByKeys(client, pendingIssueKeys, startedAt, warnings);
+      pendingIssues = pendingRes.issues;
+      remainingFetchKeys = pendingRes.remainingKeys;
+      pendingTruncated = pendingRes.truncated;
+    }
+
+    const tokenForNextJiraPage = pendingCoversInitialPage ? undefined : initialPageToken;
+    const shouldFetchJiraPages = !resumedFromCursor || Boolean(tokenForNextJiraPage);
+    const jiraResult =
+      shouldFetchJiraPages && !pendingTruncated
+        ? await fetchAllJiraIssues(
+            client,
+            normalized.jql,
+            normalized.maxIssues,
+            startedAt,
+            warnings,
+            tokenForNextJiraPage
+          )
+        : {
+            issues: [] as JiraApiIssue[],
+            truncated: pendingTruncated || Boolean(tokenForNextJiraPage),
+            ...(tokenForNextJiraPage ? { nextPageToken: tokenForNextJiraPage } : {}),
+          };
+    const issues = [...pendingIssues, ...jiraResult.issues];
+    let truncated = pendingTruncated || jiraResult.truncated;
 
     // 2. Paginate Confluence pages ONLY when spaceId is explicitly scoped; otherwise fetch linked pageIds
     // on demand and lazily fall back to bounded space/first-page lookup only for SRS-\d+ heuristic summaries.
@@ -706,20 +973,50 @@ export class LiveIngestionService {
     const { summary: existingSuite, version: existingVersion } = await SeederService.getSuiteWithVersion();
     const existingByWorkKey = new Map<string, TraceLink[]>();
     const existingByWorkAndSpec = new Map<string, TraceLink>();
+    const existingByTestKey = new Map<string, VerificationTest>();
     if (existingSuite.datasetMode === 'LIVE' && existingSuite.initialized !== false) {
       for (const link of existingSuite.traceLinks) {
         const workKeyUpper = (link.work?.key || '').trim().toUpperCase();
-        if (!workKeyUpper) continue;
-        const arr = existingByWorkKey.get(workKeyUpper) || [];
-        arr.push(link);
-        existingByWorkKey.set(workKeyUpper, arr);
-        if (link.spec?.id) {
-          existingByWorkAndSpec.set(`${workKeyUpper}::${link.spec.id.toLowerCase()}`, link);
+        if (workKeyUpper) {
+          const arr = existingByWorkKey.get(workKeyUpper) || [];
+          arr.push(link);
+          existingByWorkKey.set(workKeyUpper, arr);
+          if (link.spec?.id) {
+            existingByWorkAndSpec.set(`${workKeyUpper}::${link.spec.id.toLowerCase()}`, link);
+          }
+          if (link.spec?.pageId) {
+            existingByWorkAndSpec.set(`${workKeyUpper}::${link.spec.pageId.toLowerCase()}`, link);
+          }
         }
-        if (link.spec?.pageId) {
-          existingByWorkAndSpec.set(`${workKeyUpper}::${link.spec.pageId.toLowerCase()}`, link);
+        const testKeyUpper = (link.test?.testKey || '').trim().toUpperCase();
+        if (testKeyUpper && !existingByTestKey.has(testKeyUpper)) {
+          existingByTestKey.set(testKeyUpper, link.test);
         }
       }
+    }
+
+    const issueByKey = new Map<string, JiraApiIssue>();
+    for (const iss of issues) {
+      const k = typeof iss?.key === 'string' ? iss.key.trim().toUpperCase() : '';
+      if (k) issueByKey.set(k, iss);
+    }
+
+    // Identify Hazard/Test Jira issues already linked via `issuelinks` to a Work issue in this scan
+    // so we don't fabricate duplicate standalone `HAZ-<testKey>` trace links for them.
+    const linkedRoleOwners = new Set<string>();
+    for (const iss of issues) {
+      const k = typeof iss?.key === 'string' ? iss.key.trim().toUpperCase() : '';
+      if (!k) continue;
+      const issTypeName = String(iss.fields?.issuetype?.name || '').trim();
+      const issLabels = normalizeStringArray(iss.fields?.labels);
+      if (isPureHazardIssue({ issueTypeName: issTypeName, labels: issLabels }) || isPureVerificationTestIssue({ issueTypeName: issTypeName, labels: issLabels })) {
+        continue;
+      }
+      const candidates = extractLinkedIssueCandidates(iss.fields?.issuelinks || [], issueByKey);
+      const { linkedHazard, linkedTest, linkedReverification } = resolveLinkedHazardAndTest(candidates);
+      if (linkedHazard) linkedRoleOwners.add(linkedHazard.key.toUpperCase());
+      if (linkedTest) linkedRoleOwners.add(linkedTest.key.toUpperCase());
+      if (linkedReverification) linkedRoleOwners.add(linkedReverification.key.toUpperCase());
     }
 
     const baselineCache = new Map<string, SignedSpecBaseline | undefined>();
@@ -807,9 +1104,46 @@ export class LiveIngestionService {
         };
       }
 
-      const { riskClass, severity, probability, safetyClassAssigned } = inferRiskClass(labels);
+      const issueTypeName = String(fields.issuetype?.name || '').trim();
+      const isSelfReverificationTask = labels.some((l) => l.toLowerCase() === 'medtrace-reverification');
+      if (
+        (isSelfReverificationTask ||
+          isPureVerificationTestIssue({ issueTypeName, labels }) ||
+          isPureHazardIssue({ issueTypeName, labels })) &&
+        linkedRoleOwners.has(issueKey.toUpperCase())
+      ) {
+        return {
+          skipped: true,
+          links: [],
+          linkedPairs: 0,
+          drifts: 0,
+          baselineUpdates: [],
+        };
+      }
+
+      const rawIssueLinks =
+        Array.isArray(graphCtx?.issuelinks) && graphCtx.issuelinks.length > 0
+          ? graphCtx.issuelinks
+          : Array.isArray(fields.issuelinks)
+            ? fields.issuelinks
+            : [];
+      const linkedIssues = extractLinkedIssueCandidates(rawIssueLinks, issueByKey);
+      const { linkedHazard, linkedTest, linkedReverification } =
+        resolveLinkedHazardAndTest(linkedIssues);
+
+      const hazardRisk = (() => {
+        const workRisk = inferRiskClass(labels);
+        if (linkedHazard && linkedHazard.labels.length > 0) {
+          const hazRisk = inferRiskClass(linkedHazard.labels);
+          if (hazRisk.safetyClassAssigned !== false) {
+            return hazRisk;
+          }
+        }
+        return workRisk;
+      })();
+      const { riskClass, safetyClassAssigned } = hazardRisk;
       const prevWorkLinks = existingByWorkKey.get(issueKey.toUpperCase()) || [];
-      const defaultHazardKey = prevWorkLinks[0]?.hazard?.key || `HAZ-${issueKey}`;
+      const defaultHazardKey = linkedHazard?.key || prevWorkLinks[0]?.hazard?.key || `HAZ-${issueKey}`;
 
       const work: JiraWorkItem = {
         id: String(issue.id || issueKey.toLowerCase()),
@@ -819,8 +1153,67 @@ export class LiveIngestionService {
         assignee: fields.assignee?.displayName || 'Unassigned',
       };
 
-      const aggTraversalStatus = graphCtx ? `LIVE (${graphCtx.source})` : 'LIVE (JIRA_REST)';
+      const aggTraversalStatus =
+        linkedHazard || linkedTest
+          ? `LIVE (JIRA_ISSUELINK + ${graphCtx ? graphCtx.source : 'JIRA_REST'})`
+          : graphCtx
+            ? `LIVE (${graphCtx.source})`
+            : 'LIVE (JIRA_REST)';
       const entityAri = graphCtx?.issueAri || `jira:issue:${issueKey}`;
+      const jiraCloudId = extractCloudIdFromSelfUrl(issue.self) || extractCloudIdFromSelfUrl(linkedHazard?.self);
+
+      const buildResolvedHazard = (
+        hazardKey: string,
+        mitigationRequirementId: string,
+        fallbackTitle?: string
+      ): IsoHazard => ({
+        id: linkedHazard ? linkedHazard.id : hazardKey.toLowerCase(),
+        key: hazardKey,
+        title: linkedHazard?.summary || fields.summary || fallbackTitle || `Hazard for ${issueKey}`,
+        riskClass,
+        ...(safetyClassAssigned === false ? { safetyClassAssigned: false } : {}),
+        mitigationRequirementId,
+        status: 'UNVERIFIED_RISK',
+        source: linkedHazard ? 'JIRA_ISSUE' : 'APP_MANAGED',
+      });
+
+      const buildResolvedTest = (prevTest?: VerificationTest): VerificationTest => {
+        if (linkedTest) {
+          const prior =
+            (prevTest && prevTest.testKey.toUpperCase() === linkedTest.key.toUpperCase()
+              ? prevTest
+              : existingByTestKey.get(linkedTest.key.toUpperCase())) || prevTest;
+          const preservedStatus =
+            prior && prior.testKey.toUpperCase() === linkedTest.key.toUpperCase()
+              ? prior.status
+              : 'UNTESTED';
+          return {
+            ...(prior && prior.testKey.toUpperCase() === linkedTest.key.toUpperCase() ? prior : {}),
+            id: linkedTest.id,
+            testKey: linkedTest.key,
+            title: linkedTest.summary || prior?.title || `Verification Test ${linkedTest.key}`,
+            testType: inferTestTypeFromIssue(riskClass, linkedTest.labels, linkedTest.issueTypeName),
+            status: preservedStatus,
+            source: 'JIRA_ISSUE',
+          };
+        }
+        if (prevTest) {
+          return { ...prevTest, source: prevTest.source || 'APP_MANAGED' };
+        }
+        return {
+          id: `test-${issueKey.toLowerCase()}`,
+          testKey: `TEST-${issueKey}`,
+          title: `Verification Test for ${issueKey}`,
+          testType: riskClass === 'CLASS_C' ? 'Automated HIL (Hardware-in-Loop)' : 'Integration Test',
+          status: 'UNTESTED',
+          source: 'APP_MANAGED',
+        };
+      };
+
+      const buildHazardAri = (hazardKey: string): string =>
+        linkedHazard && jiraCloudId
+          ? `ari:cloud:jira:${jiraCloudId}:issue/${linkedHazard.id}`
+          : `ari:cloud:medtrace::iso14971-hazard/${hazardKey}`;
 
       // Collect all linked Confluence pages (M:N) from remote links, falling back to SRS-\d+ summary title heuristic
       const matchedPages: Array<{
@@ -867,7 +1260,7 @@ export class LiveIngestionService {
         const specId = `unlinked-${issueKey.toLowerCase()}`;
         const prevExact =
           existingByWorkAndSpec.get(`${issueKey.toUpperCase()}::${specId}`) || prevWorkLinks[0];
-        const hazardKey = prevExact?.hazard?.key || defaultHazardKey;
+        const hazardKey = linkedHazard?.key || prevExact?.hazard?.key || defaultHazardKey;
 
         const spec: ConfluenceSpec = {
           id: specId,
@@ -881,27 +1274,8 @@ export class LiveIngestionService {
           lastUpdated: new Date().toISOString(),
         };
 
-        const hazard: IsoHazard = {
-          id: hazardKey.toLowerCase(),
-          key: hazardKey,
-          title: fields.summary || prevExact?.hazard?.title || `Hazard for ${issueKey}`,
-          riskClass,
-          ...(safetyClassAssigned === false ? { safetyClassAssigned: false } : {}),
-          severity,
-          probability,
-          mitigationRequirementId: spec.id,
-          status: 'UNVERIFIED_RISK',
-        };
-
-        const test: VerificationTest = prevExact?.test
-          ? { ...prevExact.test }
-          : {
-              id: `test-${issueKey.toLowerCase()}`,
-              testKey: `TEST-${issueKey}`,
-              title: `Verification Test for ${issueKey}`,
-              testType: riskClass === 'CLASS_C' ? 'Automated HIL (Hardware-in-Loop)' : 'Integration Test',
-              status: 'UNTESTED',
-            };
+        const hazard = buildResolvedHazard(hazardKey, spec.id, prevExact?.hazard?.title);
+        const test = buildResolvedTest(prevExact?.test);
 
         const signature: Part11Signature = {
           id: `sig-${spec.id}`,
@@ -922,9 +1296,9 @@ export class LiveIngestionService {
 
         const graphMetadata: GraphMetadata = {
           entityAri,
-          hazardAri: `ari:cloud:medtrace::iso14971-hazard/${hazard.key}`,
+          hazardAri: buildHazardAri(hazard.key),
           linkedSpecAri: 'unlinked',
-          edgeType: 'NONE:unlinked',
+          edgeType: linkedHazard || linkedTest ? 'JIRA:issuelink+NONE:unlinked' : 'NONE:unlinked',
           aggTraversalStatus,
         };
 
@@ -940,6 +1314,7 @@ export class LiveIngestionService {
             part11Secret,
             requireCryptographicSeal: true,
             requireTestEvidence: true,
+            reverificationTaskKey: linkedReverification?.key || prevExact?.reverificationTaskKey,
           }
         );
         evaluated.hazard.status = ComplianceEngine.deriveHazardStatus(evaluated.complianceState);
@@ -964,7 +1339,7 @@ export class LiveIngestionService {
         const prevExact =
           existingByWorkAndSpec.get(`${issueKey.toUpperCase()}::${specId.toLowerCase()}`) ||
           existingByWorkAndSpec.get(`${issueKey.toUpperCase()}::${pageIdStr.toLowerCase()}`);
-        const hazardKey = prevExact?.hazard?.key || defaultHazardKey;
+        const hazardKey = linkedHazard?.key || prevExact?.hazard?.key || defaultHazardKey;
 
         const storageBody = typeof page?.body?.storage?.value === 'string' ? page.body.storage.value : '';
         const currentHash = sha256Hex(storageBody);
@@ -1034,28 +1409,10 @@ export class LiveIngestionService {
           lastUpdated: page?.version?.createdAt || nowIso,
         };
 
-        const hazard: IsoHazard = {
-          id: hazardKey.toLowerCase(),
-          key: hazardKey,
-          title: fields.summary || prevExact?.hazard?.title || `Hazard for ${issueKey}`,
-          riskClass,
-          ...(safetyClassAssigned === false ? { safetyClassAssigned: false } : {}),
-          severity,
-          probability,
-          mitigationRequirementId: spec.id,
-          status: 'UNVERIFIED_RISK',
-        };
+        const hazard = buildResolvedHazard(hazardKey, spec.id, prevExact?.hazard?.title);
 
         const testSource = prevExact?.test || prevWorkLinks[0]?.test;
-        const test: VerificationTest = testSource
-          ? { ...testSource }
-          : {
-              id: `test-${issueKey.toLowerCase()}`,
-              testKey: `TEST-${issueKey}`,
-              title: `Verification Test for ${issueKey}`,
-              testType: riskClass === 'CLASS_C' ? 'Automated HIL (Hardware-in-Loop)' : 'Integration Test',
-              status: 'UNTESTED',
-            };
+        const test = buildResolvedTest(testSource);
 
         let signatureValid = false;
         let signature: Part11Signature;
@@ -1132,9 +1489,9 @@ export class LiveIngestionService {
 
         const graphMetadata: GraphMetadata = {
           entityAri,
-          hazardAri: `ari:cloud:medtrace::iso14971-hazard/${hazard.key}`,
+          hazardAri: buildHazardAri(hazard.key),
           linkedSpecAri: `confluence:page:${pageIdStr}`,
-          edgeType,
+          edgeType: linkedHazard || linkedTest ? `JIRA:issuelink+${edgeType}` : edgeType,
           aggTraversalStatus,
         };
 
@@ -1150,6 +1507,7 @@ export class LiveIngestionService {
             part11Secret,
             requireCryptographicSeal: true,
             requireTestEvidence: true,
+            reverificationTaskKey: linkedReverification?.key || prevExact?.reverificationTaskKey,
           }
         );
         evaluated.hazard.status = ComplianceEngine.deriveHazardStatus(evaluated.complianceState);
@@ -1168,6 +1526,7 @@ export class LiveIngestionService {
     const traceLinks: TraceLink[] = [];
     const baselineUpdates: BaselineMutationRecord[] = [];
     const processedWorkKeys = new Set<string>();
+    const unprocessedKeys: string[] = [];
     let linkedPairsFound = 0;
     let driftDetectedCount = 0;
     let skippedUntaggedCount = 0;
@@ -1175,6 +1534,10 @@ export class LiveIngestionService {
     for (let i = 0; i < issues.length; i += LIVE_SYNC_CONCURRENCY_BATCH_SIZE) {
       if (Date.now() - startedAt >= LIVE_SYNC_BUDGET_MS) {
         truncated = true;
+        for (const rem of issues.slice(i)) {
+          const rk = typeof rem?.key === 'string' ? rem.key.trim().toUpperCase() : '';
+          if (rk) unprocessedKeys.push(rk);
+        }
         warnings.push(
           `Live sync exceeded ${LIVE_SYNC_BUDGET_MS}ms fetch budget during issue enrichment; partial results saved.`
         );
@@ -1250,7 +1613,9 @@ export class LiveIngestionService {
 
       if (preservedTruncatedCount > 0) {
         warnings.push(
-          `Preserved ${preservedTruncatedCount} existing trace link(s) not reached before sync truncation.`
+          truncated
+            ? `Preserved ${preservedTruncatedCount} existing trace link(s) not reached before sync truncation.`
+            : `Preserved ${preservedTruncatedCount} existing trace link(s) from prior sync page(s).`
         );
       }
       if (preservedOtherProjectCount > 0) {
@@ -1265,16 +1630,25 @@ export class LiveIngestionService {
       }
     }
 
+    const nextPendingKeys = Array.from(new Set([...unprocessedKeys, ...remainingFetchKeys]));
+    const retainedInitialToken =
+      truncated && !jiraResult.truncated && resumedFromCursor ? initialPageToken : undefined;
+    const nextResumeToken = jiraResult.nextPageToken || retainedInitialToken;
+    const savedPendingCoversInitialPage = Boolean(retainedInitialToken && !jiraResult.nextPageToken);
+    const hasPendingCursor = truncated && Boolean(nextResumeToken || nextPendingKeys.length > 0);
+
     const persistOrClearCursor = async (): Promise<void> => {
       try {
-        if (jiraResult.truncated && jiraResult.nextPageToken) {
+        if (hasPendingCursor) {
           await kvs.set(cursorKey, {
-            nextPageToken: jiraResult.nextPageToken,
+            ...(nextResumeToken ? { nextPageToken: nextResumeToken } : {}),
+            ...(nextPendingKeys.length > 0 ? { pendingIssueKeys: nextPendingKeys } : {}),
+            ...(savedPendingCoversInitialPage ? { pendingCoversInitialPage: true } : {}),
             jql: normalized.jql,
             projectKey: normalized.projectKey || 'GLOBAL',
             updatedAt: new Date().toISOString(),
           });
-        } else if (!truncated || jiraResult.truncated || !resumedFromCursor) {
+        } else {
           await kvs.delete(cursorKey);
         }
       } catch {
@@ -1286,22 +1660,57 @@ export class LiveIngestionService {
 
     if (traceLinks.length === 0) {
       await persistOrClearCursor();
+      let summaryToReturn = existingSuite;
+      if (
+        truncated &&
+        existingSuite.datasetMode === 'LIVE' &&
+        existingSuite.initialized !== false &&
+        existingSuite.traceLinks.length > 0
+      ) {
+        const incompleteSummary = ComplianceEngine.generateComplianceReport(
+          existingSuite.traceLinks,
+          'LIVE',
+          existingSuite.projectName,
+          {
+            initialized: true,
+            lastSyncedAt: existingSuite.lastSyncedAt,
+            syncIncomplete: true,
+          }
+        );
+        summaryToReturn = await commitSuiteMutation({
+          summary: incompleteSummary,
+          expectedVersion: existingVersion ?? 0,
+          auditEntry: {
+            actorAccountId,
+            action: 'SYNC_LIVE',
+            targetKey: existingSuite.projectName,
+            details: {
+              projectKey: normalized.projectKey || null,
+              truncated: true,
+              syncIncomplete: true,
+              ...(nextResumeToken ? { nextPageToken: nextResumeToken } : {}),
+              ...(nextPendingKeys.length > 0 ? { pendingIssueKeysCount: nextPendingKeys.length } : {}),
+            },
+            authMethod: 'FORGE_USER_SESSION',
+          },
+        });
+      }
       warnings.push(
         'No safety-tracked Jira issues matched the live sync query; keeping existing compliance suite unchanged.'
       );
       return {
         success: false,
-        datasetMode: existingSuite.datasetMode,
+        datasetMode: summaryToReturn.datasetMode,
         jiraIssuesScanned: issues.length,
         confluencePagesScanned,
         linkedPairsFound,
         driftDetectedCount,
         truncated,
-        ...(jiraResult.nextPageToken ? { nextPageToken: jiraResult.nextPageToken } : {}),
+        ...(nextResumeToken ? { nextPageToken: nextResumeToken } : {}),
         ...(resumedFromCursor ? { resumedFromCursor: true } : {}),
         skippedUntaggedCount,
         warnings,
-        summary: existingSuite,
+        summary: summaryToReturn,
       };
     }
 
@@ -1310,9 +1719,22 @@ export class LiveIngestionService {
       issues[0]?.fields?.project?.name ||
       'Atlassian Cloud Live Medical Project';
 
+    const syncCompletedAt = new Date().toISOString();
     const summary = ComplianceEngine.generateComplianceReport(traceLinks, 'LIVE', projectLabel, {
       initialized: true,
+      lastSyncedAt: syncCompletedAt,
+      syncIncomplete: truncated,
     });
+
+    const syncedWorkKeys = Array.from(processedWorkKeys);
+    const syncedProjectKeys = Array.from(
+      new Set(
+        [
+          ...(normalized.projectKey ? [normalized.projectKey] : []),
+          ...syncedWorkKeys.map((k) => k.split('-')[0]).filter(Boolean),
+        ]
+      )
+    );
 
     const saved = await commitSuiteMutation({
       summary,
@@ -1323,12 +1745,15 @@ export class LiveIngestionService {
         action: 'SYNC_LIVE',
         targetKey: projectLabel,
         details: {
+          projectKey: normalized.projectKey || null,
+          projectKeys: syncedProjectKeys,
           jiraIssuesScanned: issues.length,
           confluencePagesScanned,
           linkedPairsFound,
           driftDetectedCount,
           skippedUntaggedCount,
           truncated,
+          lastSyncedAt: syncCompletedAt,
           ...(jiraResult.nextPageToken ? { nextPageToken: jiraResult.nextPageToken } : {}),
           ...(resumedFromCursor ? { resumedFromCursor: true } : {}),
         },
@@ -1515,6 +1940,7 @@ export class LiveIngestionService {
             part11Secret,
             requireCryptographicSeal: true,
             requireTestEvidence: suite.datasetMode === 'LIVE',
+            reverificationTaskKey: link.reverificationTaskKey,
           }
         );
         evaluated.hazard.status = ComplianceEngine.deriveHazardStatus(evaluated.complianceState);
@@ -1524,11 +1950,26 @@ export class LiveIngestionService {
         }
       }
 
+      const affectedWorkKeys = Array.from(
+        new Set(
+          matchingIndices
+            .map((i) => updatedLinks[i]?.work?.key?.trim().toUpperCase())
+            .filter((k): k is string => Boolean(k))
+        )
+      );
+      const affectedProjectKeys = Array.from(
+        new Set(
+          affectedWorkKeys
+            .map((k) => k.split('-')[0])
+            .filter(Boolean)
+        )
+      );
+
       const updated = ComplianceEngine.generateComplianceReport(
         updatedLinks,
         suite.datasetMode,
         suite.projectName,
-        { initialized: suite.initialized ?? true }
+        { initialized: suite.initialized ?? true, lastSyncedAt: suite.lastSyncedAt }
       );
 
       try {
@@ -1546,6 +1987,8 @@ export class LiveIngestionService {
               pageId,
               newSha256: newHash,
               affectedHazards,
+              affectedWorkKeys,
+              projectKeys: affectedProjectKeys,
             },
             authMethod: 'CONFLUENCE_EVENT_TRIGGER',
           },
@@ -1560,5 +2003,335 @@ export class LiveIngestionService {
     }
 
     throw new Error(`Failed to persist Confluence page drift for ${pageId} after ${MAX_CAS_RETRY_ATTEMPTS} attempts.`);
+  }
+
+  /**
+   * Forge product trigger handler for `avi:jira:updated:issue`, `avi:jira:created:issuelink`,
+   * and `avi:jira:deleted:issuelink`. Refreshes tracked LIVE Jira issues automatically so status,
+   * title, assignee, labels, and linked Hazard/Test `issuelinks` stay current without manual re-sync.
+   */
+  public static async handleJiraIssueUpdated(
+    event: JiraIssueUpdatedEvent
+  ): Promise<JiraIssueUpdatedResult> {
+    if (!isForgeRuntime()) {
+      return { processed: false, affectedHazards: [] };
+    }
+
+    const candidateIssueRefs: string[] = [];
+    if (typeof event?.issue?.key === 'string' && event.issue.key.trim()) {
+      candidateIssueRefs.push(event.issue.key.trim().toUpperCase());
+    } else if (event?.issue?.id !== undefined && event?.issue?.id !== null) {
+      candidateIssueRefs.push(String(event.issue.id).trim());
+    }
+    if (event?.issueLink?.sourceIssueId !== undefined && event?.issueLink?.sourceIssueId !== null) {
+      candidateIssueRefs.push(String(event.issueLink.sourceIssueId).trim());
+    }
+    if (event?.issueLink?.destinationIssueId !== undefined && event?.issueLink?.destinationIssueId !== null) {
+      candidateIssueRefs.push(String(event.issueLink.destinationIssueId).trim());
+    }
+
+    const uniqueRefs = Array.from(new Set(candidateIssueRefs.filter(Boolean)));
+    if (uniqueRefs.length === 0) {
+      return { processed: false, affectedHazards: [] };
+    }
+
+    const client = api.asApp();
+    const fetchedByKey = new Map<string, JiraApiIssue>();
+    const fetchedIds = new Set<string>();
+    let primaryResolvedKey: string | undefined;
+
+    const fetchJiraIssueIntoMap = async (ref: string): Promise<JiraApiIssue | undefined> => {
+      try {
+        const resp = await client.requestJira(
+          route`/rest/api/3/issue/${ref}?fields=summary,status,assignee,labels,issuetype,project,issuelinks`
+        );
+        if (resp.status === 200) {
+          const parsed = (await resp.json()) as JiraApiIssue;
+          if (typeof parsed?.key === 'string' && parsed.key.trim()) {
+            const upperKey = parsed.key.trim().toUpperCase();
+            fetchedByKey.set(upperKey, parsed);
+            fetchedIds.add(upperKey);
+            if (parsed.id !== undefined && parsed.id !== null) {
+              fetchedIds.add(String(parsed.id).trim());
+            }
+            if (!primaryResolvedKey) {
+              primaryResolvedKey = upperKey;
+            }
+            return parsed;
+          }
+        }
+      } catch {
+        // Ignore transient or deleted-issue 404 refs and continue resolving siblings
+      }
+      return undefined;
+    };
+
+    for (const ref of uniqueRefs) {
+      await fetchJiraIssueIntoMap(ref);
+    }
+
+    if (!primaryResolvedKey || fetchedByKey.size === 0) {
+      return { processed: false, affectedHazards: [] };
+    }
+
+    const collectRawIssueLinkKeys = (issuelinks: unknown): Set<string> => {
+      const keys = new Set<string>();
+      if (!Array.isArray(issuelinks)) return keys;
+      for (const raw of issuelinks) {
+        if (!raw || typeof raw !== 'object') continue;
+        const entry = raw as JiraIssueLinkEntry;
+        for (const side of [entry.inwardIssue, entry.outwardIssue]) {
+          if (typeof side?.key === 'string' && side.key.trim()) {
+            keys.add(side.key.trim().toUpperCase());
+          }
+        }
+      }
+      return keys;
+    };
+
+    const isDeletedLinkEvent = event?.eventType === 'avi:jira:deleted:issuelink';
+
+    for (let attempt = 1; attempt <= MAX_CAS_RETRY_ATTEMPTS; attempt++) {
+      const { summary: suite, version } = await SeederService.getSuiteWithVersion();
+      if (suite.datasetMode !== 'LIVE' || suite.initialized === false || suite.traceLinks.length === 0) {
+        return { processed: false, issueKey: primaryResolvedKey, affectedHazards: [] };
+      }
+
+      const matchingIndices: number[] = [];
+      suite.traceLinks.forEach((link, idx) => {
+        const workKey = (link.work?.key || '').trim().toUpperCase();
+        const hazKey = (link.hazard?.key || '').trim().toUpperCase();
+        const testKey = (link.test?.testKey || '').trim().toUpperCase();
+        const revKey = (link.reverificationTaskKey || '').trim().toUpperCase();
+        if (
+          (workKey && fetchedByKey.has(workKey)) ||
+          (hazKey && fetchedByKey.has(hazKey)) ||
+          (testKey && fetchedByKey.has(testKey)) ||
+          (revKey && fetchedByKey.has(revKey)) ||
+          (link.work?.id && fetchedIds.has(String(link.work.id).trim())) ||
+          (link.hazard?.id && fetchedIds.has(String(link.hazard.id).trim())) ||
+          (link.test?.id && fetchedIds.has(String(link.test.id).trim()))
+        ) {
+          matchingIndices.push(idx);
+        }
+      });
+
+      if (matchingIndices.length === 0) {
+        return { processed: false, issueKey: primaryResolvedKey, affectedHazards: [] };
+      }
+
+      // Ensure every affected link's anchoring Jira work item is fetched so issuelinks reconciliation has current truth.
+      for (const idx of matchingIndices) {
+        const wk = (suite.traceLinks[idx].work?.key || '').trim().toUpperCase();
+        if (wk && JIRA_ISSUE_KEY_RE.test(wk) && !fetchedByKey.has(wk)) {
+          await fetchJiraIssueIntoMap(wk);
+        }
+      }
+
+      const updatedLinks = suite.traceLinks.map(cloneTraceLink);
+      const affectedHazards: string[] = [];
+      const part11Secret = (process.env.MEDTRACE_PART11_SECRET || '').trim();
+
+      for (const idx of matchingIndices) {
+        const link = updatedLinks[idx];
+        const workKeyUpper = (link.work?.key || '').trim().toUpperCase();
+        const hazKeyUpper = (link.hazard?.key || '').trim().toUpperCase();
+        const testKeyUpper = (link.test?.testKey || '').trim().toUpperCase();
+
+        const workIssue = workKeyUpper ? fetchedByKey.get(workKeyUpper) : undefined;
+        let hazDowngraded = false;
+        let testDowngraded = false;
+
+        if (workIssue) {
+          const workFields = workIssue.fields || {};
+          const workLabels = normalizeStringArray(workFields.labels);
+          link.work.title = workFields.summary || link.work.title;
+          link.work.status = mapJiraStatusToWorkStatus(workFields.status);
+          link.work.assignee = workFields.assignee?.displayName || 'Unassigned';
+
+          const rawLinks = Array.isArray(workFields.issuelinks) ? workFields.issuelinks : [];
+          const rawLinkedKeys = collectRawIssueLinkKeys(rawLinks);
+          const linked = resolveLinkedHazardAndTest(
+            extractLinkedIssueCandidates(rawLinks, fetchedByKey)
+          );
+
+          if (linked.linkedHazard) {
+            link.hazard.id = linked.linkedHazard.id;
+            link.hazard.key = linked.linkedHazard.key;
+            link.hazard.title = linked.linkedHazard.summary || link.hazard.title;
+            link.hazard.source = 'JIRA_ISSUE';
+            if (link.graphMetadata) {
+              link.graphMetadata.hazardAri = `ari:cloud:jira::issue/${linked.linkedHazard.key}`;
+              link.graphMetadata.edgeType = linked.linkedHazard.relationshipLabel || link.graphMetadata.edgeType;
+            }
+          } else if (link.hazard.source === 'JIRA_ISSUE' && Array.isArray(workFields.issuelinks)) {
+            const fallbackHazKey = `HAZ-${workKeyUpper}`;
+            link.hazard.id = fallbackHazKey.toLowerCase();
+            link.hazard.key = fallbackHazKey;
+            link.hazard.title = workFields.summary || `Hazard for ${workKeyUpper}`;
+            link.hazard.source = 'APP_MANAGED';
+            hazDowngraded = true;
+            if (link.graphMetadata) {
+              link.graphMetadata.hazardAri = `ari:cloud:medtrace::iso14971-hazard/${fallbackHazKey}`;
+            }
+          }
+
+          if (linked.linkedTest) {
+            const changedTest =
+              link.test.testKey.toUpperCase() !== linked.linkedTest.key.toUpperCase();
+            link.test.id = linked.linkedTest.id;
+            link.test.testKey = linked.linkedTest.key;
+            link.test.title = linked.linkedTest.summary || link.test.title;
+            link.test.source = 'JIRA_ISSUE';
+            if (changedTest) {
+              link.test.status = 'UNTESTED';
+              delete link.test.evidenceUrl;
+              delete link.test.executionDate;
+              delete link.test.recordedBy;
+              delete link.test.notes;
+            }
+          } else if (link.test.source === 'JIRA_ISSUE' && Array.isArray(workFields.issuelinks)) {
+            const fallbackTestKey = `TEST-${workKeyUpper}`;
+            link.test.id = fallbackTestKey.toLowerCase();
+            link.test.testKey = fallbackTestKey;
+            link.test.title = `Verification Test for ${workKeyUpper}`;
+            link.test.source = 'APP_MANAGED';
+            link.test.status = 'UNTESTED';
+            delete link.test.evidenceUrl;
+            delete link.test.executionDate;
+            delete link.test.recordedBy;
+            delete link.test.notes;
+            testDowngraded = true;
+          }
+
+          if (linked.linkedReverification) {
+            link.reverificationTaskKey = linked.linkedReverification.key;
+          } else if (
+            link.reverificationTaskKey &&
+            Array.isArray(workFields.issuelinks) &&
+            !rawLinkedKeys.has(link.reverificationTaskKey.trim().toUpperCase())
+          ) {
+            delete link.reverificationTaskKey;
+          }
+
+          if (workLabels.length > 0 && !linked.linkedHazard) {
+            const inferred = inferRiskClass(workLabels);
+            link.hazard.riskClass = inferred.riskClass;
+            delete link.hazard.severity;
+            delete link.hazard.probability;
+            if (inferred.safetyClassAssigned === false) {
+              link.hazard.safetyClassAssigned = false;
+            } else {
+              delete link.hazard.safetyClassAssigned;
+            }
+          }
+        }
+
+        const currentHazKey = (link.hazard?.key || '').trim().toUpperCase();
+        const hazIssue = !hazDowngraded
+          ? fetchedByKey.get(currentHazKey) || (hazKeyUpper ? fetchedByKey.get(hazKeyUpper) : undefined)
+          : undefined;
+        if (hazIssue && !hazDowngraded && (!link.hazard.source || link.hazard.source === 'JIRA_ISSUE' || hazIssue.key?.toUpperCase() === currentHazKey)) {
+          const hazFields = hazIssue.fields || {};
+          const hazLabels = normalizeStringArray(hazFields.labels);
+          link.hazard.title = hazFields.summary || link.hazard.title;
+          link.hazard.source = 'JIRA_ISSUE';
+          if (hazLabels.length > 0) {
+            const inferred = inferRiskClass(hazLabels);
+            if (inferred.safetyClassAssigned !== false) {
+              link.hazard.riskClass = inferred.riskClass;
+              delete link.hazard.severity;
+              delete link.hazard.probability;
+              delete link.hazard.safetyClassAssigned;
+            }
+          }
+        }
+
+        const currentTestKey = (link.test?.testKey || '').trim().toUpperCase();
+        const testIssue = !testDowngraded
+          ? fetchedByKey.get(currentTestKey) || (testKeyUpper ? fetchedByKey.get(testKeyUpper) : undefined)
+          : undefined;
+        if (testIssue && !testDowngraded) {
+          const testFields = testIssue.fields || {};
+          link.test.title = testFields.summary || link.test.title;
+          link.test.source = 'JIRA_ISSUE';
+        }
+
+        if (isDeletedLinkEvent && link.reverificationTaskKey) {
+          const revUpper = link.reverificationTaskKey.trim().toUpperCase();
+          const revIssue = fetchedByKey.get(revUpper);
+          if (revIssue && Array.isArray(revIssue.fields?.issuelinks)) {
+            const revLinkedKeys = collectRawIssueLinkKeys(revIssue.fields.issuelinks);
+            if (workKeyUpper && !revLinkedKeys.has(workKeyUpper)) {
+              delete link.reverificationTaskKey;
+            }
+          }
+        }
+
+        const evaluated = ComplianceEngine.evaluateTraceLink(
+          link.hazard,
+          link.spec,
+          link.work,
+          link.test,
+          link.signature,
+          link.graphMetadata,
+          {
+            linkId: link.id,
+            part11Secret,
+            requireCryptographicSeal: true,
+            requireTestEvidence: true,
+            reverificationTaskKey: link.reverificationTaskKey,
+          }
+        );
+        evaluated.hazard.status = ComplianceEngine.deriveHazardStatus(evaluated.complianceState);
+        updatedLinks[idx] = evaluated;
+        if (!affectedHazards.includes(evaluated.hazard.key)) {
+          affectedHazards.push(evaluated.hazard.key);
+        }
+      }
+
+      const eventNowIso = new Date().toISOString();
+      const updated = ComplianceEngine.generateComplianceReport(
+        updatedLinks,
+        suite.datasetMode,
+        suite.projectName,
+        { initialized: true, lastSyncedAt: eventNowIso }
+      );
+
+      const affectedWorkProject = updatedLinks[matchingIndices[0]]?.work?.key?.split('-')[0];
+      const projectKey = affectedWorkProject || primaryResolvedKey.split('-')[0];
+
+      try {
+        await commitSuiteMutation({
+          summary: updated,
+          expectedVersion: version ?? 0,
+          auditEntry: {
+            actorAccountId: String(
+              event?.atlassianId || event?.context?.accountId || 'jira-event-trigger'
+            ),
+            action: 'SYNC_LIVE',
+            targetKey: primaryResolvedKey,
+            details: {
+              projectKey,
+              issueKey: primaryResolvedKey,
+              eventType: event?.eventType || 'avi:jira:updated:issue',
+              affectedHazards,
+              lastSyncedAt: eventNowIso,
+            },
+            authMethod: 'JIRA_EVENT_TRIGGER',
+          },
+        });
+        return { processed: true, issueKey: primaryResolvedKey, affectedHazards };
+      } catch (err: unknown) {
+        if (isConcurrencyError(err) && attempt < MAX_CAS_RETRY_ATTEMPTS) {
+          continue;
+        }
+        throw err;
+      }
+    }
+
+    throw new Error(
+      `Failed to persist Jira issue trigger sync for ${primaryResolvedKey} after ${MAX_CAS_RETRY_ATTEMPTS} attempts.`
+    );
   }
 }

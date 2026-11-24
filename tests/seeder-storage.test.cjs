@@ -1505,4 +1505,113 @@ test.describe('Task 1B-Seeder: bindIssueToHazard & recordTestResult Hardening (C
     assert.ok(Array.isArray(meta.blockingReasonShardKeys) && meta.blockingReasonShardKeys.length >= 1);
     assert.ok(metaShardItems.some((item) => meta.blockingReasonShardKeys.includes(item.key)));
   });
+
+  test.it('signOffPart11 updates all sibling links sharing the same (hazardKey, specId) approval baseline', async () => {
+    const kvsMock = createFullMockForgeKvs();
+    const asUserImpl = () => ({
+      requestJira: async () =>
+        makeJsonResponse(200, { accountId: 'acc-qa-lead', displayName: 'QA Lead', active: true }),
+    });
+    await withForgeMocks({ kvsMock, asUserImpl }, async () => {
+      const specHash = crypto.createHash('sha256').update('shared-srs-5.5').digest('hex');
+      const sharedHazard = {
+        id: 'haz-shared',
+        key: 'HAZ-SHARED',
+        title: 'Shared Infusion Hazard',
+        riskClass: 'CLASS_C',
+        severity: 'CATASTROPHIC',
+        probability: 'OCCASIONAL',
+        mitigationRequirementId: 'srs-shared',
+        status: 'ACTION_REQUIRED',
+      };
+      const sharedSpec = {
+        id: 'srs-shared',
+        pageId: '88001',
+        title: 'SRS-SHARED: Shared Bolus Spec',
+        version: 2,
+        sha256Hash: specHash,
+        lastSignedHash: '',
+        isSignatureInvalidated: true,
+        contentSnippet: 'Bolus limit 5.5 mL/hr',
+        lastUpdated: '2026-11-20T00:00:00Z',
+      };
+      const emptySig = {
+        id: 'sig-shared',
+        signedBy: '',
+        signedAt: '',
+        role: 'Authority',
+        meaning: 'Pending',
+        artifactSha256: '',
+        isValid: false,
+      };
+      const passedTest = {
+        id: 'test-shared',
+        testKey: 'TEST-SHARED',
+        title: 'Shared Verification Test',
+        testType: 'Automated HIL (Hardware-in-Loop)',
+        status: 'PASSED',
+        evidenceUrl: 'https://ci.example/runs/shared-1',
+        executionDate: '2026-11-20T01:00:00Z',
+      };
+
+      const linkMed1 = ComplianceEngine.evaluateTraceLink(
+        { ...sharedHazard },
+        { ...sharedSpec },
+        { id: 'w-1', key: 'MED-1', title: 'Primary Control', status: 'Done', assignee: 'Alice' },
+        { ...passedTest, id: 't-1', testKey: 'TEST-1' },
+        { ...emptySig },
+        undefined,
+        { linkId: 'link-med-1', requireCryptographicSeal: true, requireTestEvidence: true }
+      );
+      const linkMed2 = ComplianceEngine.evaluateTraceLink(
+        { ...sharedHazard },
+        { ...sharedSpec },
+        { id: 'w-2', key: 'MED-2', title: 'Redundant Guard', status: 'Done', assignee: 'Bob' },
+        { ...passedTest, id: 't-2', testKey: 'TEST-2' },
+        { ...emptySig },
+        undefined,
+        { linkId: 'link-med-2', requireCryptographicSeal: true, requireTestEvidence: true }
+      );
+      const unrelatedLink = ComplianceEngine.evaluateTraceLink(
+        { ...sharedHazard, id: 'haz-other', key: 'HAZ-OTHER' },
+        { ...sharedSpec, id: 'srs-other', pageId: '88002' },
+        { id: 'w-3', key: 'MED-3', title: 'Other Feature', status: 'Done', assignee: 'Cara' },
+        { ...passedTest, id: 't-3', testKey: 'TEST-3' },
+        { ...emptySig },
+        undefined,
+        { linkId: 'link-med-3', requireCryptographicSeal: true, requireTestEvidence: true }
+      );
+
+      await SeederService.saveComplianceSuite(
+        ComplianceEngine.generateComplianceReport([linkMed1, linkMed2, unrelatedLink], 'LIVE', 'Shared Baseline Suite', {
+          initialized: true,
+        }),
+        0
+      );
+
+      const signed = await SeederService.signOffPart11({
+        hazardKey: 'HAZ-SHARED',
+        specId: 'srs-shared',
+        workKey: 'MED-1',
+        attestation: {
+          meaning: 'Clinical sign-off for shared HAZ-SHARED / srs-shared baseline',
+          attestationConfirmed: true,
+          attestationChecked: true,
+          attestationPhrase: PART11_ATTESTATION_PHRASE,
+        },
+        actorAccountId: 'acc-qa-lead',
+      });
+
+      const med1 = signed.traceLinks.find((l) => l.work.key === 'MED-1');
+      const med2 = signed.traceLinks.find((l) => l.work.key === 'MED-2');
+      const med3 = signed.traceLinks.find((l) => l.work.key === 'MED-3');
+      assert.strictEqual(med1.complianceState, 'VERIFIED');
+      assert.strictEqual(med2.complianceState, 'VERIFIED');
+      assert.strictEqual(med1.signature.isValid, true);
+      assert.strictEqual(med2.signature.isValid, true);
+      assert.strictEqual(med2.signature.signatureSeal, med1.signature.signatureSeal);
+      assert.strictEqual(med3.complianceState, 'SIGNATURE_DRIFT');
+      assert.strictEqual(med3.signature.isValid, false);
+    });
+  });
 });

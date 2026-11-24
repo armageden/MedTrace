@@ -58,6 +58,12 @@ export interface InspectionDrawerProps {
     hazardKey: string,
     meaning: string
   ) => Promise<boolean> | Promise<void> | void;
+  onCreateReverificationTask?: (params: {
+    hazardKey?: string;
+    linkId?: string;
+    issueKey?: string;
+    reason?: string;
+  }) => Promise<boolean> | Promise<void> | void;
   isMutating: boolean;
   isGlobalBusy?: boolean;
 }
@@ -99,6 +105,7 @@ export const InspectionDrawer: React.FC<InspectionDrawerProps> = ({
   onRecordTestResult,
   onSignOffPart11,
   onRemediateDemo,
+  onCreateReverificationTask,
   isMutating,
   isGlobalBusy = false,
 }) => {
@@ -511,31 +518,97 @@ export const InspectionDrawer: React.FC<InspectionDrawerProps> = ({
                   • {v}
                 </div>
               ))}
+              {link.reverificationTaskKey && (
+                <div
+                  style={{
+                    marginTop: 8,
+                    fontSize: 11,
+                    fontWeight: 700,
+                    color: 'var(--mt-brand-text)',
+                  }}
+                >
+                  Linked Re-Verification Jira Task: {link.reverificationTaskKey}
+                </div>
+              )}
+              {datasetMode === 'LIVE' &&
+                link.work.key &&
+                !link.reverificationTaskKey &&
+                onCreateReverificationTask && (
+                  <button
+                    type="button"
+                    disabled={isBusy}
+                    onClick={() => {
+                      void onCreateReverificationTask({
+                        hazardKey: link.hazard.key,
+                        linkId: link.id,
+                        issueKey: link.work.key,
+                        reason: link.signature.invalidationReason || link.violations[0],
+                      });
+                    }}
+                    className="mt-btn"
+                    style={{
+                      marginTop: 10,
+                      border: '1px solid var(--mt-danger-border)',
+                      background: 'var(--mt-bg-surface)',
+                      color: 'var(--mt-danger-text)',
+                      fontSize: 11,
+                      padding: '5px 10px',
+                    }}
+                  >
+                    <GitPullRequest size={13} /> Create Re-Verification Jira Task ({link.work.key})
+                  </button>
+                )}
             </div>
           )}
 
-          {/* Stage 1: ISO 14971 Hazard */}
+          {/* Stage 1: Hazard & IEC 62304 Software Safety Class */}
           <div style={sectionStyle}>
             <div style={sectionHeader}>
               <ShieldAlert
                 size={15}
                 color={isClassC ? 'var(--mt-danger-text)' : 'var(--mt-brand-text)'}
               />
-              <span>1. IEC 62304 Software Safety Class</span>
+              <span>1. Hazard &amp; IEC 62304 Software Safety Class</span>
             </div>
             <div style={{ fontWeight: 700, fontSize: 13, color: 'var(--mt-text-primary)' }}>
               {link.hazard.title}
             </div>
             <div style={{ marginTop: 6, display: 'flex', gap: 8, fontSize: 11, flexWrap: 'wrap' }}>
               <span style={pillStyle('var(--mt-danger-bg)', 'var(--mt-danger-text)')}>
-                {link.hazard.riskClass.replace('_', ' ')}
+                IEC 62304 {link.hazard.riskClass.replace('_', ' ')}
               </span>
-              <span style={pillStyle('var(--mt-bg-page)', 'var(--mt-text-secondary)')}>
-                Severity: {link.hazard.severity}
-              </span>
-              <span style={pillStyle('var(--mt-bg-page)', 'var(--mt-text-secondary)')}>
-                Prob: {link.hazard.probability}
-              </span>
+              {link.hazard.severity || link.hazard.probability ? (
+                <>
+                  {link.hazard.severity && (
+                    <span style={pillStyle('var(--mt-bg-page)', 'var(--mt-text-secondary)')}>
+                      ISO 14971 Severity: {link.hazard.severity}
+                    </span>
+                  )}
+                  {link.hazard.probability && (
+                    <span style={pillStyle('var(--mt-bg-page)', 'var(--mt-text-secondary)')}>
+                      ISO 14971 Prob: {link.hazard.probability}
+                    </span>
+                  )}
+                </>
+              ) : (
+                <span style={pillStyle('var(--mt-bg-page)', 'var(--mt-text-secondary)')}>
+                  ISO 14971 Sev/Prob: Not synced from Jira
+                </span>
+              )}
+              {datasetMode === 'LIVE' && link.hazard.source && (
+                <span
+                  style={pillStyle(
+                    link.hazard.source === 'JIRA_ISSUE'
+                      ? 'var(--mt-brand-subtle-bg)'
+                      : 'var(--mt-warning-bg)',
+                    link.hazard.source === 'JIRA_ISSUE'
+                      ? 'var(--mt-brand-text)'
+                      : 'var(--mt-warning-text)'
+                  )}
+                >
+                  {link.hazard.source === 'JIRA_ISSUE' ? 'Native Jira Hazard' : 'App-Managed Hazard'}
+                </span>
+              )}
             </div>
           </div>
 
@@ -675,6 +748,9 @@ export const InspectionDrawer: React.FC<InspectionDrawerProps> = ({
             </div>
             <div style={{ fontSize: 11, color: 'var(--mt-text-muted)', marginTop: 4 }}>
               Type: {link.test.testType}
+              {datasetMode === 'LIVE' && link.test.source
+                ? ` • Source: ${link.test.source === 'JIRA_ISSUE' ? 'Native Jira Issue' : 'App-Managed Record'}`
+                : ''}
             </div>
             <div style={{ fontSize: 11, color: 'var(--mt-text-secondary)', marginTop: 2 }}>
               Execution: {link.test.executionDate || 'Not yet executed'}

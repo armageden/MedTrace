@@ -128,12 +128,18 @@ const HazardNodeInner: React.FC<NodeProps<Node<FlowNodePayload<IsoHazard>>>> = (
           justifyContent: 'space-between',
         }}
       >
-        <span>
-          Sev: <b>{hazard.severity}</b>
-        </span>
-        <span>
-          Prob: <b>{hazard.probability}</b>
-        </span>
+        {hazard.severity || hazard.probability ? (
+          <>
+            <span>
+              Sev: <b>{hazard.severity || 'Not synced'}</b>
+            </span>
+            <span>
+              Prob: <b>{hazard.probability || 'Not synced'}</b>
+            </span>
+          </>
+        ) : (
+          <span>IEC 62304 Safety Class: <b>{hazard.riskClass.replace('_', ' ')}</b></span>
+        )}
       </div>
       <Handle type="source" position={Position.Right} style={handleStyle} />
     </div>

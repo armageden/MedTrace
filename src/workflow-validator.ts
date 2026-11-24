@@ -19,7 +19,38 @@ export interface WorkflowValidatorPayload {
   };
   issueKey?: string;
   key?: string;
-  transition?: { name?: string };
+  transition?: {
+    name?: string;
+    from?: { id?: string; name?: string; statusCategory?: { key?: string; name?: string } };
+    to?: { id?: string; name?: string; statusCategory?: { key?: string; name?: string } };
+  };
+}
+
+export function isReleaseTransitionPayload(payload?: WorkflowValidatorPayload | null): boolean {
+  const t = payload?.transition;
+  if (!t || typeof t !== 'object') {
+    return false;
+  }
+  const toCat =
+    typeof t.to?.statusCategory?.key === 'string'
+      ? t.to.statusCategory.key.trim().toLowerCase()
+      : '';
+  if (toCat) {
+    return toCat === 'done';
+  }
+  const toName = typeof t.to?.name === 'string' ? t.to.name.trim().toLowerCase() : '';
+  if (toName) {
+    return /^(done|closed|resolved|released|ready for release)$/i.test(toName);
+  }
+  const transName = typeof t.name === 'string' ? t.name.trim().toLowerCase() : '';
+  if (!transName) {
+    return false;
+  }
+  return (
+    /^(done|mark(ed)?( as)? done|move to done|release|ready for release|complete(d)?|close(d)?|resolve(d)?)$/i.test(
+      transName
+    ) || /(?:->|→|\bto)\s*done\b/i.test(transName)
+  );
 }
 
 function normalizeIssueKey(payload?: WorkflowValidatorPayload | null): string | undefined {
@@ -156,10 +187,16 @@ export async function workflowValidatorHandler(
       safetyProbe = await probeUnsyncedSafetyIssue(issueKey, payload);
     }
 
+    const transitionToDone = isReleaseTransitionPayload(payload);
     const outcome: TransitionResult = ComplianceEngine.evaluateIssueReleaseGate(
       issueKey,
       suite,
-      safetyProbe
+      safetyProbe || transitionToDone
+        ? {
+            ...(safetyProbe ?? {}),
+            ...(transitionToDone ? { transitionToDone: true } : {}),
+          }
+        : undefined
     );
 
     if (!outcome.result) {

@@ -1,190 +1,73 @@
 1
-00:00:01,000 --> 00:00:07,000
-A change to a medical-device software
-requirement can affect linked hazards,
+00:00:00,500 --> 00:00:07,000
+When a signed medical-device requirement changes—say an infusion limit
+moves from 5.0 to 5.5 mL/hr—
 
 2
-00:00:07,000 --> 00:00:12,000
-work items, test evidence,
-and approval records.
+00:00:07,000 --> 00:00:13,500
+teams must prove which hazards, Jira work, tests,
+and approvals are affected.
 
 3
-00:00:12,000 --> 00:00:16,000
-MedTrace makes those trace relationships
-inspectable on live Jira and Confluence data.
+00:00:13,500 --> 00:00:20,000
+MedTrace tracks that chain on live Atlassian data, revokes stale approvals,
+enforces the gate, and creates linked re-verification tasks.
 
 4
-00:00:16,000 --> 00:00:20,000
-It supports traceability work;
-it does not determine regulatory compliance.
+00:00:20,500 --> 00:00:28,000
+LIVE mode starts fail-closed with zero hazards.
 
 5
-00:00:21,000 --> 00:00:27,000
-This is a real Jira project and a real
-Confluence space — the specifications
+00:00:28,000 --> 00:00:39,000
+One click on Sync Live Atlassian ingests real Jira issues,
+Confluence remote links, and native issue links—
 
 6
-00:00:27,000 --> 00:00:31,000
-are synthetic, but they are
-live tenant artifacts.
+00:00:39,000 --> 00:00:50,000
+with no fabricated risk metrics.
 
 7
-00:00:31,000 --> 00:00:36,000
-MedTrace opens empty: LIVE mode starts
-fail-closed with zero hazards.
+00:00:50,500 --> 00:01:02,000
+Recording passing test evidence and signing the Confluence spec's
+SHA-256 hash satisfies the release gate—
 
 8
-00:00:36,000 --> 00:00:41,000
-One click on Sync Live Atlassian
-ingests the project's labelled issues.
+00:01:02,000 --> 00:01:16,000
+so the real Jira workflow validator allows moving this compliant issue
+from Under Review to Done.
 
 9
-00:00:41,000 --> 00:00:46,000
-Four tracked tasks link to their SRS pages
-through Jira remote links.
+00:01:30,000 --> 00:01:42,000
+Now SRS-201 changes from 5.0 to 5.5.
 
 10
-00:00:46,000 --> 00:00:51,000
-MEDTRACE-5 is safety-labelled but has no
-linked specification — flagged as a gap.
+00:01:42,000 --> 00:01:55,000
+The Confluence trigger recomputes the hash, revokes the stale signature
+automatically, and traces the complete transitive blast radius.
 
 11
-00:00:51,000 --> 00:00:55,000
-MEDTRACE-6 is untagged and skipped.
+00:02:10,000 --> 00:02:24,000
+With approval drifted or evidence missing, the same Jira workflow validator
+blocks the transition to Done—
 
 12
-00:00:55,000 --> 00:01:05,000
-Every test starts UNTESTED and unsigned,
-so the release is BLOCKED.
+00:02:24,000 --> 00:02:39,000
+contrasted directly with our compliant issue.
 
 13
-00:01:06,000 --> 00:01:11,000
-Closing the loop on MEDTRACE-1:
-record a PASSED verification result
+00:02:40,000 --> 00:02:56,000
+Through hosted Atlassian MCP over OAuth, verify-iec-compliance flags the drift,
 
 14
-00:01:11,000 --> 00:01:14,000
-with a real evidence URL,
+00:02:56,000 --> 00:03:18,000
+and create-reverification-task creates and links the Jira follow-up task—
+invoked by the user, never silently auto-created.
 
 15
-00:01:14,000 --> 00:01:19,000
-then execute the 21 CFR Part 11 sign-off —
+00:03:20,000 --> 00:03:35,000
+The Jira issue link and hash-chained audit record close the loop.
 
 16
-00:01:19,000 --> 00:01:25,000
-an attested electronic signature
-over the spec's content hash.
-
-17
-00:01:25,000 --> 00:01:30,000
-The trace link turns verified.
-
-18
-00:01:36,000 --> 00:01:41,000
-Now the requirement drifts: in Confluence,
-
-19
-00:01:41,000 --> 00:01:46,000
-SRS-201 changes from 5.0 to 5.5
-millilitres per hour.
-
-20
-00:01:46,000 --> 00:01:52,000
-The page-update trigger fires,
-the approval signature is revoked,
-
-21
-00:01:52,000 --> 00:01:58,000
-and one click shows the transitive
-blast radius — the spec, its hazard,
-
-22
-00:01:58,000 --> 00:02:03,000
-the Jira task, the test,
-and the re-audit checklist.
-
-23
-00:02:06,000 --> 00:02:11,000
-The Test Human Gate button invokes
-the same validator handler a Jira
-
-24
-00:02:11,000 --> 00:02:15,000
-workflow calls on transition.
-
-25
-00:02:15,000 --> 00:02:22,000
-With a Class C hazard unverified,
-the transition is blocked — fail-closed.
-
-26
-00:02:22,000 --> 00:02:28,000
-A site admin can attach this validator
-to a live workflow.
-
-27
-00:02:31,000 --> 00:02:37,000
-The MedTrace Auditor runs the same
-deterministic engine inside Rovo chat.
-
-28
-00:02:37,000 --> 00:02:44,000
-Asked about MEDTRACE-1, it calls
-the hazard-lineage action and returns
-
-29
-00:02:44,000 --> 00:02:52,000
-the trace chain and the release verdict —
-under the invoking user's own permissions.
-
-30
-00:02:56,000 --> 00:03:02,000
-The same two actions are exposed
-through the Atlassian MCP server at
-
-31
-00:03:02,000 --> 00:03:06,000
-mcp.atlassian.com — a site admin enables
-external MCP exposure under Connected apps,
-
-32
-00:03:06,000 --> 00:03:10,000
-and the client connects over OAuth.
-
-33
-00:03:10,000 --> 00:03:16,000
-Here verify-iec-compliance answers
-the bolus-rate diff: release blocked.
-
-34
-00:03:21,000 --> 00:03:26,000
-Evidence exports and the hash-chained
-audit trail verify independently.
-
-35
-00:03:26,000 --> 00:03:31,000
-Evaluators with no tenant data can seed
-a labelled DEMO dataset instead.
-
-36
-00:03:31,000 --> 00:03:35,000
-MedTrace is assistive traceability tooling —
-not a regulatory determination,
-
-37
-00:03:35,000 --> 00:03:38,000
-not a validated QMS,
-and not for patient data.
-
-38
-00:03:39,000 --> 00:03:43,000
-MedTrace — deterministic blast radius,
-a hard safety gate,
-
-39
-00:03:43,000 --> 00:03:45,000
-and cryptographic evidence,
-
-40
-00:03:45,000 --> 00:03:48,000
-on live Atlassian data. Built on Forge.
+00:03:35,000 --> 00:03:50,000
+A Confluence requirement changes; MedTrace proves the impact, revokes stale approvals,
+and creates linked re-verification work without leaving Atlassian.

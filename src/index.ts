@@ -3,11 +3,21 @@ import api, { route } from '@forge/api';
 import crypto from 'crypto';
 import { ComplianceEngine } from './compliance-engine';
 import { SeederService } from './seeder';
+import {
+  authorizeAndFilterLiveSuite,
+  authorizeAndFilterLiveSuiteDetailed,
+  extractAllJiraProjectKeysFromLink,
+  extractJiraProjectKeyFromRawKey,
+  hasJiraBrowsePermissionForCaller,
+  redactBlastRadiusReport,
+} from './seeder-identity';
 import { resolveTraceLinkByHazard } from './seeder-storage';
 import {
   LiveIngestionService,
   ConfluencePageUpdatedEvent,
   ConfluencePageUpdatedResult,
+  JiraIssueUpdatedEvent,
+  JiraIssueUpdatedResult,
 } from './ingestion';
 import { AuditLogService, MAX_AUDIT_LOG_PAGE_LIMIT } from './audit-log';
 import { TeamworkGraphService } from './teamwork-graph';
@@ -26,6 +36,7 @@ import {
   NonceClaimResult,
 } from './nonce-store';
 import {
+  AuditLogEntry,
   ComplianceSummary,
   MedTraceResolverMap,
   PART11_ATTESTATION_PHRASE,
@@ -572,103 +583,230 @@ export async function assertAuthorizedOperator(
   };
 }
 
-async function hasJiraBrowsePermission(projectKey?: string): Promise<boolean> {
-  const permRoute = projectKey
-    ? route`/rest/api/3/mypermissions?projectKey=${projectKey}&permissions=BROWSE_PROJECTS`
-    : route`/rest/api/3/mypermissions?permissions=BROWSE_PROJECTS`;
-
-  const res = await api.asUser().requestJira(permRoute);
-  if (!isHttpOk(res)) {
-    return false;
-  }
-  const data = (await res.json().catch(() => ({}))) as JiraPermissionsResponse;
-  const browsePerm = data.permissions?.BROWSE_PROJECTS;
-  if (browsePerm !== undefined) {
-    return browsePerm.havePermission === true;
-  }
-  return (
-    data.permissions?.EDIT_ISSUES?.havePermission === true ||
-    data.permissions?.ADMINISTER_PROJECTS?.havePermission === true
-  );
-}
-
-function extractJiraProjectKeyFromLink(link: TraceLink): string | undefined {
-  const workKey = link.work?.key?.trim().toUpperCase();
-  if (workKey && ISSUE_KEY_RE.test(workKey)) {
-    return workKey.split('-')[0];
-  }
-  const hazardDerived = link.hazard?.key?.trim().toUpperCase().replace(/^HAZ-/i, '');
-  if (hazardDerived && ISSUE_KEY_RE.test(hazardDerived)) {
-    return hazardDerived.split('-')[0];
-  }
-  return undefined;
-}
-
 async function filterLiveSuiteForCaller(
   caller: AuthorizedCaller,
   suite: ComplianceSummary
 ): Promise<ComplianceSummary> {
   if (
-    !isForgeRuntime() ||
     suite.datasetMode !== 'LIVE' ||
     suite.initialized === false ||
-    suite.traceLinks.length === 0 ||
-    caller.projectKey
+    suite.traceLinks.length === 0
   ) {
     return suite;
   }
 
-  if (caller.extensionType.toLowerCase().startsWith('confluence:')) {
+  const runtimeActive = isForgeRuntime();
+  if (!caller.projectKey && !runtimeActive) {
+    return suite;
+  }
+
+  if (runtimeActive && caller.extensionType.toLowerCase().startsWith('confluence:')) {
     await verifyJiraIdentity(caller.accountId);
   }
 
+  return authorizeAndFilterLiveSuite(suite, {
+    extensionType: caller.extensionType,
+    projectKey: caller.projectKey,
+    checkConfluencePages: true,
+  });
+}
+
+interface LinkProjectIndex {
+  byKey: Map<string, Set<string>>;
+  bySpecOrPage: Map<string, Set<string>>;
+}
+
+function buildLinkProjectIndex(suite: ComplianceSummary): LinkProjectIndex {
+  const byKey = new Map<string, Set<string>>();
+  const bySpecOrPage = new Map<string, Set<string>>();
+
+  const addProjects = (map: Map<string, Set<string>>, rawKey: string | undefined, projs: string[]) => {
+    const clean = rawKey?.trim().toLowerCase();
+    if (!clean || projs.length === 0) return;
+    let set = map.get(clean);
+    if (!set) {
+      set = new Set<string>();
+      map.set(clean, set);
+    }
+    for (const p of projs) set.add(p);
+  };
+
+  for (const link of suite.traceLinks) {
+    const projs = extractAllJiraProjectKeysFromLink(link);
+    if (projs.length === 0) continue;
+    addProjects(byKey, link.hazard?.key, projs);
+    addProjects(byKey, link.work?.key, projs);
+    addProjects(byKey, link.test?.testKey, projs);
+    addProjects(byKey, link.reverificationTaskKey, projs);
+    addProjects(bySpecOrPage, link.spec?.id, projs);
+    addProjects(bySpecOrPage, link.spec?.pageId, projs);
+    if (link.spec?.pageId) {
+      addProjects(bySpecOrPage, `page:${link.spec.pageId}`, projs);
+    }
+  }
+
+  return { byKey, bySpecOrPage };
+}
+
+function extractAuditEntryProjectKeys(entry: AuditLogEntry, index: LinkProjectIndex): Set<string> {
+  const projects = new Set<string>();
+  const details =
+    entry.details && typeof entry.details === 'object' ? entry.details : {};
+
+  const addIfProject = (val: unknown) => {
+    if (typeof val !== 'string') return;
+    const upper = val.trim().toUpperCase();
+    if (PROJECT_KEY_RE.test(upper)) {
+      projects.add(upper);
+    }
+  };
+
+  const addFromArtifactKey = (val: unknown) => {
+    if (typeof val !== 'string') return;
+    const trimmed = val.trim();
+    if (!trimmed) return;
+    const directProj = extractJiraProjectKeyFromRawKey(trimmed);
+    if (directProj) projects.add(directProj);
+    const mapped = index.byKey.get(trimmed.toLowerCase()) || index.bySpecOrPage.get(trimmed.toLowerCase());
+    if (mapped) {
+      for (const p of mapped) projects.add(p);
+    }
+  };
+
+  addIfProject(details.projectKey);
+  if (Array.isArray(details.projectKeys)) {
+    for (const pk of details.projectKeys) addIfProject(pk);
+  }
+  if (entry.action === 'SYNC_LIVE') {
+    addIfProject(entry.targetKey);
+  }
+
+  addFromArtifactKey(entry.targetKey);
+  for (const field of [
+    details.hazardKey,
+    details.workKey,
+    details.testKey,
+    details.previousIssueKey,
+    details.newIssueKey,
+    details.createdIssueKey,
+    details.issueKey,
+    details.specId,
+    details.pageId,
+  ]) {
+    addFromArtifactKey(field);
+  }
+  for (const arrField of [details.affectedHazards, details.affectedWorkKeys, details.linkedIssueKeys]) {
+    if (Array.isArray(arrField)) {
+      for (const item of arrField) addFromArtifactKey(item);
+    }
+  }
+
+  return projects;
+}
+
+async function filterAuditEntriesForCaller(
+  caller: AuthorizedCaller,
+  entries: AuditLogEntry[],
+  rawSuite: ComplianceSummary
+): Promise<AuditLogEntry[]> {
+  if (entries.length === 0) return entries;
+
+  const runtimeActive = isForgeRuntime();
+  if (
+    runtimeActive &&
+    rawSuite.datasetMode === 'LIVE' &&
+    caller.extensionType.toLowerCase().startsWith('confluence:')
+  ) {
+    await verifyJiraIdentity(caller.accountId);
+  }
+
+  const index = buildLinkProjectIndex(rawSuite);
   const projectPermCache = new Map<string, boolean>();
   let globalBrowsePerm: boolean | undefined;
 
-  const canBrowseProject = async (projectKey: string): Promise<boolean> => {
+  const isProjectAuthorized = async (projectKey: string): Promise<boolean> => {
     const clean = projectKey.trim().toUpperCase();
+    if (caller.projectKey) {
+      if (clean === caller.projectKey) return true;
+      if (!runtimeActive) return false;
+    }
+    if (!runtimeActive) return true;
     if (projectPermCache.has(clean)) {
       return projectPermCache.get(clean) === true;
     }
-    const allowed = await hasJiraBrowsePermission(clean);
+    const allowed = await hasJiraBrowsePermissionForCaller({ projectKey: clean });
     projectPermCache.set(clean, allowed);
     return allowed;
   };
 
   const canBrowseGlobal = async (): Promise<boolean> => {
+    if (!runtimeActive) return !caller.projectKey;
     if (globalBrowsePerm === undefined) {
-      globalBrowsePerm = await hasJiraBrowsePermission(undefined);
+      globalBrowsePerm = await hasJiraBrowsePermissionForCaller(undefined);
     }
     return globalBrowsePerm;
   };
 
-  const authorizedLinks: TraceLink[] = [];
-  for (const link of suite.traceLinks) {
-    const projKey = extractJiraProjectKeyFromLink(link);
-    if (projKey) {
-      if (await canBrowseProject(projKey)) {
-        authorizedLinks.push(link);
+  const out: AuditLogEntry[] = [];
+  for (const entry of entries) {
+    if (entry.action === 'SEED_DEMO' || entry.action === 'DEMO_SIMULATION') {
+      if (rawSuite.datasetMode === 'DEMO' || (!caller.projectKey && !runtimeActive)) {
+        out.push(entry);
       }
-    } else if (await canBrowseGlobal()) {
-      authorizedLinks.push(link);
+      continue;
+    }
+
+    const entryProjects = extractAuditEntryProjectKeys(entry, index);
+
+    if (caller.projectKey) {
+      if (!entryProjects.has(caller.projectKey)) {
+        continue;
+      }
+      const foreignProjects = Array.from(entryProjects).filter((p) => p !== caller.projectKey);
+      if (foreignProjects.length === 0) {
+        out.push(entry);
+        continue;
+      }
+      // Omit multi-project entries entirely if the caller cannot browse all referenced projects so entryHash remains verifiable.
+      let allForeignAllowed = true;
+      for (const fp of foreignProjects) {
+        if (!(await isProjectAuthorized(fp))) {
+          allForeignAllowed = false;
+          break;
+        }
+      }
+      if (allForeignAllowed) {
+        out.push(entry);
+      }
+      continue;
+    }
+
+    // Global / Confluence context without explicit projectKey
+    if (!runtimeActive || rawSuite.datasetMode === 'DEMO') {
+      out.push(entry);
+      continue;
+    }
+
+    if (entryProjects.size === 0) {
+      if (await canBrowseGlobal()) {
+        out.push(entry);
+      }
+      continue;
+    }
+
+    let allAuthorized = true;
+    for (const p of entryProjects) {
+      if (!(await isProjectAuthorized(p))) {
+        allAuthorized = false;
+        break;
+      }
+    }
+    if (allAuthorized) {
+      out.push(entry);
     }
   }
 
-  if (authorizedLinks.length === suite.traceLinks.length) {
-    return suite;
-  }
-
-  return ComplianceEngine.generateComplianceReport(
-    authorizedLinks,
-    suite.datasetMode,
-    suite.projectName,
-    {
-      storageFormat: suite.storageFormat,
-      auditEntryCount: suite.auditEntryCount,
-      auditHeadHash: suite.auditHeadHash,
-      initialized: suite.initialized,
-    }
-  );
+  return out;
 }
 
 async function assertOperatorAuthorizedForTarget(
@@ -801,10 +939,14 @@ defineTypedResolver('seedDemoSuite', async (req) => {
     await assertJiraSiteAdminPermissions(caller.accountId);
   }
 
-  return SeederService.seedEnterpriseDemoSuite(caller.accountId, 'FORGE_USER_SESSION', {
+  const seeded = await SeederService.seedEnterpriseDemoSuite(caller.accountId, 'FORGE_USER_SESSION', {
     confirmOverwriteLive,
     authorizedSiteAdmin: isInitializedLive,
   });
+  return {
+    ...seeded,
+    summary: await filterLiveSuiteForCaller(caller, seeded.summary),
+  };
 });
 
 defineTypedResolver('syncLiveSuite', async (req) => {
@@ -850,7 +992,7 @@ defineTypedResolver('syncLiveSuite', async (req) => {
       ? req.payload.pageToken.trim()
       : undefined;
 
-  return LiveIngestionService.syncFromAtlassian(
+  const syncResult = await LiveIngestionService.syncFromAtlassian(
     {
       projectKey: caller.projectKey,
       spaceId: rawSpaceId || caller.spaceId,
@@ -864,6 +1006,16 @@ defineTypedResolver('syncLiveSuite', async (req) => {
     },
     caller.accountId
   );
+
+  const filteredSummary = await filterLiveSuiteForCaller(caller, syncResult.summary);
+  const filteredWarnings = Array.isArray(syncResult.warnings)
+    ? syncResult.warnings.filter((w) => !/belonging to other Jira project/i.test(w))
+    : [];
+  return {
+    ...syncResult,
+    warnings: filteredWarnings,
+    summary: filteredSummary,
+  };
 });
 
 defineTypedResolver('remediateGap', async (req) => {
@@ -873,12 +1025,13 @@ defineTypedResolver('remediateGap', async (req) => {
     throw new Error('Bad Request: hazardKey is required.');
   }
   await assertOperatorAuthorizedForTarget(req, { hazardKey });
-  return SeederService.remediateClassCGap(hazardKey, caller.accountId, {
+  const updated = await SeederService.remediateClassCGap(hazardKey, caller.accountId, {
     simulate: req.payload?.simulate === true,
     attestationConfirmed: req.payload?.attestationConfirmed === true,
     meaning: typeof req.payload?.meaning === 'string' ? req.payload.meaning.trim() : undefined,
     authMethod: 'FORGE_USER_SESSION',
   });
+  return filterLiveSuiteForCaller(caller, updated);
 });
 
 defineTypedResolver('recordTestResult', async (req) => {
@@ -916,7 +1069,7 @@ defineTypedResolver('recordTestResult', async (req) => {
 
   await assertOperatorAuthorizedForTarget(req, { hazardKey, testKey, linkId });
 
-  return SeederService.recordTestResult({
+  const updated = await SeederService.recordTestResult({
     hazardKey,
     testKey,
     linkId,
@@ -928,6 +1081,7 @@ defineTypedResolver('recordTestResult', async (req) => {
     actorAccountId: caller.accountId,
     authMethod: 'FORGE_USER_SESSION',
   });
+  return filterLiveSuiteForCaller(caller, updated);
 });
 
 defineTypedResolver('signOffPart11', async (req) => {
@@ -986,7 +1140,7 @@ defineTypedResolver('signOffPart11', async (req) => {
 
   await assertOperatorAuthorizedForTarget(req, { hazardKey, specId, linkId });
 
-  return SeederService.signOffPart11({
+  const updated = await SeederService.signOffPart11({
     hazardKey,
     specId,
     linkId,
@@ -1005,6 +1159,7 @@ defineTypedResolver('signOffPart11', async (req) => {
     projectKey: caller.projectKey,
     spaceKey: caller.spaceKey,
   });
+  return filterLiveSuiteForCaller(caller, updated);
 });
 
 defineTypedResolver('queryGraphContext', async (req) => {
@@ -1052,7 +1207,7 @@ defineTypedResolver('bindIssueToHazard', async (req) => {
 
   await assertOperatorAuthorizedForTarget(req, { hazardKey, linkId });
 
-  const summary = await SeederService.bindIssueToHazard(
+  const rawSummary = await SeederService.bindIssueToHazard(
     hazardKey,
     rawIssueKey,
     caller.accountId,
@@ -1062,10 +1217,57 @@ defineTypedResolver('bindIssueToHazard', async (req) => {
       linkId,
     }
   );
+  const summary = await filterLiveSuiteForCaller(caller, rawSummary);
 
   return {
     success: true,
     summary,
+  };
+});
+
+defineTypedResolver('createReverificationTask', async (req) => {
+  const rawIssueKey =
+    typeof req.payload?.issueKey === 'string' && req.payload.issueKey.trim().length > 0
+      ? req.payload.issueKey.trim().toUpperCase()
+      : undefined;
+  const caller = await assertAuthorizedOperator(
+    req,
+    rawIssueKey ? { issueKey: rawIssueKey } : undefined
+  );
+
+  const hazardKey =
+    typeof req.payload?.hazardKey === 'string' && req.payload.hazardKey.trim().length > 0
+      ? req.payload.hazardKey.trim()
+      : undefined;
+  const linkId =
+    typeof req.payload?.linkId === 'string' && req.payload.linkId.trim().length > 0
+      ? req.payload.linkId.trim()
+      : undefined;
+
+  if (!hazardKey && !linkId && !rawIssueKey) {
+    throw new Error('Bad Request: hazardKey, linkId, or issueKey is required.');
+  }
+
+  await assertOperatorAuthorizedForTarget(req, {
+    hazardKey,
+    linkId,
+    workKey: rawIssueKey,
+  });
+
+  const result = await SeederService.createReverificationTask({
+    hazardKey,
+    linkId,
+    issueKey: rawIssueKey,
+    summary: typeof req.payload?.summary === 'string' ? req.payload.summary : undefined,
+    reason: typeof req.payload?.reason === 'string' ? req.payload.reason : undefined,
+    actorAccountId: caller.accountId,
+    callerMode: 'USER',
+    authMethod: 'FORGE_USER_SESSION',
+  });
+
+  return {
+    ...result,
+    summary: await filterLiveSuiteForCaller(caller, result.summary),
   };
 });
 
@@ -1118,25 +1320,62 @@ defineTypedResolver('analyzeBlastRadius', async (req) => {
     throw new Error('Bad Request: triggerKey is required.');
   }
   const rawSuite = await SeederService.getActiveComplianceSuite({ projectKey: caller.projectKey });
-  const suite = await filterLiveSuiteForCaller(caller, rawSuite);
-  return ComplianceEngine.computeBlastRadius(triggerKey, suite);
+  if (
+    rawSuite.datasetMode !== 'LIVE' ||
+    rawSuite.initialized === false ||
+    rawSuite.traceLinks.length === 0
+  ) {
+    return ComplianceEngine.computeBlastRadius(triggerKey, rawSuite);
+  }
+  const runtimeActive = isForgeRuntime();
+  if (runtimeActive && caller.extensionType.toLowerCase().startsWith('confluence:')) {
+    await verifyJiraIdentity(caller.accountId);
+  }
+  const { unredactedSuite, restrictedPageIds } = await authorizeAndFilterLiveSuiteDetailed(rawSuite, {
+    extensionType: caller.extensionType,
+    projectKey: caller.projectKey,
+    checkConfluencePages: true,
+  });
+  const report = ComplianceEngine.computeBlastRadius(triggerKey, unredactedSuite);
+  return redactBlastRadiusReport(report, unredactedSuite.traceLinks, restrictedPageIds);
 });
 
 defineTypedResolver('getAuditLog', async (req) => {
-  await assertAuthorizedReader(req);
+  const caller = await assertAuthorizedReader(req);
   const rawLimit =
     typeof req.payload?.limit === 'number' && Number.isFinite(req.payload.limit)
       ? Math.floor(req.payload.limit)
       : 50;
   const limit = Math.max(1, Math.min(MAX_AUDIT_LOG_PAGE_LIMIT, rawLimit));
-  const beforeSeq =
+  let cursorBeforeSeq =
     typeof req.payload?.beforeSeq === 'number' &&
     Number.isFinite(req.payload.beforeSeq) &&
     req.payload.beforeSeq > 0
       ? Math.floor(req.payload.beforeSeq)
       : undefined;
 
-  return AuditLogService.getAuditLog(limit, beforeSeq);
+  const rawSuite = await SeederService.getActiveComplianceSuite();
+  const collectedNewestFirst: AuditLogEntry[] = [];
+  const MAX_SCAN_PAGES = 5;
+
+  for (let page = 0; page < MAX_SCAN_PAGES; page++) {
+    const batch = await AuditLogService.getAuditLog(MAX_AUDIT_LOG_PAGE_LIMIT, cursorBeforeSeq);
+    if (batch.length === 0) break;
+
+    const filteredBatch = await filterAuditEntriesForCaller(caller, batch, rawSuite);
+    for (let i = filteredBatch.length - 1; i >= 0; i--) {
+      collectedNewestFirst.push(filteredBatch[i]);
+      if (collectedNewestFirst.length >= limit) break;
+    }
+
+    const oldestSeq = batch[0].seq;
+    if (collectedNewestFirst.length >= limit || oldestSeq <= 1 || batch.length < MAX_AUDIT_LOG_PAGE_LIMIT) {
+      break;
+    }
+    cursorBeforeSeq = oldestSeq;
+  }
+
+  return collectedNewestFirst.reverse();
 });
 
 defineTypedResolver('verifyAuditChain', async (req) => {
@@ -1176,6 +1415,16 @@ export async function confluencePageUpdatedTrigger(
   event: ConfluencePageUpdatedEvent
 ): Promise<ConfluencePageUpdatedResult> {
   return LiveIngestionService.handleConfluencePageUpdated(event);
+}
+
+/**
+ * Handles Jira `avi:jira:updated:issue`, `avi:jira:created:issuelink`, and `avi:jira:deleted:issuelink`
+ * product events to automatically refresh affected LIVE trace links.
+ */
+export async function jiraIssueUpdatedTrigger(
+  event: JiraIssueUpdatedEvent
+): Promise<JiraIssueUpdatedResult> {
+  return LiveIngestionService.handleJiraIssueUpdated(event);
 }
 
 // =========================================================================

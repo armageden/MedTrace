@@ -2176,4 +2176,594 @@ test.describe('SEC-01 & SEC-03: Resolver RBAC, Confused-Deputy, Part 11 & Webtri
       }
     );
   });
+
+  test.it('isolates two Jira projects across syncLiveSuite, mutations, createReverificationTask, and getAuditLog', async () => {
+    const { ComplianceEngine } = require('../dist/compliance-engine');
+    const createdJiraIssues = [];
+    const createdIssueLinks = [];
+
+    const makeLiveIssue = (key, projectKey, summary, label, pageId) => ({
+      id: `id-${key.toLowerCase()}`,
+      key,
+      fields: {
+        summary,
+        status: { name: 'Done', statusCategory: { key: 'done', name: 'Done' } },
+        assignee: { displayName: 'Engineer' },
+        labels: [label],
+        issuetype: { name: 'Story' },
+        project: { key: projectKey, name: `${projectKey} Project` },
+        issuelinks: [],
+      },
+      _pageId: pageId,
+    });
+
+    await withForgeMocks(
+      {
+        requestJira: async (url, opts) => {
+          if (url.startsWith('/rest/api/3/myself')) {
+            return makeHttpResponse(200, { accountId: 'op-two-proj', displayName: 'Dual Op', active: true });
+          }
+          if (url.startsWith('/rest/api/3/mypermissions')) {
+            return makeHttpResponse(200, {
+              permissions: {
+                BROWSE_PROJECTS: { havePermission: true },
+                EDIT_ISSUES: { havePermission: true },
+                CREATE_ISSUES: { havePermission: true },
+                ADMINISTER_PROJECTS: { havePermission: false },
+              },
+            });
+          }
+          if (url.startsWith('/rest/api/3/search/jql')) {
+            const isAcme = url.includes('ACME');
+            const issues = isAcme
+              ? [makeLiveIssue('ACME-10', 'ACME', 'Acme Pump Spec', 'class-c', '9101')]
+              : [makeLiveIssue('MED-10', 'MED', 'Med Pump Spec', 'class-c', '9102')];
+            return makeHttpResponse(200, { issues, isLast: true });
+          }
+          if (url === '/rest/api/3/issue/ACME-10/remotelink') {
+            return makeHttpResponse(200, [
+              { object: { url: 'https://site.atlassian.net/wiki/spaces/ACME/pages/9101', title: 'SRS-9101' } },
+            ]);
+          }
+          if (url === '/rest/api/3/issue/MED-10/remotelink') {
+            return makeHttpResponse(200, [
+              { object: { url: 'https://site.atlassian.net/wiki/spaces/MED/pages/9102', title: 'SRS-9102' } },
+            ]);
+          }
+          if (url === '/rest/api/3/issue/ACME-10?fields=summary,status,issuelinks') {
+            return makeHttpResponse(200, { id: 'id-acme-10', fields: { summary: 'Acme Pump Spec', status: { name: 'Done' }, issuelinks: [] } });
+          }
+          if (url === '/rest/api/3/issue/MED-10?fields=summary,status,issuelinks') {
+            return makeHttpResponse(200, { id: 'id-med-10', fields: { summary: 'Med Pump Spec', status: { name: 'Done' }, issuelinks: [] } });
+          }
+          if (url.startsWith('/rest/api/3/issue/MED-11?fields=summary,status,assignee')) {
+            return makeHttpResponse(200, {
+              id: 'id-med-11',
+              key: 'MED-11',
+              fields: { summary: 'Med Rebound Issue', status: { name: 'Done', statusCategory: { key: 'done' } }, assignee: { displayName: 'Alice' } },
+            });
+          }
+          if (url === '/rest/api/3/issue/createmeta/MED/issuetypes') {
+            return makeHttpResponse(200, { issueTypes: [{ id: '10001', name: 'Task', subtask: false }] });
+          }
+          if (url === '/rest/api/3/issue' && opts?.method === 'POST') {
+            const body = JSON.parse(opts.body);
+            createdJiraIssues.push(body);
+            return makeHttpResponse(201, { id: '99001', key: 'MED-99' });
+          }
+          if (url === '/rest/api/3/issueLinkType') {
+            return makeHttpResponse(200, { issueLinkTypes: [{ name: 'Relates' }] });
+          }
+          if (url === '/rest/api/3/issueLink' && opts?.method === 'POST') {
+            createdIssueLinks.push(JSON.parse(opts.body));
+            return makeHttpResponse(201, {});
+          }
+          return makeHttpResponse(404, {});
+        },
+        requestConfluence: async (url) => {
+          if (url.includes('/wiki/api/v2/pages/9101')) {
+            return makeHttpResponse(200, {
+              id: '9101',
+              title: 'SRS-9101 Acme Spec',
+              version: { number: 1, createdAt: '2026-11-01T00:00:00Z' },
+              body: { storage: { value: '<p>Acme limit 1.0</p>' } },
+            });
+          }
+          if (url.includes('/wiki/api/v2/pages/9102')) {
+            return makeHttpResponse(200, {
+              id: '9102',
+              title: 'SRS-9102 Med Spec',
+              version: { number: 1, createdAt: '2026-11-01T00:00:00Z' },
+              body: { storage: { value: '<p>Med limit 5.0</p>' } },
+            });
+          }
+          return makeHttpResponse(404, {});
+        },
+      },
+      async () => {
+        // 1. Sync ACME first
+        const acmeSync = await resolverHandler(
+          {
+            call: { functionKey: 'syncLiveSuite', payload: {} },
+            context: { extension: { type: 'jira:projectPage', project: { key: 'ACME' } } },
+          },
+          { principal: { accountId: 'op-two-proj' } }
+        );
+        assert.deepStrictEqual(acmeSync.summary.traceLinks.map((l) => l.work.key), ['ACME-10']);
+
+        // 2. Sync MED second — must preserve ACME in KVS, but MUST NOT return ACME in syncLiveSuite response or warnings!
+        const medSync = await resolverHandler(
+          {
+            call: { functionKey: 'syncLiveSuite', payload: {} },
+            context: { extension: { type: 'jira:projectPage', project: { key: 'MED' } } },
+          },
+          { principal: { accountId: 'op-two-proj' } }
+        );
+        assert.deepStrictEqual(medSync.summary.traceLinks.map((l) => l.work.key), ['MED-10']);
+        assert.ok(
+          !medSync.warnings.some((w) => /other Jira project/i.test(w)),
+          'syncLiveSuite must not leak cross-project preservation warnings'
+        );
+
+        // Full persisted KVS still contains both ACME-10 and MED-10
+        const fullPersisted = await SeederService.getActiveComplianceSuite();
+        assert.strictEqual(fullPersisted.traceLinks.length, 2);
+
+        // 3. recordTestResult in MED returns ONLY MED-10
+        const medAfterTest = await resolverHandler(
+          {
+            call: {
+              functionKey: 'recordTestResult',
+              payload: {
+                hazardKey: 'HAZ-MED-10',
+                status: 'PASSED',
+                evidenceUrl: 'https://ci.example.com/med-10',
+                notes: 'Secret MED test note',
+              },
+            },
+            context: { extension: { type: 'jira:projectPage', project: { key: 'MED' } } },
+          },
+          { principal: { accountId: 'op-two-proj' } }
+        );
+        assert.deepStrictEqual(medAfterTest.traceLinks.map((l) => l.work.key), ['MED-10']);
+
+        // 4. signOffPart11 in MED returns ONLY MED-10
+        const medAfterSign = await resolverHandler(
+          {
+            call: {
+              functionKey: 'signOffPart11',
+              payload: {
+                hazardKey: 'HAZ-MED-10',
+                specId: 'srs-9102',
+                meaning: 'Med clinical approval',
+                attestationConfirmed: true,
+                attestationChecked: true,
+                attestationPhrase: PART11_ATTESTATION_PHRASE,
+              },
+            },
+            context: { extension: { type: 'jira:projectPage', project: { key: 'MED' } } },
+          },
+          { principal: { accountId: 'op-two-proj' } }
+        );
+        assert.deepStrictEqual(medAfterSign.traceLinks.map((l) => l.work.key), ['MED-10']);
+
+        // 5. createReverificationTask in MED creates MED-99, links MED-10, and returns ONLY MED
+        const revTaskRes = await resolverHandler(
+          {
+            call: {
+              functionKey: 'createReverificationTask',
+              payload: {
+                hazardKey: 'HAZ-MED-10',
+                issueKey: 'MED-10',
+                reason: 'Requirement 5.0 -> 5.5 mL/hr',
+              },
+            },
+            context: { extension: { type: 'jira:projectPage', project: { key: 'MED' } } },
+          },
+          { principal: { accountId: 'op-two-proj' } }
+        );
+        assert.strictEqual(revTaskRes.success, true);
+        assert.strictEqual(revTaskRes.createdIssueKey, 'MED-99');
+        assert.deepStrictEqual(revTaskRes.linkedIssueKeys, ['MED-10']);
+        assert.deepStrictEqual(revTaskRes.summary.traceLinks.map((l) => l.work.key), ['MED-10']);
+        assert.strictEqual(createdJiraIssues.length, 1);
+        assert.strictEqual(createdIssueLinks.length, 1);
+
+        // 6. bindIssueToHazard in MED returns ONLY MED
+        const bindRes = await resolverHandler(
+          {
+            call: {
+              functionKey: 'bindIssueToHazard',
+              payload: { hazardKey: 'HAZ-MED-10', issueKey: 'MED-11' },
+            },
+            context: { extension: { type: 'jira:projectPage', project: { key: 'MED' } } },
+          },
+          { principal: { accountId: 'op-two-proj' } }
+        );
+        assert.strictEqual(bindRes.success, true);
+        assert.deepStrictEqual(bindRes.summary.traceLinks.map((l) => l.work.key), ['MED-11']);
+
+        // 7. getAuditLog in ACME projectPage MUST NOT return any MED entries (notes, evidenceUrl, MED-99, MED-11, etc.)
+        const acmeAudit = await resolverHandler(
+          {
+            call: { functionKey: 'getAuditLog', payload: { limit: 50 } },
+            context: { extension: { type: 'jira:projectPage', project: { key: 'ACME' } } },
+          },
+          { principal: { accountId: 'op-two-proj' } }
+        );
+        assert.strictEqual(acmeAudit.length, 1, 'ACME caller should only see ACME SYNC_LIVE audit entry');
+        assert.strictEqual(acmeAudit[0].targetKey, 'ACME');
+        const acmeSerialized = JSON.stringify(acmeAudit);
+        assert.ok(!acmeSerialized.includes('MED-10') && !acmeSerialized.includes('MED-99') && !acmeSerialized.includes('Secret MED test note'));
+
+        // 8. getAuditLog in MED projectPage MUST NOT return ACME entries
+        const medAudit = await resolverHandler(
+          {
+            call: { functionKey: 'getAuditLog', payload: { limit: 50 } },
+            context: { extension: { type: 'jira:projectPage', project: { key: 'MED' } } },
+          },
+          { principal: { accountId: 'op-two-proj' } }
+        );
+        assert.strictEqual(medAudit.length, 5);
+        assert.ok(!JSON.stringify(medAudit).includes('ACME'));
+
+        // Suppress unused import lint warning if ComplianceEngine wasn't needed directly
+        assert.ok(ComplianceEngine);
+      }
+    );
+  });
+
+  test.it('enforces per-page Confluence authorization, preserves entryHash integrity by omitting cross-project audit entries, and makes createReverificationTask idempotent', async () => {
+    const { ComplianceEngine } = require('../dist/compliance-engine');
+    const { AuditLogService, computeAuditEntryHash } = require('../dist/audit-log');
+
+    let revCreateCount = 0;
+    let revTaskStatus = 'In Progress';
+    let revTaskHttpStatus = 200;
+
+    const makeIssue = (key, projectKey, summary) => ({
+      id: `id-${key.toLowerCase()}`,
+      key,
+      fields: {
+        summary,
+        status: { name: 'Done', statusCategory: { key: 'done', name: 'Done' } },
+        assignee: { displayName: 'Engineer' },
+        labels: ['class-c'],
+        issuetype: { name: 'Story' },
+        project: { key: projectKey, name: projectKey },
+        issuelinks: [],
+      },
+    });
+
+    await withForgeMocks(
+      {
+        requestJira: async (url, opts) => {
+          if (url.startsWith('/rest/api/3/myself')) {
+            return makeHttpResponse(200, { accountId: 'op-acme', displayName: 'ACME Op', active: true });
+          }
+          if (url.startsWith('/rest/api/3/mypermissions')) {
+            const disallowed = url.includes('MED');
+            return makeHttpResponse(200, {
+              permissions: {
+                BROWSE_PROJECTS: { havePermission: !disallowed },
+                EDIT_ISSUES: { havePermission: !disallowed },
+                CREATE_ISSUES: { havePermission: !disallowed },
+                ADMINISTER_PROJECTS: { havePermission: false },
+              },
+            });
+          }
+          if (url.startsWith('/rest/api/3/issue/ACME-99?fields=status')) {
+            if (revTaskHttpStatus !== 200) {
+              return makeHttpResponse(revTaskHttpStatus, {});
+            }
+            return makeHttpResponse(200, {
+              id: '9901',
+              key: 'ACME-99',
+              fields: {
+                status: {
+                  name: revTaskStatus,
+                  statusCategory: { key: revTaskStatus === 'Done' ? 'done' : 'indeterminate', name: revTaskStatus },
+                },
+              },
+            });
+          }
+          if (url === '/rest/api/3/issue/createmeta/ACME/issuetypes') {
+            return makeHttpResponse(200, { issueTypes: [{ id: '1', name: 'Task', subtask: false }] });
+          }
+          if (url === '/rest/api/3/issue' && opts?.method === 'POST') {
+            revCreateCount++;
+            return makeHttpResponse(201, { id: String(9900 + revCreateCount), key: `ACME-${98 + revCreateCount}` });
+          }
+          if (url === '/rest/api/3/issueLinkType') {
+            return makeHttpResponse(200, { issueLinkTypes: [{ name: 'Relates' }] });
+          }
+          if (url === '/rest/api/3/issueLink' && opts?.method === 'POST') {
+            return makeHttpResponse(201, {});
+          }
+          return makeHttpResponse(404, makeIssue('NA-0', 'NA', 'missing'));
+        },
+        requestConfluence: async (url) => {
+          if (url === '/wiki/rest/api/user/current') {
+            return makeHttpResponse(200, { accountId: 'op-acme', type: 'known' });
+          }
+          if (url.includes('/wiki/api/v2/pages/9101')) {
+            return makeHttpResponse(200, { id: '9101', title: 'Public SRS-9101' });
+          }
+          if (url.includes('/wiki/api/v2/pages/9199')) {
+            return makeHttpResponse(403, { message: 'Page restricted' });
+          }
+          return makeHttpResponse(404, {});
+        },
+      },
+      async () => {
+        const publicLink = ComplianceEngine.evaluateTraceLink(
+          {
+            id: 'haz-acme-10',
+            key: 'HAZ-ACME-10',
+            title: 'ACME-10 Hazard',
+            riskClass: 'CLASS_C',
+            severity: 'CATASTROPHIC',
+            probability: 'REMOTE',
+            mitigationRequirementId: 'srs-9101',
+            status: 'ACTION_REQUIRED',
+          },
+          {
+            id: 'srs-9101',
+            pageId: '9101',
+            title: 'Public SRS-9101',
+            version: 1,
+            sha256Hash: 'a'.repeat(64),
+            lastSignedHash: 'a'.repeat(64),
+            isSignatureInvalidated: false,
+            contentSnippet: 'Allowed public excerpt',
+            lastUpdated: '2026-11-20T00:00:00Z',
+          },
+          { id: 'w-10', key: 'ACME-10', title: 'ACME-10 Work', status: 'Done', assignee: 'Alice' },
+          { id: 't-10', testKey: 'TEST-ACME-10', title: 'Test 10', testType: 'Unit Test', status: 'UNTESTED' },
+          { id: 'sig-10', signedBy: '', signedAt: '', role: 'QA', meaning: '', artifactSha256: '', isValid: false },
+          undefined,
+          { linkId: 'link-acme-10', requireTestEvidence: true }
+        );
+
+        const restrictedSpecSha = 'e'.repeat(64);
+        const restrictedSpecLink = ComplianceEngine.evaluateTraceLink(
+          {
+            id: 'haz-acme-11',
+            key: 'HAZ-ACME-11',
+            title: 'ACME-11 Hazard',
+            riskClass: 'CLASS_A',
+            severity: 'MINOR',
+            probability: 'REMOTE',
+            mitigationRequirementId: 'srs-9199',
+            status: 'MITIGATED',
+          },
+          {
+            id: 'srs-9199',
+            pageId: '9199',
+            title: 'Secret Confluence Spec 9199',
+            version: 4,
+            sha256Hash: restrictedSpecSha,
+            lastSignedHash: restrictedSpecSha,
+            isSignatureInvalidated: false,
+            contentSnippet: 'CONFIDENTIAL_CONF_BODY_LEAK',
+            lastUpdated: '2026-11-20T00:00:00Z',
+          },
+          { id: 'w-11', key: 'ACME-11', title: 'ACME-11 Work', status: 'Done', assignee: 'Bob' },
+          { id: 't-11', testKey: 'TEST-ACME-11', title: 'Test 11', testType: 'Unit Test', status: 'PASSED', evidenceUrl: 'https://ci.example/11', executionDate: '2026-11-20T00:00:00Z' },
+          {
+            id: 'sig-11',
+            signedBy: 'Bob (op-acme)',
+            signedByAccountId: 'op-acme',
+            signedAt: '2026-11-20T00:00:00Z',
+            role: 'Authorized Signatory',
+            meaning: 'Approved',
+            artifactSha256: restrictedSpecSha,
+            isValid: true,
+            authMethod: 'PART11_ATTESTATION',
+            signatureAlgorithm: 'HMAC-SHA256-SEAL-V1',
+            signatureSeal: ComplianceEngine.computePart11Seal(
+              {
+                hazardKey: 'HAZ-ACME-11',
+                specId: 'srs-9199',
+                artifactSha256: restrictedSpecSha,
+                signedByAccountId: 'op-acme',
+                signedBy: 'Bob (op-acme)',
+                role: 'Authorized Signatory',
+                meaning: 'Approved',
+                signedAt: '2026-11-20T00:00:00Z',
+                authMethod: 'PART11_ATTESTATION',
+              },
+              process.env.MEDTRACE_PART11_SECRET
+            ),
+          },
+          undefined,
+          {
+            linkId: 'link-acme-11',
+            part11Secret: process.env.MEDTRACE_PART11_SECRET,
+            requireTestEvidence: true,
+            requireCryptographicSeal: true,
+          }
+        );
+        assert.strictEqual(restrictedSpecLink.complianceState, 'VERIFIED');
+
+        // Verify restricted-spec projection preserves VERIFIED server-side metrics (0 manufactured drift, 100% verified, artifactSha256 scrubbed)
+        await SeederService.saveComplianceSuite(
+          ComplianceEngine.generateComplianceReport([restrictedSpecLink], 'LIVE', 'Verified Restricted Single Link', { initialized: true }),
+          0
+        );
+        const verifiedOnlySuite = await resolverHandler(
+          {
+            call: { functionKey: 'getComplianceSuite', payload: {} },
+            context: { extension: { type: 'jira:projectPage', project: { key: 'ACME' } } },
+          },
+          { principal: { accountId: 'op-acme' } }
+        );
+        assert.strictEqual(verifiedOnlySuite.signatureDriftCount, 0, 'Must not manufacture signatureDriftCount from redacted spec hash');
+        assert.strictEqual(verifiedOnlySuite.verifiedPercentage, 100);
+        assert.strictEqual(verifiedOnlySuite.releaseBlocked, false);
+        assert.strictEqual(verifiedOnlySuite.traceLinks[0].spec.specRestricted, true);
+        assert.strictEqual(verifiedOnlySuite.traceLinks[0].spec.sha256Hash, '');
+        assert.strictEqual(verifiedOnlySuite.traceLinks[0].signature.artifactSha256, '');
+
+        const blastRestricted = await resolverHandler(
+          {
+            call: { functionKey: 'analyzeBlastRadius', payload: { triggerKey: 'ACME-11' } },
+            context: { extension: { type: 'jira:projectPage', project: { key: 'ACME' } } },
+          },
+          { principal: { accountId: 'op-acme' } }
+        );
+        assert.strictEqual(blastRestricted.invalidatedSignatureIds.length, 0);
+        assert.ok(!JSON.stringify(blastRestricted).includes('Secret Confluence Spec 9199'));
+        assert.ok(!JSON.stringify(blastRestricted).includes(restrictedSpecSha.slice(0, 8)));
+
+        const medLink = ComplianceEngine.evaluateTraceLink(
+          {
+            id: 'haz-med-20',
+            key: 'HAZ-MED-20',
+            title: 'MED Hazard',
+            riskClass: 'CLASS_C',
+            severity: 'CATASTROPHIC',
+            probability: 'REMOTE',
+            mitigationRequirementId: 'srs-9101',
+            status: 'ACTION_REQUIRED',
+          },
+          {
+            id: 'srs-9101',
+            pageId: '9101',
+            title: 'Public SRS-9101',
+            version: 1,
+            sha256Hash: 'a'.repeat(64),
+            lastSignedHash: '',
+            isSignatureInvalidated: false,
+            contentSnippet: 'Allowed public excerpt',
+            lastUpdated: '2026-11-20T00:00:00Z',
+          },
+          { id: 'w-med-20', key: 'MED-20', title: 'MED-20 Work', status: 'In Progress', assignee: 'Carol' },
+          { id: 't-med-20', testKey: 'TEST-MED-20', title: 'Test MED', testType: 'Unit Test', status: 'UNTESTED' },
+          { id: 'sig-med-20', signedBy: '', signedAt: '', role: 'QA', meaning: '', artifactSha256: '', isValid: false },
+          undefined,
+          { linkId: 'link-med-20', requireTestEvidence: true }
+        );
+
+        await SeederService.saveComplianceSuite(
+          ComplianceEngine.generateComplianceReport([publicLink, restrictedSpecLink, medLink], 'LIVE', 'Confluence Per-Page Suite', { initialized: true }),
+          1
+        );
+
+        // 1. Custom UI getComplianceSuite redacts page 9199 while keeping readable page 9101 intact
+        const acmeSuite = await resolverHandler(
+          {
+            call: { functionKey: 'getComplianceSuite', payload: {} },
+            context: { extension: { type: 'jira:projectPage', project: { key: 'ACME' } } },
+          },
+          { principal: { accountId: 'op-acme' } }
+        );
+        assert.strictEqual(acmeSuite.traceLinks.length, 2);
+        const l10 = acmeSuite.traceLinks.find((l) => l.work.key === 'ACME-10');
+        const l11 = acmeSuite.traceLinks.find((l) => l.work.key === 'ACME-11');
+        assert.strictEqual(l10.spec.title, 'Public SRS-9101');
+        assert.strictEqual(l10.spec.specRestricted, undefined);
+        assert.strictEqual(l11.spec.specRestricted, true);
+        assert.strictEqual(l11.spec.title, 'Restricted Confluence Specification');
+        assert.strictEqual(l11.spec.sha256Hash, '');
+        assert.strictEqual(l11.signature.artifactSha256, '');
+        assert.ok(!JSON.stringify(acmeSuite).includes('CONFIDENTIAL_CONF_BODY_LEAK'));
+        assert.ok(!JSON.stringify(acmeSuite).includes('Secret Confluence Spec 9199'));
+
+        // 2. Multi-project audit entry referencing ACME + MED is OMITTED (not mutated) so all returned entryHashes verify
+        await AuditLogService.append({
+          actorAccountId: 'op-acme',
+          action: 'RECORD_TEST_RESULT',
+          targetKey: 'TEST-ACME-10',
+          details: { projectKey: 'ACME', hazardKey: 'HAZ-ACME-10', notes: 'Single project event' },
+          authMethod: 'FORGE_USER_SESSION',
+        });
+        await AuditLogService.append({
+          actorAccountId: 'confluence-event-trigger',
+          action: 'CONFLUENCE_PAGE_DRIFT',
+          targetKey: 'page:9101',
+          details: {
+            pageId: '9101',
+            affectedHazards: ['HAZ-ACME-10', 'HAZ-MED-20'],
+            affectedWorkKeys: ['ACME-10', 'MED-20'],
+            projectKeys: ['ACME', 'MED'],
+          },
+          authMethod: 'CONFLUENCE_EVENT_TRIGGER',
+        });
+
+        const acmeLogs = await resolverHandler(
+          {
+            call: { functionKey: 'getAuditLog', payload: { limit: 20 } },
+            context: { extension: { type: 'jira:projectPage', project: { key: 'ACME' } } },
+          },
+          { principal: { accountId: 'op-acme' } }
+        );
+        assert.strictEqual(acmeLogs.length, 1, 'Multi-project drift entry must be omitted rather than hash-broken');
+        assert.strictEqual(acmeLogs[0].action, 'RECORD_TEST_RESULT');
+        assert.strictEqual(
+          computeAuditEntryHash({
+            seq: acmeLogs[0].seq,
+            timestamp: acmeLogs[0].timestamp,
+            actorAccountId: acmeLogs[0].actorAccountId,
+            action: acmeLogs[0].action,
+            targetKey: acmeLogs[0].targetKey,
+            details: acmeLogs[0].details,
+            prevHash: acmeLogs[0].prevHash,
+            authMethod: acmeLogs[0].authMethod,
+          }),
+          acmeLogs[0].entryHash
+        );
+
+        // 3. Idempotent createReverificationTask skips duplicate Jira task while ACME-99 is open, creates ACME-100 after Done
+        const firstTask = await resolverHandler(
+          {
+            call: { functionKey: 'createReverificationTask', payload: { hazardKey: 'HAZ-ACME-10', issueKey: 'ACME-10' } },
+            context: { extension: { type: 'jira:projectPage', project: { key: 'ACME' } } },
+          },
+          { principal: { accountId: 'op-acme' } }
+        );
+        assert.strictEqual(firstTask.createdIssueKey, 'ACME-99');
+        assert.strictEqual(revCreateCount, 1);
+
+        const secondTask = await resolverHandler(
+          {
+            call: { functionKey: 'createReverificationTask', payload: { hazardKey: 'HAZ-ACME-10', issueKey: 'ACME-10' } },
+            context: { extension: { type: 'jira:projectPage', project: { key: 'ACME' } } },
+          },
+          { principal: { accountId: 'op-acme' } }
+        );
+        assert.strictEqual(secondTask.createdIssueKey, 'ACME-99');
+        assert.strictEqual(secondTask.alreadyExisted, true);
+        assert.strictEqual(revCreateCount, 1);
+
+        // Fails closed (does not create duplicate) when existing-task status lookup returns transient 500
+        revTaskHttpStatus = 500;
+        await assert.rejects(
+          () =>
+            resolverHandler(
+              {
+                call: { functionKey: 'createReverificationTask', payload: { hazardKey: 'HAZ-ACME-10', issueKey: 'ACME-10' } },
+                context: { extension: { type: 'jira:projectPage', project: { key: 'ACME' } } },
+              },
+              { principal: { accountId: 'op-acme' } }
+            ),
+          /Unable to verify status of existing re-verification task ACME-99/
+        );
+        assert.strictEqual(revCreateCount, 1);
+
+        // Confirmed Done (or 404 deleted) allows creating replacement ACME-100
+        revTaskHttpStatus = 200;
+        revTaskStatus = 'Done';
+        const thirdTask = await resolverHandler(
+          {
+            call: { functionKey: 'createReverificationTask', payload: { hazardKey: 'HAZ-ACME-10', issueKey: 'ACME-10' } },
+            context: { extension: { type: 'jira:projectPage', project: { key: 'ACME' } } },
+          },
+          { principal: { accountId: 'op-acme' } }
+        );
+        assert.strictEqual(thirdTask.createdIssueKey, 'ACME-100');
+        assert.strictEqual(revCreateCount, 2);
+      }
+    );
+  });
 });

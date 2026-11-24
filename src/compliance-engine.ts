@@ -31,6 +31,7 @@ export interface EvaluateTraceOptions {
   part11Secret?: string;
   requireCryptographicSeal?: boolean;
   requireTestEvidence?: boolean;
+  reverificationTaskKey?: string;
 }
 
 export interface CanonicalPart11Payload {
@@ -120,7 +121,9 @@ function buildSingleTriggerArtifact(
       id: rootLink.hazard.id,
       key: rootLink.hazard.key,
       title: rootLink.hazard.title,
-      deltaReason: `Hazard risk mitigation audit: ${rootLink.hazard.severity} risk`,
+      deltaReason: rootLink.hazard.severity
+        ? `Hazard risk mitigation audit: ${rootLink.hazard.severity} risk`
+        : `IEC 62304 safety class audit: ${rootLink.hazard.riskClass.replace('_', ' ')}`,
     };
   }
   if (matchedType === 'WORK') {
@@ -684,6 +687,7 @@ export class ComplianceEngine {
       complianceState: state,
       violations,
       graphMetadata,
+      ...(options?.reverificationTaskKey ? { reverificationTaskKey: options.reverificationTaskKey } : {}),
     };
   }
 
@@ -698,6 +702,7 @@ export class ComplianceEngine {
     options?: {
       isSafetyTaggedIssue?: boolean;
       unsyncedSafetyReason?: string;
+      transitionToDone?: boolean;
     }
   ): ReleaseGateOutcome {
     const cleanIssueKey = (issueKey || '').trim().toUpperCase();
@@ -731,9 +736,50 @@ export class ComplianceEngine {
         };
       }
 
-      const blocking = matchedLinks.find((l) => l.complianceState !== 'VERIFIED');
-      if (blocking) {
-        const violation = blocking.violations[0] || 'Unresolved safety-critical compliance gap.';
+      for (const link of matchedLinks) {
+        if (link.complianceState === 'VERIFIED') {
+          continue;
+        }
+        // Transition-aware check: when moving the linked work item INTO Done, evaluate with status 'Done'
+        // so compliant issues in Under Review / In Progress can transition without already being Done.
+        if (
+          options?.transitionToDone === true &&
+          (link.work?.key || '').trim().toUpperCase() === cleanIssueKey &&
+          link.hazard &&
+          link.spec &&
+          link.work &&
+          link.test &&
+          link.signature
+        ) {
+          const reEvaluated = this.evaluateTraceLink(
+            link.hazard,
+            link.spec,
+            { ...link.work, status: 'Done' },
+            link.test,
+            link.signature,
+            link.graphMetadata,
+            {
+              linkId: link.id,
+              part11Secret: process.env.MEDTRACE_PART11_SECRET,
+              requireCryptographicSeal: suite.datasetMode === 'LIVE',
+              requireTestEvidence: suite.datasetMode === 'LIVE',
+              reverificationTaskKey: link.reverificationTaskKey,
+            }
+          );
+          if (reEvaluated.complianceState === 'VERIFIED') {
+            continue;
+          }
+          const violation =
+            reEvaluated.violations[0] ||
+            link.violations[0] ||
+            'Unresolved safety-critical compliance gap.';
+          return {
+            result: false,
+            errorMessage: `❌ [MedTrace Safety Gate] Human-initiated transition blocked for ${cleanIssueKey}!\n• ${violation}\n\nResolve verification test runs or re-certify electronic signatures before releasing.`,
+          };
+        }
+
+        const violation = link.violations[0] || 'Unresolved safety-critical compliance gap.';
         return {
           result: false,
           errorMessage: `❌ [MedTrace Safety Gate] Human-initiated transition blocked for ${cleanIssueKey}!\n• ${violation}\n\nResolve verification test runs or re-certify electronic signatures before releasing.`,
@@ -745,6 +791,14 @@ export class ComplianceEngine {
     }
 
     // Global release gate (no issueKey specified)
+    if (suite.syncIncomplete === true) {
+      return {
+        result: false,
+        errorMessage:
+          '❌ [MedTrace Safety Gate] Live Atlassian synchronization is incomplete (truncated).\n• Run Resume Sync to finish syncing all safety artifacts before releasing.',
+      };
+    }
+
     if (suite.releaseBlocked) {
       const topViolation = suite.blockingReasons[0] || 'Unresolved safety-critical compliance gaps.';
       return {
@@ -758,6 +812,8 @@ export class ComplianceEngine {
 
   /**
    * Evaluates the entire project suite and builds an audit-ready compliance summary.
+   * Deduplicates `totalHazards` and `class*Count` by distinct hazard key so M:N trace links
+   * do not inflate hazard totals.
    */
   public static generateComplianceReport(
     traceLinks: TraceLink[],
@@ -768,6 +824,8 @@ export class ComplianceEngine {
       auditEntryCount?: number;
       auditHeadHash?: string;
       initialized?: boolean;
+      lastSyncedAt?: string;
+      syncIncomplete?: boolean;
     }
   ): ComplianceSummary {
     const resolvedProjectName =
@@ -779,21 +837,35 @@ export class ComplianceEngine {
 
     const initialized = metadata?.initialized ?? (traceLinks.length > 0 || datasetMode === 'DEMO');
 
-    let classCCount = 0;
-    let classBCount = 0;
-    let classACount = 0;
-    let verifiedCount = 0;
+    const RISK_PRECEDENCE: Record<RiskClass, number> = {
+      CLASS_A: 0,
+      CLASS_B: 1,
+      CLASS_C: 2,
+    };
+    const distinctHazards = new Map<string, { riskClass: RiskClass; allVerified: boolean }>();
+
     let signatureDriftCount = 0;
     const blockingReasons: string[] = [];
 
     for (const link of traceLinks) {
-      if (link.hazard.riskClass === 'CLASS_C') classCCount++;
-      else if (link.hazard.riskClass === 'CLASS_B') classBCount++;
-      else classACount++;
-
-      if (link.complianceState === 'VERIFIED') {
-        verifiedCount++;
+      const hazId = (link.hazard?.key || link.hazard?.id || link.id || '').trim().toUpperCase();
+      const existingHaz = distinctHazards.get(hazId);
+      const linkVerified = link.complianceState === 'VERIFIED';
+      if (!existingHaz) {
+        distinctHazards.set(hazId, {
+          riskClass: link.hazard.riskClass,
+          allVerified: linkVerified,
+        });
       } else {
+        if (RISK_PRECEDENCE[link.hazard.riskClass] > RISK_PRECEDENCE[existingHaz.riskClass]) {
+          existingHaz.riskClass = link.hazard.riskClass;
+        }
+        if (!linkVerified) {
+          existingHaz.allVerified = false;
+        }
+      }
+
+      if (!linkVerified) {
         blockingReasons.push(...link.violations);
       }
 
@@ -806,14 +878,35 @@ export class ComplianceEngine {
       }
     }
 
+    let classCCount = 0;
+    let classBCount = 0;
+    let classACount = 0;
+    let verifiedHazardCount = 0;
+    for (const haz of distinctHazards.values()) {
+      if (haz.riskClass === 'CLASS_C') classCCount++;
+      else if (haz.riskClass === 'CLASS_B') classBCount++;
+      else classACount++;
+      if (haz.allVerified) {
+        verifiedHazardCount++;
+      }
+    }
+
+    const totalHazards = distinctHazards.size;
+
     if (traceLinks.length === 0) {
       blockingReasons.push(
         'Compliance suite is uninitialized or contains 0 hazard trace links. Sync Live Atlassian artifacts (or seed demo data in non-production) before release.'
       );
     }
 
+    if (metadata?.syncIncomplete === true) {
+      blockingReasons.push(
+        'Live Atlassian synchronization is incomplete (truncated). Run Resume Sync to finish syncing all safety artifacts before releasing.'
+      );
+    }
+
     const verifiedPercentage =
-      traceLinks.length > 0 ? Math.round((verifiedCount / traceLinks.length) * 100) : 0;
+      totalHazards > 0 ? Math.round((verifiedHazardCount / totalHazards) * 100) : 0;
 
     const releaseBlocked = blockingReasons.length > 0;
 
@@ -826,7 +919,7 @@ export class ComplianceEngine {
         'ISO 14971:2019 (Risk Management for Medical Devices)',
         'FDA 21 CFR Part 11 (Electronic Records & Signatures)',
       ],
-      totalHazards: traceLinks.length,
+      totalHazards,
       classCCount,
       classBCount,
       classACount,
@@ -836,6 +929,8 @@ export class ComplianceEngine {
       signatureDriftCount,
       traceLinks,
       lastAuditTimestamp: new Date().toISOString(),
+      ...(metadata?.lastSyncedAt ? { lastSyncedAt: metadata.lastSyncedAt } : {}),
+      ...(metadata?.syncIncomplete === true ? { syncIncomplete: true } : {}),
       ...(metadata?.storageFormat ? { storageFormat: metadata.storageFormat } : {}),
       ...(typeof metadata?.auditEntryCount === 'number' ? { auditEntryCount: metadata.auditEntryCount } : {}),
       ...(metadata?.auditHeadHash ? { auditHeadHash: metadata.auditHeadHash } : {}),

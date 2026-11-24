@@ -1,7 +1,15 @@
 import api, { route } from '@forge/api';
 import { AuditLogService } from './audit-log';
+import { ComplianceEngine } from './compliance-engine';
 import { isForgeRuntime } from './runtime';
-import { AuthorizedUserIdentity, JiraWorkItem } from './types';
+import {
+  AuthorizedUserIdentity,
+  BlastRadiusReport,
+  ComplianceSummary,
+  ConfluenceSpec,
+  JiraWorkItem,
+  TraceLink,
+} from './types';
 
 type AuditAppendInput = Parameters<typeof AuditLogService.append>[0];
 type AuditAuthMethod = NonNullable<AuditAppendInput['authMethod']>;
@@ -278,5 +286,460 @@ export function mapJiraStatusToWorkStatus(statusField?: {
     return 'In Progress';
   }
   return 'To Do';
+}
+
+export const JIRA_PROJECT_KEY_RE = /^[A-Z][A-Z0-9_]{0,20}$/;
+export const JIRA_ISSUE_KEY_RE = /^[A-Z][A-Z0-9_]{0,20}-\d+$/;
+
+interface JiraBrowsePermissionEntry {
+  havePermission?: boolean;
+}
+
+interface JiraBrowsePermissionsPayload {
+  active?: unknown;
+  permissions?: Record<string, JiraBrowsePermissionEntry | undefined>;
+}
+
+function isIdentityHttpOk(res: { ok?: boolean; status: number }): boolean {
+  return typeof res.ok === 'boolean' ? res.ok : res.status >= 200 && res.status < 300;
+}
+
+/**
+ * Extracts a canonical Jira project key from an issue key or synthetic `HAZ-<PROJ>-<NUM>` /
+ * `TEST-<PROJ>-<NUM>` identifier without treating synthetic `HAZ-<NUM>` or `TEST-<NUM>` keys as Jira projects.
+ */
+export function extractJiraProjectKeyFromRawKey(
+  rawKey?: unknown,
+  source?: 'JIRA_ISSUE' | 'APP_MANAGED'
+): string | undefined {
+  if (typeof rawKey !== 'string') return undefined;
+  const upper = rawKey.trim().toUpperCase();
+  if (!upper) return undefined;
+
+  if (upper.startsWith('HAZ-') || upper.startsWith('TEST-')) {
+    const stripped = upper.replace(/^(?:HAZ|TEST)-/i, '');
+    if (JIRA_ISSUE_KEY_RE.test(stripped)) {
+      return stripped.split('-')[0];
+    }
+    if (source === 'JIRA_ISSUE' && JIRA_ISSUE_KEY_RE.test(upper)) {
+      return upper.split('-')[0];
+    }
+    return undefined;
+  }
+
+  if (JIRA_ISSUE_KEY_RE.test(upper)) {
+    return upper.split('-')[0];
+  }
+  return undefined;
+}
+
+function normalizeJiraIssueCandidate(
+  rawKey?: unknown,
+  source?: 'JIRA_ISSUE' | 'APP_MANAGED'
+): string | undefined {
+  if (typeof rawKey !== 'string') return undefined;
+  const upper = rawKey.trim().toUpperCase();
+  if (!upper) return undefined;
+
+  if (upper.startsWith('HAZ-') || upper.startsWith('TEST-')) {
+    const stripped = upper.replace(/^(?:HAZ|TEST)-/i, '');
+    if (JIRA_ISSUE_KEY_RE.test(stripped)) {
+      return stripped;
+    }
+    if (source === 'JIRA_ISSUE' && JIRA_ISSUE_KEY_RE.test(upper)) {
+      return upper;
+    }
+    return undefined;
+  }
+
+  return JIRA_ISSUE_KEY_RE.test(upper) ? upper : undefined;
+}
+
+/**
+ * Collects every real Jira issue key referenced across work, hazard, verification test, and re-verification fields.
+ */
+export function extractAllJiraIssueKeysFromLink(link: TraceLink): string[] {
+  const keys = new Set<string>();
+  const candidates: Array<{ raw: unknown; source?: 'JIRA_ISSUE' | 'APP_MANAGED' }> = [
+    { raw: link.work?.key, source: 'JIRA_ISSUE' },
+    { raw: link.hazard?.key, source: link.hazard?.source },
+    { raw: link.test?.testKey, source: link.test?.source },
+    { raw: link.reverificationTaskKey, source: 'JIRA_ISSUE' },
+  ];
+  for (const c of candidates) {
+    const issueKey = normalizeJiraIssueCandidate(c.raw, c.source);
+    if (issueKey) keys.add(issueKey);
+  }
+  return Array.from(keys);
+}
+
+/**
+ * Collects every distinct Jira project key referenced anywhere in a TraceLink (primary + secondary artifacts).
+ */
+export function extractAllJiraProjectKeysFromLink(link: TraceLink): string[] {
+  const projs = new Set<string>();
+  const candidates: Array<{ raw: unknown; source?: 'JIRA_ISSUE' | 'APP_MANAGED' }> = [
+    { raw: link.work?.key, source: 'JIRA_ISSUE' },
+    { raw: link.hazard?.key, source: link.hazard?.source },
+    { raw: link.test?.testKey, source: link.test?.source },
+    { raw: link.reverificationTaskKey, source: 'JIRA_ISSUE' },
+  ];
+  for (const c of candidates) {
+    const proj = extractJiraProjectKeyFromRawKey(c.raw, c.source);
+    if (proj) projs.add(proj);
+  }
+  return Array.from(projs);
+}
+
+/**
+ * Resolves the primary Jira project key anchoring a TraceLink (prefers work item, then native hazard/test/task).
+ */
+export function extractPrimaryJiraProjectKeyFromLink(link: TraceLink): string | undefined {
+  return (
+    extractJiraProjectKeyFromRawKey(link.work?.key, 'JIRA_ISSUE') ||
+    extractJiraProjectKeyFromRawKey(link.hazard?.key, link.hazard?.source) ||
+    extractJiraProjectKeyFromRawKey(link.test?.testKey, link.test?.source) ||
+    extractJiraProjectKeyFromRawKey(link.reverificationTaskKey, 'JIRA_ISSUE')
+  );
+}
+
+/**
+ * Checks Jira `BROWSE_PROJECTS` permission for the calling user (failing closed on errors or inactive accounts).
+ */
+export async function hasJiraBrowsePermissionForCaller(target?: {
+  projectKey?: string;
+  issueKey?: string;
+}): Promise<boolean> {
+  const permRoute = target?.issueKey
+    ? route`/rest/api/3/mypermissions?issueKey=${target.issueKey}&permissions=BROWSE_PROJECTS`
+    : target?.projectKey
+    ? route`/rest/api/3/mypermissions?projectKey=${target.projectKey}&permissions=BROWSE_PROJECTS`
+    : route`/rest/api/3/mypermissions?permissions=BROWSE_PROJECTS`;
+
+  try {
+    const res = await api.asUser().requestJira(permRoute);
+    if (!isIdentityHttpOk(res)) {
+      return false;
+    }
+    const data = (await res.json().catch(() => ({}))) as JiraBrowsePermissionsPayload;
+    if (data.active === false) {
+      return false;
+    }
+    const browsePerm = data.permissions?.BROWSE_PROJECTS;
+    if (browsePerm !== undefined) {
+      return browsePerm.havePermission === true;
+    }
+    return (
+      data.permissions?.EDIT_ISSUES?.havePermission === true ||
+      data.permissions?.ADMINISTER_PROJECTS?.havePermission === true
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Checks whether the calling user can read a Confluence page via `/wiki/api/v2/pages/{pageId}` (fail-closed).
+ */
+export async function canReadConfluencePageForCaller(pageId: string): Promise<boolean> {
+  const cleanId = pageId.trim();
+  if (!cleanId) return false;
+  try {
+    const res = await api.asUser().requestConfluence(route`/wiki/api/v2/pages/${cleanId}`);
+    return isIdentityHttpOk(res);
+  } catch {
+    return false;
+  }
+}
+
+function redactStringWithRestrictedLink(text: string, link: TraceLink): string {
+  const placeholder = 'Restricted Confluence Specification';
+  let out = text;
+  const origTitle = (link.spec?.title || '').trim();
+  if (origTitle && out.includes(origTitle)) {
+    out = out.split(origTitle).join(placeholder);
+    const shortCode = origTitle.split(':')[0].trim();
+    if (/^[a-z]{2,10}-\d+$/i.test(shortCode) && out.includes(shortCode)) {
+      out = out.split(shortCode).join(placeholder);
+    }
+  }
+  for (const hash of [
+    link.spec?.sha256Hash,
+    link.spec?.lastSignedHash,
+    link.signature?.artifactSha256,
+  ]) {
+    const cleanHash = (hash || '').trim();
+    if (cleanHash.length >= 8) {
+      if (out.includes(cleanHash)) {
+        out = out.split(cleanHash).join('[redacted]');
+      }
+      const prefix = cleanHash.slice(0, 8);
+      if (out.includes(prefix)) {
+        out = out.split(prefix).join('[redacted]');
+      }
+    }
+  }
+  return out;
+}
+
+function redactTraceLinkConfluenceSpec(link: TraceLink): TraceLink {
+  const placeholder = 'Restricted Confluence Specification';
+  const redactedSpec: ConfluenceSpec = {
+    ...link.spec,
+    title: placeholder,
+    version: 0,
+    sha256Hash: '',
+    lastSignedHash: '',
+    specRestricted: true,
+    contentSnippet: 'Confluence specification content hidden (caller lacks Confluence read access).',
+  };
+
+  return {
+    ...link,
+    spec: redactedSpec,
+    violations: link.violations.map((v) => redactStringWithRestrictedLink(v, link)),
+    signature: {
+      ...link.signature,
+      artifactSha256: '',
+      ...(link.signature.invalidationReason
+        ? { invalidationReason: redactStringWithRestrictedLink(link.signature.invalidationReason, link) }
+        : {}),
+    },
+  };
+}
+
+/**
+ * Redacts restricted Confluence specification metadata and hashes from an already-computed `BlastRadiusReport`
+ * without altering the underlying deterministic graph verdicts.
+ */
+export function redactBlastRadiusReport(
+  report: BlastRadiusReport,
+  sourceLinks: TraceLink[],
+  restrictedPageIds: ReadonlySet<string>
+): BlastRadiusReport {
+  if (restrictedPageIds.size === 0) {
+    return report;
+  }
+  const restrictedLinks = sourceLinks.filter((l) => {
+    const pid = typeof l.spec?.pageId === 'string' ? l.spec.pageId.trim() : '';
+    return pid !== '' && restrictedPageIds.has(pid);
+  });
+  if (restrictedLinks.length === 0) {
+    return report;
+  }
+  const scrub = (text: string): string => {
+    let out = text;
+    for (const link of restrictedLinks) {
+      out = redactStringWithRestrictedLink(out, link);
+    }
+    return out;
+  };
+
+  return {
+    ...report,
+    triggerArtifact: {
+      ...report.triggerArtifact,
+      title: scrub(report.triggerArtifact.title),
+      deltaReason: scrub(report.triggerArtifact.deltaReason),
+    },
+    traversalPath: report.traversalPath.map((edge) => ({
+      ...edge,
+      from: scrub(edge.from),
+      to: scrub(edge.to),
+      effect: scrub(edge.effect),
+    })),
+    transitiveActionPlan: report.transitiveActionPlan.map(scrub),
+  };
+}
+
+export interface AuthorizeLiveSuiteOptions {
+  extensionType?: string;
+  projectKey?: string;
+  checkConfluencePages?: boolean;
+}
+
+export interface AuthorizedLiveSuiteResult {
+  unredactedSuite: ComplianceSummary;
+  outboundSuite: ComplianceSummary;
+  restrictedPageIds: Set<string>;
+}
+
+/**
+ * Authorizes a LIVE compliance suite against Jira `BROWSE_PROJECTS` (for all associated artifacts) and
+ * Confluence page read permissions. Computes verdicts on the unredacted server-side model FIRST, then
+ * produces a clean outbound representation with restricted spec fields and `signature.artifactSha256` scrubbed.
+ */
+export async function authorizeAndFilterLiveSuiteDetailed(
+  suite: ComplianceSummary,
+  options?: AuthorizeLiveSuiteOptions
+): Promise<AuthorizedLiveSuiteResult> {
+  const emptyRestricted = new Set<string>();
+  if (
+    suite.datasetMode !== 'LIVE' ||
+    suite.initialized === false ||
+    suite.traceLinks.length === 0
+  ) {
+    return { unredactedSuite: suite, outboundSuite: suite, restrictedPageIds: emptyRestricted };
+  }
+
+  const runtimeActive = isForgeRuntime();
+  const cleanScopeProject = options?.projectKey?.trim().toUpperCase() || undefined;
+  if (!cleanScopeProject && !runtimeActive) {
+    return { unredactedSuite: suite, outboundSuite: suite, restrictedPageIds: emptyRestricted };
+  }
+
+  const checkConfluence = runtimeActive && options?.checkConfluencePages !== false;
+  const projectPermCache = new Map<string, boolean>();
+  const confluencePagePermCache = new Map<string, boolean>();
+  let globalBrowsePerm: boolean | undefined;
+
+  const canBrowseProject = async (projectKey: string): Promise<boolean> => {
+    const clean = projectKey.trim().toUpperCase();
+    if (cleanScopeProject) {
+      if (clean === cleanScopeProject) return true;
+      if (!runtimeActive) return false;
+    }
+    if (!runtimeActive) return true;
+    if (projectPermCache.has(clean)) {
+      return projectPermCache.get(clean) === true;
+    }
+    const allowed = await hasJiraBrowsePermissionForCaller({ projectKey: clean });
+    projectPermCache.set(clean, allowed);
+    return allowed;
+  };
+
+  const canBrowseGlobal = async (): Promise<boolean> => {
+    if (!runtimeActive) return !cleanScopeProject;
+    if (globalBrowsePerm === undefined) {
+      globalBrowsePerm = await hasJiraBrowsePermissionForCaller(undefined);
+    }
+    return globalBrowsePerm;
+  };
+
+  const canReadPage = async (pageId: string): Promise<boolean> => {
+    const cleanId = pageId.trim();
+    if (!cleanId) return false;
+    if (confluencePagePermCache.has(cleanId)) {
+      return confluencePagePermCache.get(cleanId) === true;
+    }
+    const allowed = await canReadConfluencePageForCaller(cleanId);
+    confluencePagePermCache.set(cleanId, allowed);
+    return allowed;
+  };
+
+  const jiraAuthorizedLinks: TraceLink[] = [];
+  const restrictedPageIds = new Set<string>();
+
+  for (const link of suite.traceLinks) {
+    const primaryProj = extractPrimaryJiraProjectKeyFromLink(link);
+    const allProjs = extractAllJiraProjectKeysFromLink(link);
+
+    let jiraAllowed = false;
+    if (cleanScopeProject) {
+      if (primaryProj !== cleanScopeProject) {
+        continue;
+      }
+      const secondaryProjs = allProjs.filter((p) => p !== cleanScopeProject);
+      jiraAllowed = true;
+      for (const sec of secondaryProjs) {
+        if (!(await canBrowseProject(sec))) {
+          jiraAllowed = false;
+          break;
+        }
+      }
+    } else if (allProjs.length > 0) {
+      jiraAllowed = true;
+      for (const projKey of allProjs) {
+        if (!(await canBrowseProject(projKey))) {
+          jiraAllowed = false;
+          break;
+        }
+      }
+    } else {
+      jiraAllowed = await canBrowseGlobal();
+    }
+
+    if (!jiraAllowed) {
+      continue;
+    }
+
+    jiraAuthorizedLinks.push(link);
+
+    const pageId = typeof link.spec?.pageId === 'string' ? link.spec.pageId.trim() : '';
+    if (checkConfluence && pageId && !link.spec?.isMissingSentinel) {
+      const readable = await canReadPage(pageId);
+      if (!readable) {
+        restrictedPageIds.add(pageId);
+      }
+    }
+  }
+
+  const scopedName =
+    cleanScopeProject && !suite.projectName.toUpperCase().startsWith(cleanScopeProject)
+      ? `${cleanScopeProject} (${suite.projectName})`
+      : suite.projectName;
+
+  const unredactedSuite =
+    jiraAuthorizedLinks.length === suite.traceLinks.length
+      ? suite
+      : ComplianceEngine.generateComplianceReport(
+          jiraAuthorizedLinks,
+          suite.datasetMode,
+          scopedName,
+          {
+            storageFormat: suite.storageFormat,
+            auditEntryCount: suite.auditEntryCount,
+            auditHeadHash: suite.auditHeadHash,
+            initialized: suite.initialized,
+            lastSyncedAt: suite.lastSyncedAt,
+          }
+        );
+
+  if (restrictedPageIds.size === 0) {
+    return {
+      unredactedSuite,
+      outboundSuite: unredactedSuite,
+      restrictedPageIds,
+    };
+  }
+
+  const restrictedLinks = unredactedSuite.traceLinks.filter((l) => {
+    const pid = typeof l.spec?.pageId === 'string' ? l.spec.pageId.trim() : '';
+    return pid !== '' && restrictedPageIds.has(pid);
+  });
+
+  const scrubBlockingReason = (reason: string): string => {
+    let out = reason;
+    for (const link of restrictedLinks) {
+      out = redactStringWithRestrictedLink(out, link);
+    }
+    return out;
+  };
+
+  const outboundSuite: ComplianceSummary = {
+    ...unredactedSuite,
+    blockingReasons: unredactedSuite.blockingReasons.map(scrubBlockingReason),
+    traceLinks: unredactedSuite.traceLinks.map((link) => {
+      const pid = typeof link.spec?.pageId === 'string' ? link.spec.pageId.trim() : '';
+      return pid && restrictedPageIds.has(pid) ? redactTraceLinkConfluenceSpec(link) : link;
+    }),
+  };
+
+  return {
+    unredactedSuite,
+    outboundSuite,
+    restrictedPageIds,
+  };
+}
+
+/**
+ * Shared fail-closed authorization filter returning the outbound ComplianceSummary directly.
+ */
+export async function authorizeAndFilterLiveSuite(
+  suite: ComplianceSummary,
+  options?: AuthorizeLiveSuiteOptions
+): Promise<ComplianceSummary> {
+  const { outboundSuite } = await authorizeAndFilterLiveSuiteDetailed(suite, options);
+  return outboundSuite;
 }
 

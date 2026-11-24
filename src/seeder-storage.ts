@@ -59,6 +59,8 @@ export interface ShardedSuiteMetaV2 {
   blockingReasonShardKeys?: string[];
   signatureDriftCount: number;
   lastAuditTimestamp: string;
+  lastSyncedAt?: string;
+  syncIncomplete?: boolean;
   linkKeys: string[];
   linkKeyShardKeys?: string[];
   issueKeyIndex?: Record<string, string[]>;
@@ -158,7 +160,7 @@ export function buildMetaAndShardItems(
   summary.traceLinks.forEach((link, idx) => {
     const kvsKey = linkKeys[idx];
     if (!kvsKey) return;
-    for (const rawKey of [link.work?.key, link.hazard?.key]) {
+    for (const rawKey of [link.work?.key, link.hazard?.key, link.test?.testKey]) {
       const normalized = rawKey?.trim().toUpperCase();
       if (!normalized) continue;
       const existing = issueKeyIndex[normalized];
@@ -184,6 +186,8 @@ export function buildMetaAndShardItems(
     blockingReasons: [...summary.blockingReasons],
     signatureDriftCount: summary.signatureDriftCount,
     lastAuditTimestamp: summary.lastAuditTimestamp,
+    ...(summary.lastSyncedAt ? { lastSyncedAt: summary.lastSyncedAt } : {}),
+    ...(summary.syncIncomplete === true ? { syncIncomplete: true } : {}),
     linkKeys: [...linkKeys],
     ...(Object.keys(issueKeyIndex).length > 0 ? { issueKeyIndex } : {}),
     storageFormat: 'SHARDED_V2',

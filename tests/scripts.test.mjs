@@ -1176,14 +1176,14 @@ test('validate-manifest.mjs: passes on built repository and rejects remote icon 
   const repoResult = await validateManifest({ rootDir: REPO_ROOT });
   assert.equal(repoResult.ok, true, repoResult.errors.join('\n'));
   assert.equal(repoResult.errors.length, 0);
-  assert.equal(repoResult.verifiedHandlers.length, 5);
+  assert.equal(repoResult.verifiedHandlers.length, 6);
 
   const cliRes = await runProcess(process.execPath, [VALIDATE_MANIFEST_SCRIPT], {
     cwd: REPO_ROOT,
   });
   assert.equal(cliRes.code, 0, cliRes.stderr);
   assert.match(cliRes.stdout, /validate-manifest: OK/);
-  assert.match(cliRes.stdout, /5 handler exports verified; 0 remote icon URLs/);
+  assert.match(cliRes.stdout, /6 handler exports verified; 0 remote icon URLs/);
 
   const missingFixture = createTempTree('medtrace-manifest-missing-', {});
   try {

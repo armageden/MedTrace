@@ -70,6 +70,9 @@ function resolveMutationSummaryResponse(
     return { ok: false, error: `${actionLabel} returned an empty or malformed response.` };
   }
   if (raw.success === false) {
+    if (raw.partialSuccess === true && isComplianceSummary(raw.summary)) {
+      return { ok: true, summary: raw.summary };
+    }
     return {
       ok: false,
       error: extractErrorMessage(raw) || `${actionLabel} failed.`,
@@ -167,10 +170,20 @@ export const App: React.FC = () => {
   const activeBlastRef = useRef(false);
   const lastFocusFetchRef = useRef(0);
   const autoSelectedForContextRef = useRef(false);
+  const userToggledViewRef = useRef(false);
+  const LARGE_WORKSPACE_MATRIX_THRESHOLD = 25;
 
   const commitSummary = useCallback((next: ComplianceSummary) => {
     summaryRef.current = next;
     setSummary(next);
+    if (!userToggledViewRef.current && next.traceLinks.length >= LARGE_WORKSPACE_MATRIX_THRESHOLD) {
+      setActiveView('table');
+    }
+  }, []);
+
+  const handleToggleView = useCallback((view: 'graph' | 'table') => {
+    userToggledViewRef.current = true;
+    setActiveView(view);
   }, []);
 
   const fetchAndApplySuite = useCallback(
@@ -417,10 +430,11 @@ export const App: React.FC = () => {
 
   const handleSyncLive = async (options?: {
     includeUntaggedIssues?: boolean;
+    resumeFromCursor?: boolean;
   }): Promise<boolean> =>
     runSummaryMutation({
       setBusy: setIsSyncingLive,
-      actionLabel: 'Live Atlassian sync',
+      actionLabel: options?.resumeFromCursor ? 'Resume Live Atlassian sync' : 'Live Atlassian sync',
       noticeSource: 'sync',
       invoke: () => {
         const payload: Omit<LiveSyncOptions, 'callerMode'> = {
@@ -428,6 +442,7 @@ export const App: React.FC = () => {
           ...(typeof options?.includeUntaggedIssues === 'boolean'
             ? { includeUntaggedIssues: options.includeUntaggedIssues }
             : {}),
+          ...(options?.resumeFromCursor === true ? { resumeFromCursor: true } : {}),
         };
         return invokeResolver('syncLiveSuite', payload);
       },
@@ -449,12 +464,12 @@ export const App: React.FC = () => {
         const skippedUntaggedCount =
           typeof resp.skippedUntaggedCount === 'number' ? resp.skippedUntaggedCount : 0;
 
-        if (warnings.length > 0 || resp.truncated === true) {
+        if (warnings.length > 0 || resp.truncated === true || nextSummary.syncIncomplete === true) {
           setNotice({
             kind: 'warning',
             source: 'sync',
             message: `Live sync scanned ${jiraIssuesScanned} Jira issue(s) and ${confluencePagesScanned} Confluence page(s): ${
-              warnings.join(' ') || 'Results truncated.'
+              warnings.join(' ') || 'Results truncated; click Resume Sync to finish.'
             }`,
           });
         } else if (skippedUntaggedCount > 0) {
@@ -634,6 +649,71 @@ export const App: React.FC = () => {
         `Simulated remediation failed (${detail}). Compliance gap remains OPEN.`,
     });
 
+  const handleCreateReverificationTask = async (params: {
+    hazardKey?: string;
+    linkId?: string;
+    issueKey?: string;
+    reason?: string;
+  }): Promise<boolean> =>
+    runSummaryMutation({
+      setBusy: setIsMutating,
+      actionLabel: 'Create re-verification task',
+      invoke: () => invokeResolver('createReverificationTask', params),
+      onSuccess: (raw) => {
+        if (isPlainRecord(raw) && typeof raw.createdIssueKey === 'string') {
+          const linked = Array.isArray(raw.linkedIssueKeys)
+            ? raw.linkedIssueKeys.filter((k): k is string => typeof k === 'string')
+            : [];
+          const failed = Array.isArray(raw.failedLinkKeys)
+            ? raw.failedLinkKeys.filter((k): k is string => typeof k === 'string')
+            : [];
+          const missing = Array.isArray(raw.missingLinkKeys)
+            ? raw.missingLinkKeys.filter((k): k is string => typeof k === 'string')
+            : [];
+          if (failed.length > 0) {
+            setNotice({
+              kind: 'warning',
+              source: 'mutation',
+              message: `Created Jira re-verification task ${raw.createdIssueKey}, but failed to link: ${failed.join(', ')}.${
+                linked.length > 0 ? ` Linked: ${linked.join(', ')}.` : ''
+              }`,
+            });
+          } else if (raw.alreadyExisted === true) {
+            if (missing.length > 0 || raw.linksVerified === false) {
+              setNotice({
+                kind: 'warning',
+                source: 'mutation',
+                message: `Found existing open Jira re-verification task ${raw.createdIssueKey}; verified links: ${
+                  linked.join(', ') || 'none'
+                } (missing/unverified: ${missing.join(', ') || 'unknown'}).`,
+              });
+            } else {
+              setNotice({
+                kind: 'info',
+                source: 'mutation',
+                message: `Found existing open Jira re-verification task ${raw.createdIssueKey}${
+                  linked.length > 0 ? ` linked to ${linked.join(', ')}` : ''
+                }.`,
+              });
+            }
+          } else if (linked.length === 0) {
+            setNotice({
+              kind: 'info',
+              source: 'mutation',
+              message: `Created Jira re-verification task ${raw.createdIssueKey} (no native Jira issues were linked).`,
+            });
+          } else {
+            setNotice({
+              kind: 'success',
+              source: 'mutation',
+              message: `Created Jira re-verification task ${raw.createdIssueKey} linked to ${linked.join(', ')}.`,
+            });
+          }
+        }
+      },
+      formatError: (detail) => `Failed to create re-verification Jira task (${detail}).`,
+    });
+
   const isAnyMutationBusy = isSeeding || isSyncingLive || isMutating;
   const isBusy = isAnyMutationBusy || isAnalyzingBlastRadius;
   const selectedLink = summary
@@ -717,10 +797,13 @@ export const App: React.FC = () => {
         summary={summary}
         panelContext={panelContext}
         activeView={activeView}
-        onToggleView={setActiveView}
+        onToggleView={handleToggleView}
         onSeed={handleSeed}
         onSyncLive={() => {
           void handleSyncLive();
+        }}
+        onResumeSync={() => {
+          void handleSyncLive({ resumeFromCursor: true });
         }}
         onOpenAuditLog={() => setIsAuditLogOpen(true)}
         onOpenExport={() => setIsExportOpen(true)}
@@ -812,6 +895,7 @@ export const App: React.FC = () => {
         onRecordTestResult={handleRecordTestResult}
         onSignOffPart11={handleSignOffPart11}
         onRemediateDemo={handleRemediateDemo}
+        onCreateReverificationTask={handleCreateReverificationTask}
         isMutating={isMutating}
         isGlobalBusy={isSeeding || isSyncingLive || isAnalyzingBlastRadius}
       />

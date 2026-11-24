@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { FullContext } from '@forge/bridge';
 import { App } from '../App';
@@ -190,6 +190,7 @@ describe('FE-01..FE-04 & FE-07: App races, bridge errors, confirm seed, and tran
       .mockRejectedValueOnce(new bridgeModule.BridgeUnavailableError())
       .mockResolvedValueOnce(makeSuite());
 
+    cleanup();
     render(<App />);
 
     const alert = await screen.findByRole('alert');
@@ -239,6 +240,7 @@ describe('FE-01..FE-04 & FE-07: App races, bridge errors, confirm seed, and tran
       throw new Error(`Unexpected resolver ${key}`);
     });
 
+    cleanup();
     render(<App />);
     await screen.findByText('PumpGuard Live');
 
@@ -301,7 +303,8 @@ describe('FE-01..FE-04 & FE-07: App races, bridge errors, confirm seed, and tran
     });
 
     try {
-      render(<App />);
+      cleanup();
+    render(<App />);
       await screen.findByText('PumpGuard Live');
 
       const user = userEvent.setup();
@@ -363,6 +366,7 @@ describe('FE-01..FE-04 & FE-07: App races, bridge errors, confirm seed, and tran
       throw new Error(`Unexpected resolver ${key}`);
     });
 
+    cleanup();
     render(<App />);
     await screen.findByText('PumpGuard Live');
 
@@ -444,8 +448,9 @@ describe('FE-01..FE-04 & FE-07: App races, bridge errors, confirm seed, and tran
       throw new Error(`Unexpected resolver ${key}`);
     });
 
+    cleanup();
     render(<App />);
-    await screen.findByText('LIVE ATLASSIAN DATA');
+    await screen.findByText(/LIVE ATLASSIAN SNAPSHOT/i);
 
     const user = userEvent.setup();
     await user.click(screen.getByRole('button', { name: /Seed Demo Suite/i }));
@@ -524,6 +529,7 @@ describe('FE-01..FE-04 & FE-07: App races, bridge errors, confirm seed, and tran
       throw new Error(`Unexpected resolver ${key}`);
     });
 
+    cleanup();
     render(<App />);
     await screen.findByText(/Jira Issue: MED-10/i);
 
@@ -642,6 +648,7 @@ describe('FE-01..FE-04 & FE-07: App races, bridge errors, confirm seed, and tran
       throw new Error(`Unexpected resolver ${key}`);
     });
 
+    cleanup();
     render(<App />);
     await screen.findByText('PumpGuard Live');
 
@@ -698,5 +705,216 @@ describe('FE-01..FE-04 & FE-07: App races, bridge errors, confirm seed, and tran
         attestationPhrase: PART11_ATTESTATION_PHRASE,
       });
     });
+  });
+
+  it('defaults large workspaces (>= 25 links) to Matrix view and renders CONFIGURED CHECKS PASSED', async () => {
+    const verified25 = Array.from({ length: 25 }, (_, idx) =>
+      makeTraceLink({
+        id: `link-${idx + 1}`,
+        hazardKey: `HAZ-${idx + 1}`,
+        workKey: `MED-${idx + 1}`,
+        complianceState: 'VERIFIED',
+        testStatus: 'PASSED',
+        sigValid: true,
+      })
+    );
+    const largeSuite = makeSuite({
+      datasetMode: 'LIVE',
+      totalHazards: 25,
+      classCCount: 25,
+      verifiedPercentage: 100,
+      releaseBlocked: false,
+      blockingReasons: [],
+      traceLinks: verified25,
+    });
+
+    mockedInvokeResolver.mockImplementation(async (key) => {
+      if (key === 'getComplianceSuite') return largeSuite;
+      if (key === 'queryGraphContext') return null;
+      return null;
+    });
+
+    cleanup();
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByPlaceholderText(/Filter by Hazard ID/i)).toBeInTheDocument();
+    });
+    expect(screen.getByText('CONFIGURED CHECKS PASSED')).toBeInTheDocument();
+    expect(screen.queryByText('AUDIT READY (ZERO GAPS)')).not.toBeInTheDocument();
+  });
+
+  it('creates a linked Jira re-verification task from InspectionDrawer in LIVE mode', async () => {
+    const user = userEvent.setup();
+    const brokenLink = makeTraceLink({
+      id: 'link-broken',
+      hazardKey: 'HAZ-1',
+      workKey: 'MED-1',
+      complianceState: 'SIGNATURE_DRIFT',
+      testStatus: 'UNTESTED',
+      sigValid: false,
+    });
+    brokenLink.violations = ['Cryptographic Signature Drift: SRS modified'];
+    const brokenSuite = makeSuite({
+      datasetMode: 'LIVE',
+      totalHazards: 1,
+      classCCount: 1,
+      verifiedPercentage: 0,
+      releaseBlocked: true,
+      blockingReasons: ['Cryptographic Signature Drift: SRS modified'],
+      traceLinks: [brokenLink],
+    });
+    mockedInvokeResolver.mockImplementation(async (key) => {
+      if (key === 'getComplianceSuite') return brokenSuite;
+      if (key === 'queryGraphContext') return null;
+      if (key === 'createReverificationTask') {
+        return {
+          success: true,
+          createdIssueKey: 'MED-300',
+          linkedIssueKeys: ['MED-1'],
+          projectKey: 'MED',
+          summary: brokenSuite,
+        };
+      }
+      return null;
+    });
+
+    cleanup();
+    render(<App />);
+    await screen.findByText('PumpGuard Live');
+    await user.click(screen.getByRole('button', { name: /matrix/i }));
+    const inspectButton = await screen.findByRole('button', { name: /Inspect HAZ-1 lineage/i });
+    await user.click(inspectButton);
+    await user.click(await screen.findByRole('button', { name: /Create Re-Verification Jira Task/i }));
+
+    await waitFor(() => {
+      expect(mockedInvokeResolver).toHaveBeenCalledWith('createReverificationTask', {
+        hazardKey: 'HAZ-1',
+        linkId: 'link-broken',
+        issueKey: 'MED-1',
+        reason: 'Cryptographic Signature Drift: SRS modified',
+      });
+    });
+
+    // When a re-verification task is already linked on the TraceLink, no duplicate creation CTA is offered
+    const linkedLink = makeTraceLink({
+      id: 'link-linked-rev',
+      hazardKey: 'HAZ-2',
+      workKey: 'MED-2',
+      complianceState: 'SIGNATURE_DRIFT',
+      testStatus: 'UNTESTED',
+      sigValid: false,
+    });
+    linkedLink.reverificationTaskKey = 'MED-300';
+    linkedLink.violations = ['Cryptographic Signature Drift: SRS modified'];
+    const linkedSuite = makeSuite({
+      datasetMode: 'LIVE',
+      totalHazards: 1,
+      classCCount: 1,
+      verifiedPercentage: 0,
+      releaseBlocked: true,
+      blockingReasons: ['Cryptographic Signature Drift: SRS modified'],
+      traceLinks: [linkedLink],
+    });
+    mockedInvokeResolver.mockImplementation(async (key) => {
+      if (key === 'getComplianceSuite') return linkedSuite;
+      if (key === 'queryGraphContext') return null;
+      return null;
+    });
+    cleanup();
+    render(<App />);
+    await screen.findByText('PumpGuard Live');
+    await user.click(screen.getByRole('button', { name: /matrix/i }));
+    const inspectLinked = await screen.findByRole('button', { name: /Inspect HAZ-2 lineage/i });
+    await user.click(inspectLinked);
+    expect(await screen.findByText(/Linked Re-Verification Jira Task: MED-300/)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Create Re-Verification Jira Task/i })).not.toBeInTheDocument();
+  });
+
+  it('shows Resume Sync when syncIncomplete is true and surfaces honest warning on partial Jira link failure', async () => {
+    const user = userEvent.setup();
+    const brokenLink = makeTraceLink({
+      id: 'link-incomplete-sync',
+      hazardKey: 'HAZ-9',
+      workKey: 'MED-9',
+      complianceState: 'SIGNATURE_DRIFT',
+      testStatus: 'UNTESTED',
+      sigValid: false,
+    });
+    brokenLink.violations = ['Cryptographic Signature Drift: SRS modified'];
+    const incompleteSuite = makeSuite({
+      datasetMode: 'LIVE',
+      totalHazards: 1,
+      classCCount: 1,
+      verifiedPercentage: 0,
+      releaseBlocked: true,
+      blockingReasons: ['Live Atlassian synchronization is incomplete (truncated).'],
+      traceLinks: [brokenLink],
+    });
+    incompleteSuite.syncIncomplete = true;
+
+    const completedSuite = makeSuite({
+      datasetMode: 'LIVE',
+      totalHazards: 1,
+      classCCount: 1,
+      verifiedPercentage: 0,
+      releaseBlocked: true,
+      blockingReasons: ['Cryptographic Signature Drift: SRS modified'],
+      traceLinks: [brokenLink],
+    });
+
+    mockedInvokeResolver.mockImplementation(async (key) => {
+      if (key === 'getComplianceSuite') return incompleteSuite;
+      if (key === 'queryGraphContext') return null;
+      if (key === 'syncLiveSuite') {
+        return {
+          success: true,
+          datasetMode: 'LIVE',
+          jiraIssuesScanned: 2,
+          confluencePagesScanned: 1,
+          linkedPairsFound: 1,
+          driftDetectedCount: 1,
+          truncated: false,
+          resumedFromCursor: true,
+          warnings: [],
+          summary: completedSuite,
+        };
+      }
+      if (key === 'createReverificationTask') {
+        return {
+          success: false,
+          partialSuccess: true,
+          fullyLinked: false,
+          createdIssueKey: 'MED-301',
+          linkedIssueKeys: ['MED-9'],
+          failedLinkKeys: ['HAZ-9'],
+          projectKey: 'MED',
+          summary: completedSuite,
+        };
+      }
+      return null;
+    });
+
+    cleanup();
+    render(<App />);
+    await screen.findByText('PumpGuard Live');
+    expect(screen.getByText(/SYNC INCOMPLETE — GLOBAL GATE BLOCKED/i)).toBeInTheDocument();
+    const resumeBtn = screen.getByRole('button', { name: /Resume Sync/i });
+    await user.click(resumeBtn);
+
+    await waitFor(() => {
+      expect(mockedInvokeResolver).toHaveBeenCalledWith('syncLiveSuite', {
+        projectKey: 'MED',
+        resumeFromCursor: true,
+      });
+    });
+
+    await user.click(screen.getByRole('button', { name: /matrix/i }));
+    await user.click(await screen.findByRole('button', { name: /Inspect HAZ-9 lineage/i }));
+    await user.click(await screen.findByRole('button', { name: /Create Re-Verification Jira Task/i }));
+
+    expect(
+      await screen.findByText(/Created Jira re-verification task MED-301, but failed to link: HAZ-9/i)
+    ).toBeInTheDocument();
   });
 });

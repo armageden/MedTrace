@@ -27,7 +27,7 @@ function formatSafeTimestamp(iso?: string): string {
 
 function getDynamicClassification(summary: ComplianceSummary): string {
   if (summary.classCCount > 0) {
-    return `IEC 62304 Class C (Highest Severity Present; C:${summary.classCCount}, B:${summary.classBCount}, A:${summary.classACount})`;
+    return `IEC 62304 Class C (Highest Safety Class Present; C:${summary.classCCount}, B:${summary.classBCount}, A:${summary.classACount})`;
   }
   if (summary.classBCount > 0) {
     return `IEC 62304 Class B (B:${summary.classBCount}, A:${summary.classACount})`;
@@ -147,13 +147,14 @@ export const FdaExportModal: React.FC<FdaExportModalProps> = ({
       exportMetadata: {
         exportedAt: new Date().toISOString(),
         datasetMode: summary.datasetMode,
+        auditScope: summary.projectName,
         releaseBlocked: summary.releaseBlocked,
         blockingReasons: summary.blockingReasons,
         auditEntriesIncluded: auditLogEntries.length,
         auditTotalEntries,
         auditLedgerTruncated,
         clientGeneratedNotice:
-          'Client-assembled export snapshot of Forge KVS compliance and audit state; verify chain integrity independently before regulatory reliance.',
+          'Client-assembled export snapshot of Forge KVS compliance and project-scoped audit state; verify chain integrity independently before regulatory reliance.',
       },
       classificationSummary: getDynamicClassification(summary),
       ...summary,
@@ -189,7 +190,7 @@ export const FdaExportModal: React.FC<FdaExportModalProps> = ({
       'Blocking Reasons',
       'Hazard Key',
       'Hazard Title',
-      'Risk Class',
+      'IEC 62304 Safety Class',
       'SRS Spec',
       'Spec Version',
       'Spec SHA-256',
@@ -590,7 +591,7 @@ export const FdaExportModal: React.FC<FdaExportModalProps> = ({
                 }}
               >
                 <th style={{ padding: '8px 10px' }}>ISO 14971 Hazard ID</th>
-                <th style={{ padding: '8px 10px' }}>Risk Class</th>
+                <th style={{ padding: '8px 10px' }}>IEC 62304 Safety Class</th>
                 <th style={{ padding: '8px 10px' }}>SRS Specification</th>
                 <th style={{ padding: '8px 10px' }}>Jira Implementation</th>
                 <th style={{ padding: '8px 10px' }}>Verification Test</th>

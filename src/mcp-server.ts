@@ -2,6 +2,14 @@ import api, { route } from '@forge/api';
 import { ComplianceEngine } from './compliance-engine';
 import { isForgeRuntime } from './runtime';
 import { SeederService } from './seeder';
+import {
+  authorizeAndFilterLiveSuiteDetailed,
+  AuthorizedLiveSuiteResult,
+  extractAllJiraIssueKeysFromLink,
+  extractAllJiraProjectKeysFromLink,
+  extractJiraProjectKeyFromRawKey,
+  redactBlastRadiusReport,
+} from './seeder-identity';
 import { fetchSpecOwnersFromTeamworkGraph, resolveConfluenceCloudId } from './teamwork-graph';
 import {
   BlastRadiusReport,
@@ -37,6 +45,8 @@ const ALLOWED_ROVO_ACTIONS = new Set([
   'get-hazard-lineage',
   'verify-iec-compliance-action',
   'verify-iec-compliance',
+  'create-reverification-task-action',
+  'create-reverification-task',
 ]);
 
 export interface HazardLineageFoundResponse {
@@ -86,7 +96,7 @@ export interface HazardLineageSummaryResponse {
     id: string;
     hazardKey: string;
     riskClass: RiskClass;
-    severity: IsoHazard['severity'];
+    severity?: IsoHazard['severity'];
     requirementSpec: string;
     workKey: string;
     testKey: string;
@@ -145,6 +155,8 @@ export interface RovoActionInputs {
   hazardKey?: string;
   prDiff?: string;
   componentName?: string;
+  summary?: string;
+  reason?: string;
 }
 
 export interface RovoActionPayload extends RovoActionInputs {
@@ -339,9 +351,9 @@ async function scopeSuiteForRovoCaller(
   suite: ComplianceSummary,
   inputs: RovoActionInputs,
   scope: RovoExtensionScope
-): Promise<ComplianceSummary> {
+): Promise<AuthorizedLiveSuiteResult> {
   if (suite.datasetMode !== 'LIVE' || suite.initialized === false) {
-    return suite;
+    return { unredactedSuite: suite, outboundSuite: suite, restrictedPageIds: new Set<string>() };
   }
 
   const projectPermCache = new Map<string, boolean>();
@@ -374,7 +386,7 @@ async function scopeSuiteForRovoCaller(
     return allowed;
   };
 
-  // Validate explicitly requested keys against target-level Jira permissions before returning or searching.
+  // Validate explicitly requested keys against EVERY associated Jira artifact permission before returning or searching.
   const lookupKeys: string[] = [];
   if (inputs.issueKey && inputs.issueKey.trim() !== '') lookupKeys.push(inputs.issueKey.trim());
   if (inputs.hazardKey && inputs.hazardKey.trim() !== '') lookupKeys.push(inputs.hazardKey.trim());
@@ -390,67 +402,56 @@ async function scopeSuiteForRovoCaller(
     const matchedLinks = suite.traceLinks.filter((l) => collectCanonicalLinkKeys(l).includes(lower));
     if (matchedLinks.length > 0) {
       for (const link of matchedLinks) {
-        const workKey = link.work?.key?.trim().toUpperCase();
-        if (workKey && JIRA_ISSUE_KEY_RE.test(workKey)) {
-          if (!(await hasIssueAccess(workKey))) {
-            throw new RovoAuthError(
-              `Forbidden: Caller lacks Jira BROWSE_PROJECTS permission for target scope (${workKey}).`
-            );
+        const allIssueKeys = extractAllJiraIssueKeysFromLink(link);
+        if (allIssueKeys.length > 0) {
+          for (const linkedIssueKey of allIssueKeys) {
+            if (!(await hasIssueAccess(linkedIssueKey))) {
+              throw new RovoAuthError(
+                `Forbidden: Caller lacks Jira BROWSE_PROJECTS permission for target scope (${linkedIssueKey}).`
+              );
+            }
           }
         } else {
-          const fallbackProj = extractProjectKeyFromJiraKey(link.hazard?.key);
-          if (fallbackProj && !(await hasProjectAccess(fallbackProj))) {
-            throw new RovoAuthError(
-              `Forbidden: Caller lacks Jira BROWSE_PROJECTS permission for project ${fallbackProj}.`
-            );
+          for (const projKey of extractAllJiraProjectKeysFromLink(link)) {
+            if (!(await hasProjectAccess(projKey))) {
+              throw new RovoAuthError(
+                `Forbidden: Caller lacks Jira BROWSE_PROJECTS permission for project ${projKey}.`
+              );
+            }
           }
         }
       }
-    } else if (
-      inputs.issueKey &&
-      key.toLowerCase() === inputs.issueKey.trim().toLowerCase() &&
-      JIRA_ISSUE_KEY_RE.test(key.trim().toUpperCase())
-    ) {
-      const cleanInputIssue = key.trim().toUpperCase();
-      if (!(await hasIssueAccess(cleanInputIssue))) {
-        throw new RovoAuthError(
-          `Forbidden: Caller lacks Jira BROWSE_PROJECTS permission for requested issue ${cleanInputIssue}.`
-        );
+    } else {
+      const cleanUpper = key.trim().toUpperCase();
+      const isDirectIssueOrHazardArg =
+        (inputs.issueKey && lower === inputs.issueKey.trim().toLowerCase()) ||
+        (inputs.hazardKey && lower === inputs.hazardKey.trim().toLowerCase());
+      const resolvedProj = extractJiraProjectKeyFromRawKey(cleanUpper, isDirectIssueOrHazardArg ? 'JIRA_ISSUE' : undefined);
+      const isSyntheticDummy =
+        cleanUpper.startsWith('HAZ-') || cleanUpper.startsWith('TEST-')
+          ? !JIRA_ISSUE_KEY_RE.test(cleanUpper.replace(/^(?:HAZ|TEST)-/i, ''))
+          : false;
+      if (isDirectIssueOrHazardArg && !isSyntheticDummy && JIRA_ISSUE_KEY_RE.test(cleanUpper)) {
+        if (!(await hasIssueAccess(cleanUpper))) {
+          throw new RovoAuthError(
+            `Forbidden: Caller lacks Jira BROWSE_PROJECTS permission for requested issue ${cleanUpper}.`
+          );
+        }
+      } else if (isDirectIssueOrHazardArg && resolvedProj) {
+        if (!(await hasProjectAccess(resolvedProj))) {
+          throw new RovoAuthError(
+            `Forbidden: Caller lacks Jira BROWSE_PROJECTS permission for project ${resolvedProj}.`
+          );
+        }
       }
     }
   }
 
-  const authorizedLinks: TraceLink[] = [];
-  for (const link of suite.traceLinks) {
-    const projKey =
-      extractProjectKeyFromJiraKey(link.work?.key) ??
-      extractProjectKeyFromJiraKey(link.hazard?.key);
-    if (!projKey) {
-      if (!scope.projectKey) {
-        authorizedLinks.push(link);
-      }
-      continue;
-    }
-    if (await hasProjectAccess(projKey)) {
-      authorizedLinks.push(link);
-    }
-  }
-
-  if (authorizedLinks.length === suite.traceLinks.length) {
-    return suite;
-  }
-
-  return ComplianceEngine.generateComplianceReport(
-    authorizedLinks,
-    suite.datasetMode,
-    scope.projectKey ? `${scope.projectKey} (${suite.projectName})` : suite.projectName,
-    {
-      storageFormat: suite.storageFormat,
-      auditEntryCount: suite.auditEntryCount,
-      auditHeadHash: suite.auditHeadHash,
-      initialized: suite.initialized,
-    }
-  );
+  return authorizeAndFilterLiveSuiteDetailed(suite, {
+    extensionType: scope.extensionType,
+    projectKey: scope.projectKey,
+    checkConfluencePages: true,
+  });
 }
 
 /**
@@ -500,6 +501,7 @@ export class McpToolService {
           violations: match.violations,
         };
         const pageIds = matches
+          .filter((m) => !m.spec.specRestricted)
           .map((m) => (typeof m.spec.pageId === 'string' ? m.spec.pageId.trim() : ''))
           .filter(Boolean);
         const cloudId = typeof options?.cloudId === 'string' ? options.cloudId.trim() : '';
@@ -549,7 +551,7 @@ export class McpToolService {
         id: l.id,
         hazardKey: l.hazard.key,
         riskClass: l.hazard.riskClass,
-        severity: l.hazard.severity,
+        ...(l.hazard.severity ? { severity: l.hazard.severity } : {}),
         requirementSpec: l.spec.title,
         workKey: l.work.key,
         testKey: l.test.testKey,
@@ -572,9 +574,14 @@ export class McpToolService {
       componentName?: string;
       issueKey?: string;
     },
-    options?: { suite?: ComplianceSummary }
+    options?: {
+      suite?: ComplianceSummary;
+      unredactedSuite?: ComplianceSummary;
+      restrictedPageIds?: ReadonlySet<string>;
+    }
   ): Promise<IecComplianceVerificationResponse> {
     const suite = options?.suite ?? (await SeederService.getActiveComplianceSuite());
+    const evalSuite = options?.unredactedSuite ?? suite;
     const initialized = suite.initialized ?? suite.traceLinks.length > 0;
 
     if (!initialized || suite.traceLinks.length === 0) {
@@ -629,11 +636,16 @@ export class McpToolService {
       }
     }
 
-    // 3. Execute deterministic BFS blast-radius traversal across all matched trigger keys
-    const blastRadius =
+    // 3. Execute deterministic BFS blast-radius traversal on unredacted server-side suite, then redact outbound graph
+    const blastRadiusRaw =
       triggerKeys.length > 0
-        ? ComplianceEngine.computeMultiBlastRadius(triggerKeys, suite)
+        ? ComplianceEngine.computeMultiBlastRadius(triggerKeys, evalSuite)
         : undefined;
+    const restrictedPageIds = options?.restrictedPageIds;
+    const blastRadius =
+      blastRadiusRaw && restrictedPageIds && restrictedPageIds.size > 0
+        ? redactBlastRadiusReport(blastRadiusRaw, evalSuite.traceLinks, restrictedPageIds)
+        : blastRadiusRaw;
 
     const affectedHazards =
       blastRadius && blastRadius.affectedHazardKeys.length > 0
@@ -646,32 +658,36 @@ export class McpToolService {
         : [];
 
     const triggerKeySet = new Set(triggerKeys.map((k) => k.toLowerCase()));
-    const matchedLinks = suite.traceLinks.filter(
+    const evalMatchedLinks = evalSuite.traceLinks.filter(
       (l) =>
         collectCanonicalLinkKeys(l).some((k) => triggerKeySet.has(k)) ||
-        tokenMatchedLinks.includes(l)
+        tokenMatchedLinks.some((tl) => tl.id === l.id)
     );
 
     const affectedHazardKeySet = new Set(
       (blastRadius?.affectedHazardKeys || []).map((k) => k.toUpperCase())
     );
+    const evalTraversedLinks =
+      affectedHazardKeySet.size > 0
+        ? evalSuite.traceLinks.filter((l) => affectedHazardKeySet.has(l.hazard.key.toUpperCase()))
+        : evalMatchedLinks;
     const traversedLinks =
       affectedHazardKeySet.size > 0
         ? suite.traceLinks.filter((l) => affectedHazardKeySet.has(l.hazard.key.toUpperCase()))
-        : matchedLinks;
+        : suite.traceLinks.filter((l) => evalMatchedLinks.some((em) => em.id === l.id));
 
-    const isTargeted = affectedHazards.length > 0 || matchedLinks.length > 0;
+    const isTargeted = affectedHazards.length > 0 || evalMatchedLinks.length > 0;
     const hasBlastRadiusGaps = Boolean(
-      blastRadius &&
-        (blastRadius.blockedWorkItemKeys.length > 0 ||
-          blastRadius.invalidatedTestKeys.length > 0 ||
-          blastRadius.invalidatedSignatureIds.length > 0)
+      blastRadiusRaw &&
+        (blastRadiusRaw.blockedWorkItemKeys.length > 0 ||
+          blastRadiusRaw.invalidatedTestKeys.length > 0 ||
+          blastRadiusRaw.invalidatedSignatureIds.length > 0)
     );
     const hasUnverifiedGaps = isTargeted
-      ? matchedLinks.some((l) => l.complianceState !== 'VERIFIED') ||
-        traversedLinks.some((l) => l.complianceState !== 'VERIFIED') ||
+      ? evalMatchedLinks.some((l) => l.complianceState !== 'VERIFIED') ||
+        evalTraversedLinks.some((l) => l.complianceState !== 'VERIFIED') ||
         hasBlastRadiusGaps
-      : suite.releaseBlocked;
+      : evalSuite.releaseBlocked;
 
     const canShip = !hasUnverifiedGaps;
 
@@ -738,10 +754,25 @@ export class McpToolService {
  * Jira/Confluence user read access, filters LIVE suites to authorized projects, sanitizes errors,
  * and never logs raw PR diff payloads.
  */
+export interface CreateReverificationTaskActionResponse {
+  success: boolean;
+  createdIssueKey: string;
+  linkedIssueKeys: string[];
+  projectKey: string;
+  hazardKey: string;
+  alreadyExisted?: boolean;
+  message: string;
+}
+
 export async function rovoActionHandler(
   payload?: RovoActionPayload | Record<string, unknown>,
   context?: RovoActionContext
-): Promise<HazardLineageResponse | IecComplianceVerificationResponse | RovoActionErrorResponse> {
+): Promise<
+  | HazardLineageResponse
+  | IecComplianceVerificationResponse
+  | CreateReverificationTaskActionResponse
+  | RovoActionErrorResponse
+> {
   const payloadObj = isPlainRecord(payload) ? payload : {};
   const payloadCtx = isPlainRecord(payloadObj.context) ? (payloadObj.context as RovoActionContext) : undefined;
   const ctx: RovoActionContext = context ?? payloadCtx ?? {};
@@ -753,7 +784,11 @@ export async function rovoActionHandler(
   if (!ALLOWED_ROVO_ACTIONS.has(actionKey)) {
     return {
       error: `Unknown action: ${actionKey || '(missing)'}`,
-      availableTools: ['get-hazard-lineage-action', 'verify-iec-compliance-action'],
+      availableTools: [
+        'get-hazard-lineage-action',
+        'verify-iec-compliance-action',
+        'create-reverification-task-action',
+      ],
     };
   }
 
@@ -769,6 +804,8 @@ export async function rovoActionHandler(
     ...(typeof rawInputs.hazardKey === 'string' ? { hazardKey: rawInputs.hazardKey } : {}),
     ...(typeof rawInputs.prDiff === 'string' ? { prDiff: rawInputs.prDiff } : {}),
     ...(typeof rawInputs.componentName === 'string' ? { componentName: rawInputs.componentName } : {}),
+    ...(typeof rawInputs.summary === 'string' ? { summary: rawInputs.summary } : {}),
+    ...(typeof rawInputs.reason === 'string' ? { reason: rawInputs.reason } : {}),
   };
 
   console.log('[MedTrace RovoAction] Dispatching action:', {
@@ -790,7 +827,7 @@ export async function rovoActionHandler(
     }
 
     const accountId = typeof rawAccountId === 'string' ? rawAccountId.trim() : undefined;
-    let scopedSuite: ComplianceSummary | undefined;
+    let scopedAuth: AuthorizedLiveSuiteResult | undefined;
     if (isForgeRuntime()) {
       if (!accountId) {
         throw new RovoAuthError(
@@ -800,7 +837,98 @@ export async function rovoActionHandler(
       const extensionScope = extractRovoExtensionScope(ctx, payloadCtx);
       await assertRovoUserReadAccess(accountId, extensionScope);
       const rawSuite = await SeederService.getActiveComplianceSuite();
-      scopedSuite = await scopeSuiteForRovoCaller(rawSuite, sanitizedInputs, extensionScope);
+      scopedAuth = await scopeSuiteForRovoCaller(rawSuite, sanitizedInputs, extensionScope);
+    }
+
+    if (
+      actionKey === 'create-reverification-task-action' ||
+      actionKey === 'create-reverification-task'
+    ) {
+      if (!sanitizedInputs.hazardKey && !sanitizedInputs.issueKey) {
+        return {
+          error: 'Bad Request: hazardKey or issueKey is required to create a re-verification task.',
+        };
+      }
+      if (isForgeRuntime()) {
+        const extensionScope = extractRovoExtensionScope(ctx, payloadCtx);
+        const requestedIssue = sanitizedInputs.issueKey?.trim().toUpperCase();
+        const targetProj =
+          extractProjectKeyFromJiraKey(requestedIssue) ||
+          extensionScope.projectKey;
+        const permRoute =
+          requestedIssue && JIRA_ISSUE_KEY_RE.test(requestedIssue)
+            ? route`/rest/api/3/mypermissions?issueKey=${requestedIssue}&permissions=EDIT_ISSUES,CREATE_ISSUES,ADMINISTER_PROJECTS`
+            : targetProj
+              ? route`/rest/api/3/mypermissions?projectKey=${targetProj}&permissions=EDIT_ISSUES,CREATE_ISSUES,ADMINISTER_PROJECTS`
+              : route`/rest/api/3/mypermissions?permissions=EDIT_ISSUES,CREATE_ISSUES,ADMINISTER_PROJECTS`;
+        const permResp = await api.asUser().requestJira(permRoute);
+        if (permResp.status !== 200) {
+          throw new RovoAuthError('Forbidden: Unable to verify Jira write permissions.');
+        }
+        const permData = (await permResp.json().catch(() => null)) as {
+          permissions?: {
+            EDIT_ISSUES?: { havePermission?: boolean };
+            CREATE_ISSUES?: { havePermission?: boolean };
+            ADMINISTER_PROJECTS?: { havePermission?: boolean };
+          };
+        } | null;
+        const canWrite =
+          permData?.permissions?.CREATE_ISSUES?.havePermission === true &&
+          (permData?.permissions?.EDIT_ISSUES?.havePermission === true ||
+            permData?.permissions?.ADMINISTER_PROJECTS?.havePermission === true);
+        if (!canWrite) {
+          throw new RovoAuthError(
+            'Forbidden: Creating a Jira re-verification task requires CREATE_ISSUES and EDIT_ISSUES permissions.'
+          );
+        }
+      }
+
+      const created = await SeederService.createReverificationTask({
+        hazardKey: sanitizedInputs.hazardKey,
+        issueKey: sanitizedInputs.issueKey,
+        summary: sanitizedInputs.summary,
+        reason: sanitizedInputs.reason,
+        actorAccountId: accountId || 'rovo-agent-user',
+        callerMode: 'USER',
+        authMethod: 'FORGE_USER_SESSION',
+      });
+      const matchedLink = created.summary.traceLinks.find(
+        (l) => l.reverificationTaskKey === created.createdIssueKey
+      );
+      const failedLinks = created.failedLinkKeys ?? [];
+      const missingLinks = created.missingLinkKeys ?? [];
+      let actionMessage: string;
+      if (failedLinks.length > 0) {
+        actionMessage = `Created Jira re-verification task ${created.createdIssueKey} in project ${created.projectKey}, but failed to link: ${failedLinks.join(', ')}.${
+          created.linkedIssueKeys.length > 0 ? ` Linked: ${created.linkedIssueKeys.join(', ')}.` : ''
+        }`;
+      } else if (created.alreadyExisted) {
+        actionMessage =
+          missingLinks.length > 0 || created.linksVerified === false
+            ? `Found existing open Jira re-verification task ${created.createdIssueKey} in project ${created.projectKey}, but verified links are incomplete (linked: ${created.linkedIssueKeys.join(', ') || 'none'}; missing/unverified: ${missingLinks.join(', ') || 'unknown'}).`
+            : `Found existing open Jira re-verification task ${created.createdIssueKey} in project ${created.projectKey}${
+                created.linkedIssueKeys.length > 0 ? ` linked to ${created.linkedIssueKeys.join(', ')}.` : '.'
+              }`;
+      } else {
+        actionMessage =
+          created.linkedIssueKeys.length > 0
+            ? `Created Jira re-verification task ${created.createdIssueKey} in project ${created.projectKey} linked to ${created.linkedIssueKeys.join(', ')}.`
+            : `Created Jira re-verification task ${created.createdIssueKey} in project ${created.projectKey} (no native Jira issues were linked).`;
+      }
+      return {
+        success: created.success,
+        ...(created.partialSuccess ? { partialSuccess: true } : {}),
+        ...(typeof created.fullyLinked === 'boolean' ? { fullyLinked: created.fullyLinked } : {}),
+        ...(typeof created.linksVerified === 'boolean' ? { linksVerified: created.linksVerified } : {}),
+        createdIssueKey: created.createdIssueKey,
+        linkedIssueKeys: created.linkedIssueKeys,
+        ...(failedLinks.length > 0 ? { failedLinkKeys: failedLinks, linkErrors: created.linkErrors } : {}),
+        ...(missingLinks.length > 0 ? { missingLinkKeys: missingLinks } : {}),
+        projectKey: created.projectKey,
+        hazardKey: matchedLink?.hazard.key || sanitizedInputs.hazardKey || '',
+        ...(created.alreadyExisted ? { alreadyExisted: true } : {}),
+        message: actionMessage,
+      };
     }
 
     if (actionKey === 'get-hazard-lineage-action' || actionKey === 'get-hazard-lineage') {
@@ -815,8 +943,11 @@ export async function rovoActionHandler(
           issueKey: sanitizedInputs.issueKey,
           hazardKey: sanitizedInputs.hazardKey,
         },
-        scopedSuite || cloudId
-          ? { ...(scopedSuite ? { suite: scopedSuite } : {}), ...(cloudId ? { cloudId } : {}) }
+        scopedAuth || cloudId
+          ? {
+              ...(scopedAuth ? { suite: scopedAuth.outboundSuite } : {}),
+              ...(cloudId ? { cloudId } : {}),
+            }
           : undefined
       );
     }
@@ -827,7 +958,13 @@ export async function rovoActionHandler(
         componentName: sanitizedInputs.componentName,
         issueKey: sanitizedInputs.issueKey,
       },
-      scopedSuite ? { suite: scopedSuite } : undefined
+      scopedAuth
+        ? {
+            suite: scopedAuth.outboundSuite,
+            unredactedSuite: scopedAuth.unredactedSuite,
+            restrictedPageIds: scopedAuth.restrictedPageIds,
+          }
+        : undefined
     );
   } catch (err: unknown) {
     if (err instanceof RovoAuthError) {

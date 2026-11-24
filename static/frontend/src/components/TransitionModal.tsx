@@ -383,11 +383,11 @@ export const TransitionModal: React.FC<TransitionModalProps> = ({ isOpen, onClos
                 All Global Release Gate Criteria Satisfied:
               </div>
               <div style={{ fontSize: 12, color: 'var(--mt-text-secondary)', lineHeight: '18px' }}>
-                ✓ All {summary.totalHazards} hazard trace links verified with passing test evidence.
+                ✓ All {summary.totalHazards} hazard(s) ({summary.traceLinks.length} trace link(s)) passed configured verification checks.
                 <br />
-                ✓ Electronic attestation hashes validated against current SHA-256 digests.
+                ✓ Electronic attestation hashes matched stored Confluence SHA-256 digests.
                 <br />
-                ✓ Global release transition to <b>Done / Released</b> is authorized.
+                ✓ Configured release transition checks for <b>Done / Released</b> passed (independent QA/regulatory review still required).
               </div>
             </div>
           )}

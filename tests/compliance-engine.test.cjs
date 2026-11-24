@@ -116,7 +116,13 @@ test.describe('ComplianceEngine - IEC 62304 traceability & signature-fingerprint
   test.it('generates compliance report and blocks release if any violations exist', () => {
     const untested = { ...baseTest, status: 'UNTESTED' };
     const link1 = ComplianceEngine.evaluateTraceLink(baseHazard, baseSpec, baseWork, untested, baseSig);
-    const link2 = ComplianceEngine.evaluateTraceLink(baseHazard, baseSpec, baseWork, baseTest, baseSig);
+    const link2 = ComplianceEngine.evaluateTraceLink(
+      { ...baseHazard, id: 'haz-102', key: 'HAZ-102' },
+      baseSpec,
+      baseWork,
+      baseTest,
+      baseSig
+    );
     const report = ComplianceEngine.generateComplianceReport([link1, link2]);
 
     assert.strictEqual(report.totalHazards, 2);
@@ -124,6 +130,15 @@ test.describe('ComplianceEngine - IEC 62304 traceability & signature-fingerprint
     assert.strictEqual(report.releaseBlocked, true);
     assert.strictEqual(report.blockingReasons.length, 1);
     assert.strictEqual(report.datasetMode, 'DEMO');
+
+    // M:N links sharing the same hazard key count as 1 distinct hazard and require all links verified
+    const mnReport = ComplianceEngine.generateComplianceReport([
+      link1,
+      ComplianceEngine.evaluateTraceLink(baseHazard, { ...baseSpec, id: 'srs-105' }, baseWork, baseTest, baseSig),
+    ]);
+    assert.strictEqual(mnReport.totalHazards, 1);
+    assert.strictEqual(mnReport.classCCount, 1);
+    assert.strictEqual(mnReport.verifiedPercentage, 0);
 
     // Supports LIVE datasetMode when evaluating live project entities
     const liveReport = ComplianceEngine.generateComplianceReport([link2], 'LIVE', 'Infusion Pump Production');

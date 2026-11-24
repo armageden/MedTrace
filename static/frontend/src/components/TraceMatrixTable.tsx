@@ -9,9 +9,13 @@ interface TraceMatrixTableProps {
 
 export const TraceMatrixTable: React.FC<TraceMatrixTableProps> = ({ summary, onSelectTraceLink }) => {
   const [searchTerm, setSearchTerm] = useState('');
+  const [onlyOpenGaps, setOnlyOpenGaps] = useState(false);
   const normalizedQuery = searchTerm.trim().toLowerCase();
 
+  const openGapsCount = summary.traceLinks.filter((l) => l.complianceState !== 'VERIFIED').length;
+
   const filteredLinks = summary.traceLinks.filter((link) => {
+    if (onlyOpenGaps && link.complianceState === 'VERIFIED') return false;
     if (!normalizedQuery) return true;
     const text = [
       link.hazard.key,
@@ -73,6 +77,28 @@ export const TraceMatrixTable: React.FC<TraceMatrixTableProps> = ({ summary, onS
             <X size={14} />
           </button>
         )}
+        <button
+          type="button"
+          aria-pressed={onlyOpenGaps}
+          onClick={() => setOnlyOpenGaps((prev) => !prev)}
+          className="mt-btn"
+          style={{
+            padding: '5px 10px',
+            fontSize: 11,
+            whiteSpace: 'nowrap',
+            border: onlyOpenGaps
+              ? '1px solid var(--mt-danger-border, #ffbdad)'
+              : '1px solid var(--mt-border, #dfe1e6)',
+            background: onlyOpenGaps
+              ? 'var(--mt-danger-bg, #ffebe6)'
+              : 'var(--mt-bg-page, #f4f5f7)',
+            color: onlyOpenGaps
+              ? 'var(--mt-danger-text, #bf2600)'
+              : 'var(--mt-text-secondary, #42526e)',
+          }}
+        >
+          Open Gaps ({openGapsCount})
+        </button>
       </div>
 
       {/* Table */}
