@@ -170,4 +170,33 @@ describe('FE-07: AuditLogModal truncation notice, beforeSeq pagination, and fail
       expectedPrevHash: 'head-seq-200-abc123',
     });
   });
+
+  it('shows accurate project-scoped count and hides Load Older Entries when all entries for the project are loaded', async () => {
+    mockedInvokeResolver.mockImplementation(async (fnKey) => {
+      if (fnKey === 'getAuditLog') {
+        return makeAuditEntries(19, 20);
+      }
+      if (fnKey === 'verifyAuditChain') {
+        return {
+          valid: true,
+          totalEntries: 21,
+          headHash: 'head-global-21',
+          verifiedFromSeq: 1,
+          verifiedToSeq: 21,
+          windowEntryCount: 21,
+          truncated: false,
+        };
+      }
+      return null;
+    });
+
+    render(<AuditLogModal isOpen={true} projectKey="MED" datasetMode="LIVE" onClose={() => {}} />);
+
+    await waitFor(() => {
+      expect(
+        screen.getByText(/Showing all 2 audit entries for project MED \(global ledger holds 21 chained entries/i)
+      ).toBeInTheDocument();
+    });
+    expect(screen.queryByRole('button', { name: /Load Older Entries/i })).not.toBeInTheDocument();
+  });
 });

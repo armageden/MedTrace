@@ -157,9 +157,10 @@ export const ConfirmSeedModal: React.FC<ConfirmSeedModalProps> = ({
                 <div style={{ marginTop: 8, color: 'var(--mt-text-muted)' }}>
                   Overwriting an initialized LIVE suite requires Jira Site Administrator (
                   <code>ADMINISTER</code>) permission on the server and records a pre-overwrite
-                  recovery snapshot in Forge KVS and the audit log. Underlying Jira issues and
-                  Confluence pages are not deleted, and you can re-run <em>Sync Live Atlassian</em>{' '}
-                  to restore live compliance tracking.
+                  recovery snapshot in Forge KVS and the audit log. Forge KVS compliance state is
+                  tenant-wide across Jira and Confluence; underlying Jira issues and Confluence pages
+                  are not deleted, and you can re-run <em>Sync Live Atlassian</em> to restore live
+                  compliance tracking.
                 </div>
               </>
             ) : (

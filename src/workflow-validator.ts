@@ -161,7 +161,8 @@ function isMatchedInSuite(issueKey: string, suite: ComplianceSummary): boolean {
   return suite.traceLinks.some(
     (l) =>
       (l.work?.key || '').toUpperCase() === clean ||
-      (l.hazard?.key || '').toUpperCase() === clean
+      (l.hazard?.key || '').toUpperCase() === clean ||
+      (l.test?.testKey || '').toUpperCase() === clean
   );
 }
 
@@ -277,22 +278,28 @@ export async function workflowValidatorHandler(
       safetyProbe = await probeUnsyncedSafetyIssue(issueKey, payload);
     }
 
-    if (issueKey && isInitialized && isForgeRuntime() && isMatchedInSuite(issueKey, suite)) {
-      const cleanIssue = issueKey.trim().toUpperCase();
-      const targetPageIds = suite.traceLinks
-        .filter(
-          (l) =>
-            (l.work?.key || '').toUpperCase() === cleanIssue ||
-            (l.hazard?.key || '').toUpperCase() === cleanIssue
-        )
-        .map((l) => l.spec?.pageId)
-        .filter((p): p is string => typeof p === 'string' && p.trim().length > 0);
-      if (targetPageIds.length > 0) {
+    if (isInitialized && isForgeRuntime() && suite.datasetMode === 'LIVE') {
+      const cleanIssue = issueKey ? issueKey.trim().toUpperCase() : '';
+      if (!cleanIssue) {
         suite = await LiveIngestionService.reconcileConfluenceSpecs(suite, {
-          targetPageIds,
-          issueKeyFilter: issueKey,
           allowAppFallback: true,
         });
+      } else if (isMatchedInSuite(cleanIssue, suite)) {
+        const targetPageIds = suite.traceLinks
+          .filter(
+            (l) =>
+              (l.work?.key || '').toUpperCase() === cleanIssue ||
+              (l.hazard?.key || '').toUpperCase() === cleanIssue
+          )
+          .map((l) => l.spec?.pageId)
+          .filter((p): p is string => typeof p === 'string' && p.trim().length > 0);
+        if (targetPageIds.length > 0) {
+          suite = await LiveIngestionService.reconcileConfluenceSpecs(suite, {
+            targetPageIds,
+            issueKeyFilter: cleanIssue,
+            allowAppFallback: true,
+          });
+        }
       }
     }
 

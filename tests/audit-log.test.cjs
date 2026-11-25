@@ -695,4 +695,26 @@ test.describe('AuditLogService & AuditStorageAdapters - Monotonicity, Batching &
       }
     });
   });
+
+  test.it('kvsAuditStorageAdapter.setHead avoids backward kvs.set when stored head already has lastSeq >= targetHead.lastSeq', async () => {
+    const entries = buildValidEntries(5);
+    const seed = seedEntriesIntoKvs(entries, 5);
+    const kvsMock = createMockAuditKvs(seed);
+
+    await withMockedKvs(kvsMock, async () => {
+      const beforeSetCount = kvsMock.calls.set.length;
+      await kvsAuditStorageAdapter.setHead({
+        lastSeq: 2,
+        headHash: entries[1].entryHash,
+      });
+      assert.strictEqual(
+        kvsMock.calls.set.length,
+        beforeSetCount,
+        'setHead must not issue a backward kvs.set overwriting higher lastSeq'
+      );
+      const currentHead = await kvsAuditStorageAdapter.getHead();
+      assert.strictEqual(currentHead.lastSeq, 5);
+      assert.strictEqual(currentHead.headHash, entries[4].entryHash);
+    });
+  });
 });

@@ -1,11 +1,11 @@
 import crypto from 'node:crypto';
 import {
   canonicalJsonStringify,
+  isSignatureTimestampInvalidated,
   sanitizeKvsKeySegment,
   sha256Hex,
   validateHttpsUrl,
 } from './crypto-utils';
-import { PART11_ATTESTATION_PHRASE } from './types';
 import {
   BlastRadiusReport,
   ComplianceSummary,
@@ -44,9 +44,6 @@ export interface CanonicalPart11Payload {
   meaning: string;
   signedAt: string;
   authMethod: string;
-  signatureAlgorithm?: 'HMAC-SHA256-SEAL-V1' | 'ECDSA-P256-SHA256+HMAC-SEAL-V1';
-  clientPublicKeySpki?: string;
-  clientSignatureBase64?: string;
 }
 
 type ComplianceState = TraceLink['complianceState'];
@@ -66,28 +63,33 @@ function severityForRiskClass(riskClass: RiskClass): ComplianceState {
   return riskClass === 'CLASS_C' ? 'SAFETY_VIOLATION' : 'INCOMPLETE';
 }
 
-function isSignatureTimestampInvalidated(signature: Part11Signature | undefined): boolean {
-  if (!signature?.invalidatedAt) {
+function hasPriorElectronicSignOff(signature: Part11Signature | undefined): boolean {
+  if (!signature) {
     return false;
   }
-  const invalidatedMs = new Date(signature.invalidatedAt).getTime();
-  const signedMs = signature.signedAt ? new Date(signature.signedAt).getTime() : NaN;
-  if (!Number.isFinite(invalidatedMs)) {
-    return true;
-  }
-  if (!Number.isFinite(signedMs)) {
-    return true;
-  }
-  return signedMs <= invalidatedMs;
+  return Boolean(
+    (signature.artifactSha256 && signature.artifactSha256.trim() !== '') ||
+      (signature.signedBy && signature.signedBy.trim() !== '') ||
+      (signature.signedAt && signature.signedAt.trim() !== '') ||
+      (signature.invalidatedAt && signature.invalidatedAt.trim() !== '')
+  );
 }
 
 function isLinkSignatureDrifted(link: TraceLink): boolean {
   if (!link.spec || !link.signature) {
+    return false;
+  }
+  if (link.spec.isSignatureInvalidated === true) {
     return true;
   }
+  if (!hasPriorElectronicSignOff(link.signature)) {
+    return false;
+  }
+  if (link.spec.isMissingSentinel === true || link.spec.specRestricted === true) {
+    return !link.signature.isValid || isSignatureTimestampInvalidated(link.signature);
+  }
   return (
-    link.spec.sha256Hash !== link.signature.artifactSha256 ||
-    Boolean(link.spec.isSignatureInvalidated) ||
+    (Boolean(link.spec.sha256Hash) && link.spec.sha256Hash !== link.signature.artifactSha256) ||
     !link.signature.isValid ||
     isSignatureTimestampInvalidated(link.signature)
   );
@@ -192,156 +194,12 @@ export class ComplianceEngine {
   }
 
   /**
-   * Builds the deterministic canonical challenge payload signed by a client ECDSA P-256 key
-   * before server timestamp minting, preventing forged sign-offs by a server holding only `MEDTRACE_PART11_SECRET`.
-   */
-  public static computePart11ClientChallenge(input: {
-    hazardKey: string;
-    specId: string;
-    artifactSha256: string;
-    meaning: string;
-    attestationPhrase?: string;
-  }): string {
-    return canonicalJsonStringify({
-      domain: 'MEDTRACE_PART11_CLIENT_SIG_V1',
-      hazardKey: String(input.hazardKey || '').trim(),
-      specId: String(input.specId || '').trim(),
-      artifactSha256: String(input.artifactSha256 || '').trim().toLowerCase(),
-      meaning: String(input.meaning || '').trim(),
-      attestationPhrase: String(input.attestationPhrase ?? PART11_ATTESTATION_PHRASE).trim(),
-    });
-  }
-
-  private static normalizeSpkiDerBuffer(publicKeySpki: string): Buffer | null {
-    const raw = typeof publicKeySpki === 'string' ? publicKeySpki.trim() : '';
-    if (!raw) return null;
-    if (raw.includes('BEGIN PUBLIC KEY')) {
-      const stripped = raw
-        .replace(/-----BEGIN PUBLIC KEY-----/g, '')
-        .replace(/-----END PUBLIC KEY-----/g, '')
-        .replace(/\s+/g, '');
-      return stripped ? Buffer.from(stripped, 'base64') : null;
-    }
-    const cleanB64 = raw.replace(/\s+/g, '');
-    return cleanB64 ? Buffer.from(cleanB64, 'base64') : null;
-  }
-
-  /**
-   * Computes a non-secret `ecdsa-p256:<16-hex>` fingerprint for an SPKI-encoded P-256 public key.
-   */
-  public static computeClientKeyFingerprint(publicKeySpki: string): string {
-    const der = this.normalizeSpkiDerBuffer(publicKeySpki);
-    if (!der || der.length === 0) {
-      throw new Error('Invalid ECDSA SPKI public key.');
-    }
-    const digest = crypto.createHash('sha256').update(der).digest('hex');
-    return `ecdsa-p256:${digest.slice(0, 16)}`;
-  }
-
-  /**
-   * Generates an asymmetric ECDSA P-256 (`prime256v1`) keypair encoded as base64 SPKI/PKCS#8
-   * compatible with browser WebCrypto (`SubtleCrypto`) and Node.js `node:crypto`.
-   */
-  public static generateEcdsaP256KeyPair(): {
-    publicKeySpkiBase64: string;
-    privateKeyPkcs8Base64: string;
-    keyFingerprint: string;
-  } {
-    const { publicKey, privateKey } = crypto.generateKeyPairSync('ec', {
-      namedCurve: 'prime256v1',
-      publicKeyEncoding: { type: 'spki', format: 'der' },
-      privateKeyEncoding: { type: 'pkcs8', format: 'der' },
-    });
-    const publicKeySpkiBase64 = Buffer.from(publicKey).toString('base64');
-    const privateKeyPkcs8Base64 = Buffer.from(privateKey).toString('base64');
-    return {
-      publicKeySpkiBase64,
-      privateKeyPkcs8Base64,
-      keyFingerprint: this.computeClientKeyFingerprint(publicKeySpkiBase64),
-    };
-  }
-
-  /**
-   * Signs a canonical Part 11 client challenge with a PKCS#8 ECDSA P-256 private key,
-   * emitting an IEEE P1363 64-byte `(r||s)` base64 signature matching WebCrypto output.
-   */
-  public static signPart11ClientChallenge(
-    challengePayload: string,
-    privateKeyPkcs8Base64: string
-  ): string {
-    const rawKey = typeof privateKeyPkcs8Base64 === 'string' ? privateKeyPkcs8Base64.trim() : '';
-    if (!rawKey) {
-      throw new Error('ECDSA P-256 private key is required.');
-    }
-    const keyObj = rawKey.includes('BEGIN PRIVATE KEY')
-      ? crypto.createPrivateKey({ key: rawKey, format: 'pem' })
-      : crypto.createPrivateKey({
-          key: Buffer.from(rawKey.replace(/\s+/g, ''), 'base64'),
-          format: 'der',
-          type: 'pkcs8',
-        });
-    if (keyObj.asymmetricKeyType !== 'ec' || keyObj.asymmetricKeyDetails?.namedCurve !== 'prime256v1') {
-      throw new Error('ECDSA P-256 (prime256v1) private key is required.');
-    }
-    return crypto
-      .sign('sha256', Buffer.from(challengePayload, 'utf8'), {
-        key: keyObj,
-        dsaEncoding: 'ieee-p1363',
-      })
-      .toString('base64');
-  }
-
-  /**
-   * Verifies a client ECDSA P-256 SHA-256 signature over `challengePayload` in either
-   * IEEE P1363 (64-byte WebCrypto) or ASN.1 DER encoding against a base64/PEM SPKI public key.
-   */
-  public static verifyPart11ClientSignature(
-    challengePayload: string,
-    clientSignatureBase64: string,
-    clientPublicKeySpki: string
-  ): boolean {
-    try {
-      const der = this.normalizeSpkiDerBuffer(clientPublicKeySpki);
-      const rawSig = typeof clientSignatureBase64 === 'string' ? clientSignatureBase64.trim() : '';
-      if (!der || der.length === 0 || !rawSig) {
-        return false;
-      }
-      const sigBuf = Buffer.from(rawSig.replace(/\s+/g, ''), 'base64');
-      if (sigBuf.length === 0) {
-        return false;
-      }
-      const publicKey = crypto.createPublicKey({ key: der, format: 'der', type: 'spki' });
-      if (
-        publicKey.asymmetricKeyType !== 'ec' ||
-        publicKey.asymmetricKeyDetails?.namedCurve !== 'prime256v1'
-      ) {
-        return false;
-      }
-      const payloadBuf = Buffer.from(challengePayload, 'utf8');
-      if (
-        sigBuf.length === 64 &&
-        crypto.verify('sha256', payloadBuf, { key: publicKey, dsaEncoding: 'ieee-p1363' }, sigBuf)
-      ) {
-        return true;
-      }
-      return crypto.verify('sha256', payloadBuf, { key: publicKey, dsaEncoding: 'der' }, sigBuf);
-    } catch {
-      return false;
-    }
-  }
-
-  /**
-   * Computes an HMAC-SHA256 tamper-evident seal over canonicalized 21 CFR Part 11 signature metadata
-   * (binding asymmetric client public key and ECDSA signature when hybrid mode is active).
+   * Computes an HMAC-SHA256 tamper-evident seal over canonicalized 21 CFR Part 11 signature metadata.
    */
   public static computePart11Seal(payload: CanonicalPart11Payload, secret: string): string {
     if (typeof secret !== 'string' || secret.trim() === '') {
       throw new Error('MEDTRACE_PART11_SECRET must be non-empty to compute a Part 11 cryptographic seal.');
     }
-    const isHybrid =
-      payload.signatureAlgorithm === 'ECDSA-P256-SHA256+HMAC-SEAL-V1' ||
-      Boolean(payload.clientSignatureBase64) ||
-      Boolean(payload.clientPublicKeySpki);
     const normalized: CanonicalPart11Payload = {
       hazardKey: String(payload.hazardKey || '').trim(),
       specId: String(payload.specId || '').trim(),
@@ -352,13 +210,6 @@ export class ComplianceEngine {
       meaning: String(payload.meaning || '').trim(),
       signedAt: String(payload.signedAt || '').trim(),
       authMethod: String(payload.authMethod || '').trim(),
-      ...(isHybrid
-        ? {
-            signatureAlgorithm: 'ECDSA-P256-SHA256+HMAC-SEAL-V1' as const,
-            clientPublicKeySpki: String(payload.clientPublicKeySpki || '').trim(),
-            clientSignatureBase64: String(payload.clientSignatureBase64 || '').trim(),
-          }
-        : {}),
     };
     const canonical = canonicalJsonStringify(normalized);
     return crypto.createHmac('sha256', secret).update(canonical, 'utf8').digest('hex');
@@ -451,58 +302,11 @@ export class ComplianceEngine {
     if (!/^[a-f0-9]{64}$/.test(cleanSeal)) {
       return false;
     }
-    if (
-      signature.signatureAlgorithm &&
-      signature.signatureAlgorithm !== 'HMAC-SHA256-SEAL-V1' &&
-      signature.signatureAlgorithm !== 'ECDSA-P256-SHA256+HMAC-SEAL-V1'
-    ) {
+    if (signature.signatureAlgorithm && signature.signatureAlgorithm !== 'HMAC-SHA256-SEAL-V1') {
       return false;
     }
     if (!signature.signedByAccountId || signature.signedByAccountId.trim() === '') {
       return false;
-    }
-
-    const isHybrid =
-      signature.signatureAlgorithm === 'ECDSA-P256-SHA256+HMAC-SEAL-V1' ||
-      signature.clientSignatureBase64 !== undefined ||
-      signature.clientPublicKeySpki !== undefined;
-
-    if (isHybrid) {
-      if (
-        typeof signature.clientSignatureBase64 !== 'string' ||
-        signature.clientSignatureBase64.trim() === '' ||
-        typeof signature.clientPublicKeySpki !== 'string' ||
-        signature.clientPublicKeySpki.trim() === ''
-      ) {
-        return false;
-      }
-      if (signature.clientKeyFingerprint) {
-        try {
-          if (
-            signature.clientKeyFingerprint !==
-            this.computeClientKeyFingerprint(signature.clientPublicKeySpki)
-          ) {
-            return false;
-          }
-        } catch {
-          return false;
-        }
-      }
-      const challenge = this.computePart11ClientChallenge({
-        hazardKey,
-        specId,
-        artifactSha256: signature.artifactSha256,
-        meaning: signature.meaning,
-      });
-      if (
-        !this.verifyPart11ClientSignature(
-          challenge,
-          signature.clientSignatureBase64,
-          signature.clientPublicKeySpki
-        )
-      ) {
-        return false;
-      }
     }
 
     try {
@@ -517,13 +321,6 @@ export class ComplianceEngine {
         meaning: signature.meaning,
         signedAt: signature.signedAt,
         authMethod: signature.authMethod || '',
-        ...(isHybrid
-          ? {
-              signatureAlgorithm: 'ECDSA-P256-SHA256+HMAC-SEAL-V1' as const,
-              clientPublicKeySpki: signature.clientPublicKeySpki,
-              clientSignatureBase64: signature.clientSignatureBase64,
-            }
-          : {}),
       };
       for (const candidate of candidateSecrets) {
         const expectedHex = this.computePart11Seal(payload, candidate);
@@ -625,8 +422,14 @@ export class ComplianceEngine {
     }
 
     // 4. FDA 21 CFR Part 11: Electronic Signature Hash, Validity & Seal Enforcement
+    const hasPriorSignOff = hasPriorElectronicSignOff(signature);
     const hasHashDrift =
-      !spec || !signature || spec.sha256Hash !== signature.artifactSha256 || Boolean(spec.isSignatureInvalidated);
+      spec?.isSignatureInvalidated === true ||
+      (hasPriorSignOff &&
+        spec?.isMissingSentinel !== true &&
+        spec?.specRestricted !== true &&
+        Boolean(spec?.sha256Hash) &&
+        spec.sha256Hash !== signature?.artifactSha256);
     const hasInvalidSignature =
       !signature ||
       !signature.isValid ||
@@ -641,10 +444,7 @@ export class ComplianceEngine {
         ? options.part11Secret.trim()
         : process.env.MEDTRACE_PART11_SECRET?.trim() || '';
     const shouldVerifySeal = Boolean(
-      options?.requireCryptographicSeal ||
-        signature?.signatureSeal ||
-        signature?.clientSignatureBase64 ||
-        signature?.clientPublicKeySpki
+      options?.requireCryptographicSeal || signature?.signatureSeal
     );
     const hasSealFailure = shouldVerifySeal
       ? !this.verifyPart11Seal(hazard.key, spec?.id || '', signature, part11Secret)
@@ -691,6 +491,36 @@ export class ComplianceEngine {
     };
   }
 
+  private static evaluateTestIssueVerificationGap(
+    link: TraceLink,
+    requireTestEvidence: boolean
+  ): string | null {
+    const test = link.test;
+    const hazardKey = link.hazard?.key || 'UNKNOWN';
+    if (!test || test.status !== 'PASSED') {
+      const testKey = test?.testKey || 'UNLINKED';
+      const status = test?.status || 'MISSING';
+      return `IEC 62304 Verification Test Gap: Test [${testKey}] for Hazard [${hazardKey}] is ${status} (requires PASSED).`;
+    }
+    if (test.evidenceUrl && test.evidenceUrl.trim() !== '') {
+      try {
+        validateHttpsUrl(test.evidenceUrl);
+      } catch (err: unknown) {
+        const reason = err instanceof Error ? err.message : 'Invalid URL';
+        return `IEC 62304 Verification Evidence Violation: Test [${test.testKey}] has unsafe or invalid evidenceUrl (${reason}).`;
+      }
+    }
+    if (requireTestEvidence) {
+      const missingParts: string[] = [];
+      if (!test.evidenceUrl || test.evidenceUrl.trim() === '') missingParts.push('evidenceUrl');
+      if (!test.executionDate || test.executionDate.trim() === '') missingParts.push('executionDate');
+      if (missingParts.length > 0) {
+        return `IEC 62304 Verification Evidence Gap: Passed test [${test.testKey}] for Hazard [${hazardKey}] is missing required ${missingParts.join(' and ')}.`;
+      }
+    }
+    return null;
+  }
+
   /**
    * Shared issue/global release gate policy used identically by Jira Workflow Validator
    * and the CI/CD HMAC Webtrigger (`verify-release-gate`). Fails closed on uninitialized suites
@@ -723,7 +553,8 @@ export class ComplianceEngine {
       const matchedLinks = suite.traceLinks.filter(
         (l) =>
           (l.work?.key || '').toUpperCase() === cleanIssueKey ||
-          (l.hazard?.key || '').toUpperCase() === cleanIssueKey
+          (l.hazard?.key || '').toUpperCase() === cleanIssueKey ||
+          (l.test?.testKey || '').toUpperCase() === cleanIssueKey
       );
 
       if (matchedLinks.length === 0 && options?.isSafetyTaggedIssue === true) {
@@ -740,11 +571,29 @@ export class ComplianceEngine {
         if (link.complianceState === 'VERIFIED') {
           continue;
         }
+        const matchesWork = (link.work?.key || '').trim().toUpperCase() === cleanIssueKey;
+        const matchesHazard = (link.hazard?.key || '').trim().toUpperCase() === cleanIssueKey;
+        const matchesTestOnly =
+          !matchesWork &&
+          !matchesHazard &&
+          (link.test?.testKey || '').trim().toUpperCase() === cleanIssueKey;
+
+        if (matchesTestOnly) {
+          const testGap = this.evaluateTestIssueVerificationGap(link, suite.datasetMode === 'LIVE');
+          if (!testGap) {
+            continue;
+          }
+          return {
+            result: false,
+            errorMessage: `❌ [MedTrace Safety Gate] Human-initiated transition blocked for ${cleanIssueKey}!\n• ${testGap}\n\nComplete verification test execution and attach valid HTTPS evidence before releasing.`,
+          };
+        }
+
         // Transition-aware check: when moving the linked work item INTO Done, evaluate with status 'Done'
         // so compliant issues in Under Review / In Progress can transition without already being Done.
         if (
           options?.transitionToDone === true &&
-          (link.work?.key || '').trim().toUpperCase() === cleanIssueKey &&
+          matchesWork &&
           link.hazard &&
           link.spec &&
           link.work &&
@@ -820,12 +669,13 @@ export class ComplianceEngine {
     datasetMode: 'DEMO' | 'LIVE' = 'DEMO',
     projectName?: string,
     metadata?: {
-      storageFormat?: 'SHARDED_V2' | 'SINGLE_KEY_V1';
+      storageFormat?: 'SHARDED_V2';
       auditEntryCount?: number;
       auditHeadHash?: string;
       initialized?: boolean;
       lastSyncedAt?: string;
       syncIncomplete?: boolean;
+      incompleteProjectKeys?: string[];
     }
   ): ComplianceSummary {
     const resolvedProjectName =
@@ -870,9 +720,10 @@ export class ComplianceEngine {
       }
 
       const hasDriftedOrInvalidSig =
-        link.complianceState === 'SIGNATURE_DRIFT' ||
-        link.violations.some((v) => v.includes('Signature Drift') || v.includes('21 CFR Part 11')) ||
-        isLinkSignatureDrifted(link);
+        isLinkSignatureDrifted(link) ||
+        link.violations.some(
+          (v) => v.includes('Signature Drift') || v.includes('Cryptographic Seal Violation')
+        );
       if (hasDriftedOrInvalidSig) {
         signatureDriftCount++;
       }
@@ -931,6 +782,9 @@ export class ComplianceEngine {
       lastAuditTimestamp: new Date().toISOString(),
       ...(metadata?.lastSyncedAt ? { lastSyncedAt: metadata.lastSyncedAt } : {}),
       ...(metadata?.syncIncomplete === true ? { syncIncomplete: true } : {}),
+      ...(metadata?.incompleteProjectKeys && metadata.incompleteProjectKeys.length > 0
+        ? { incompleteProjectKeys: metadata.incompleteProjectKeys }
+        : {}),
       ...(metadata?.storageFormat ? { storageFormat: metadata.storageFormat } : {}),
       ...(typeof metadata?.auditEntryCount === 'number' ? { auditEntryCount: metadata.auditEntryCount } : {}),
       ...(metadata?.auditHeadHash ? { auditHeadHash: metadata.auditHeadHash } : {}),
@@ -1086,6 +940,14 @@ export class ComplianceEngine {
           transitiveActionPlan.push(
             `Re-certify clinical sign-off with ${sig?.signedBy || 'authorized signatory'} (${sig?.role || 'Safety Authority'}) for revised spec.`
           );
+        } else if (!hasPriorElectronicSignOff(sig) || !sig?.isValid) {
+          traversalPath.push({
+            hop: traversalPath.length + 1,
+            from: `Spec [${specLabel}]`,
+            edge: 'SIGNS' as GraphEdgeType,
+            to: 'Signature [Unsigned]',
+            effect: 'No 21 CFR Part 11 sign-off recorded yet for this specification revision.',
+          });
         } else {
           traversalPath.push({
             hop: traversalPath.length + 1,
@@ -1140,17 +1002,19 @@ export class ComplianceEngine {
             blockedWorkSet.add(workKeyClean);
             blockedWorkItemKeys.push(workKeyClean);
           }
+          const workTitleSnippet = work?.title?.trim() ? ` "${work.title.trim()}"` : '';
           traversalPath.push({
             hop: traversalPath.length + 1,
             from: `Hazard [${haz.key}]`,
             edge: 'IMPLEMENTS' as GraphEdgeType,
             to: `Jira Item [${workKeyClean || 'UNBOUND'}]`,
-            effect: `Transition blocked: Firmware task assigned to ${work?.assignee || 'Unassigned'} locked under human-transition policy gate.`,
+            effect: `Transition blocked: Work item${workTitleSnippet} assigned to ${work?.assignee || 'Unassigned'} locked under human-transition policy gate.`,
           });
           if (!plannedWorkKeys.has(workIdLower)) {
             plannedWorkKeys.add(workIdLower);
+            const prSuffix = work?.prNumber ? ` (${work.prNumber})` : '';
             transitiveActionPlan.push(
-              `Verify firmware implementation in ${workKeyClean || haz.key} (${work?.prNumber || 'open PR'}) matches updated parameters.`
+              `Verify implementation in ${workKeyClean || haz.key}${prSuffix} matches updated specification parameters.`
             );
           }
         } else {

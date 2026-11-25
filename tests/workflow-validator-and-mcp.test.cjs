@@ -1652,7 +1652,7 @@ test.describe('McpToolService & rovoActionHandler Integration Tests', () => {
     });
   });
 
-  test.it('rovoActionHandler auto-hydrates an uninitialized Forge partition when a target project or issue key is scoped', async () => {
+  test.it('rovoActionHandler GET actions stay strictly read-only on uninitialized Forge partitions', async () => {
     const { blockedLink } = buildSampleLinks();
     const syncedSuite = ComplianceEngine.generateComplianceReport([blockedLink], 'LIVE', 'MED');
     const originalSyncFromAtlassian = LiveIngestionService.syncFromAtlassian;
@@ -1690,7 +1690,7 @@ test.describe('McpToolService & rovoActionHandler Integration Tests', () => {
           }),
         },
         async () => {
-          // 1. Unscoped call without target key stays fail-closed (no unbounded sync)
+          // 1. Unscoped call without target key stays fail-closed (no sync)
           const emptyRes = await rovoActionHandler(
             { actionKey: 'get-hazard-lineage-action', inputs: {} },
             { accountId: 'acc-rovo-sync' }
@@ -1698,7 +1698,7 @@ test.describe('McpToolService & rovoActionHandler Integration Tests', () => {
           assert.strictEqual(emptyRes.initialized, false);
           assert.strictEqual(syncCalls.length, 0);
 
-          // 2. Scoped call (HAZ-MED-42 -> MED) auto-hydrates the uninitialized product partition as USER
+          // 2. Scoped GET call by read-only user on uninitialized workspace must NOT mutate KVS via auto-sync
           const scopedRes = await rovoActionHandler(
             {
               actionKey: 'verify-iec-compliance-action',
@@ -1706,18 +1706,370 @@ test.describe('McpToolService & rovoActionHandler Integration Tests', () => {
             },
             { accountId: 'acc-rovo-sync' }
           );
-          assert.strictEqual(syncCalls.length, 1);
-          assert.deepStrictEqual(syncCalls[0], {
-            opts: { projectKey: 'MED', callerMode: 'USER', resumeFromCursor: true },
-            actorAccountId: 'acc-rovo-sync',
-          });
-          assert.strictEqual(scopedRes.initialized, true);
-          assert.strictEqual(scopedRes.touchesSafetyCriticalCode, true);
+          assert.strictEqual(syncCalls.length, 0, 'GET Rovo action must not mutate KVS or audit log');
+          assert.strictEqual(scopedRes.initialized, false);
+          assert.strictEqual(scopedRes.configuredChecksPassed, false);
+          assert.match(scopedRes.remediationGuidance.join(' '), /Sync Live Atlassian/i);
         }
       );
     } finally {
       LiveIngestionService.syncFromAtlassian = originalSyncFromAtlassian;
       SeederService.getActiveComplianceSuite = originalGetActive;
     }
+  });
+
+  test.it('workflowValidatorHandler evaluates synced safety-labeled Test issues via test.testKey', async () => {
+    const prevSecret = process.env.MEDTRACE_PART11_SECRET;
+    process.env.MEDTRACE_PART11_SECRET = 'wf-testkey-secret-001';
+    const origGetActive = SeederService.getActiveComplianceSuite;
+    try {
+      const specHash = 'c'.repeat(64);
+      const signedAt = '2026-11-20T12:00:00Z';
+      const validSeal = ComplianceEngine.computePart11Seal(
+        {
+          hazardKey: 'HAZ-TEST-12',
+          specId: 'SRS-TEST-12',
+          artifactSha256: specHash,
+          signedByAccountId: 'acc-qa',
+          signedBy: 'Dr. QA',
+          role: 'QA Lead',
+          meaning: 'Approved SRS',
+          signedAt,
+          authMethod: 'PART11_ATTESTATION',
+        },
+        process.env.MEDTRACE_PART11_SECRET
+      );
+      const baseHazard = {
+        id: 'haz-test-12',
+        key: 'HAZ-TEST-12',
+        title: 'Bolus Overdose Prevention',
+        riskClass: 'CLASS_C',
+        mitigationRequirementId: 'SRS-TEST-12',
+        status: 'ACTION_REQUIRED',
+      };
+      const baseSpec = {
+        id: 'SRS-TEST-12',
+        pageId: '7712',
+        title: 'Bolus Verification Spec',
+        version: 2,
+        sha256Hash: specHash,
+        lastSignedHash: specHash,
+        isSignatureInvalidated: false,
+        contentSnippet: 'Verify occlusion alarm',
+        lastUpdated: '2026-11-20T11:00:00Z',
+      };
+      const workInProgress = {
+        id: 'w-42',
+        key: 'MED-42',
+        title: 'Bolus Driver',
+        status: 'In Progress',
+        assignee: 'Dev',
+        labels: ['class-c', 'safety-critical'],
+      };
+      const validSig = {
+        id: 'sig-test-12',
+        signedBy: 'Dr. QA',
+        signedByAccountId: 'acc-qa',
+        signedAt,
+        role: 'QA Lead',
+        meaning: 'Approved SRS',
+        artifactSha256: specHash,
+        isValid: true,
+        authMethod: 'PART11_ATTESTATION',
+        signatureAlgorithm: 'HMAC-SHA256-SEAL-V1',
+        signatureSeal: validSeal,
+      };
+      const evalOpts = {
+        linkId: 'MED-TEST-12',
+        part11Secret: process.env.MEDTRACE_PART11_SECRET,
+        requireCryptographicSeal: true,
+        requireTestEvidence: true,
+      };
+      const untestedLink = ComplianceEngine.evaluateTraceLink(
+        baseHazard,
+        baseSpec,
+        workInProgress,
+        {
+          id: 't-12',
+          testKey: 'MED-12',
+          title: 'Pump occlusion verification',
+          testType: 'Automated HIL',
+          status: 'UNTESTED',
+        },
+        validSig,
+        undefined,
+        evalOpts
+      );
+      const passedLink = ComplianceEngine.evaluateTraceLink(
+        baseHazard,
+        baseSpec,
+        workInProgress,
+        {
+          id: 't-12',
+          testKey: 'MED-12',
+          title: 'Pump occlusion verification',
+          testType: 'Automated HIL',
+          status: 'PASSED',
+          executionDate: '2026-10-01T00:00:00Z',
+          evidenceUrl: 'https://ci.medtrace.example/runs/12',
+        },
+        validSig,
+        undefined,
+        evalOpts
+      );
+
+      await withForgeMocks(
+        {
+          asAppImpl: () => ({
+            requestJira: async (routeObj) => {
+              const url = String(routeObj?.value_ || routeObj || '');
+              if (url.includes('/rest/api/3/issue/MED-12')) {
+                return makeJsonResponse(200, {
+                  key: 'MED-12',
+                  fields: {
+                    issuetype: { name: 'Test' },
+                    labels: ['class-c'],
+                  },
+                });
+              }
+              return makeJsonResponse(404, {});
+            },
+          }),
+        },
+        async () => {
+          SeederService.getActiveComplianceSuite = async () =>
+            ComplianceEngine.generateComplianceReport([untestedLink], 'LIVE', 'Test Key Gate Suite', {
+              initialized: true,
+            });
+          const blockedRes = await workflowValidatorHandler({ issue: { key: 'MED-12' } });
+          assert.strictEqual(blockedRes.result, false);
+          assert.doesNotMatch(blockedRes.errorMessage || '', /not synced/i);
+          assert.match(blockedRes.errorMessage || '', /UNTESTED|evidence|Test/i);
+
+          SeederService.getActiveComplianceSuite = async () =>
+            ComplianceEngine.generateComplianceReport([passedLink], 'LIVE', 'Test Key Gate Suite', {
+              initialized: true,
+            });
+          const passedRes = await workflowValidatorHandler({ issue: { key: 'MED-12' } });
+          assert.strictEqual(passedRes.result, true);
+          assert.strictEqual(passedRes.errorMessage, undefined);
+        }
+      );
+    } finally {
+      SeederService.getActiveComplianceSuite = origGetActive;
+      if (prevSecret === undefined) delete process.env.MEDTRACE_PART11_SECRET;
+      else process.env.MEDTRACE_PART11_SECRET = prevSecret;
+    }
+  });
+
+  test.it('resolveTransitionToDone resolves string status IDs, transition.id, and fails closed on HTTP 500', async () => {
+    const prevSecret = process.env.MEDTRACE_PART11_SECRET;
+    process.env.MEDTRACE_PART11_SECRET = 'wf-probe-secret-001';
+    const origGetActive = SeederService.getActiveComplianceSuite;
+    try {
+      const specHash = 'd'.repeat(64);
+      const signedAt = '2026-11-20T12:00:00Z';
+      const validSeal = ComplianceEngine.computePart11Seal(
+        {
+          hazardKey: 'HAZ-PROBE-1',
+          specId: 'SRS-PROBE-1',
+          artifactSha256: specHash,
+          signedByAccountId: 'acc-qa',
+          signedBy: 'Dr. QA',
+          role: 'QA Lead',
+          meaning: 'Approved SRS',
+          signedAt,
+          authMethod: 'PART11_ATTESTATION',
+        },
+        process.env.MEDTRACE_PART11_SECRET
+      );
+      const underReviewLink = ComplianceEngine.evaluateTraceLink(
+        {
+          id: 'haz-probe-1',
+          key: 'HAZ-PROBE-1',
+          title: 'Probe Hazard',
+          riskClass: 'CLASS_C',
+          mitigationRequirementId: 'SRS-PROBE-1',
+          status: 'ACTION_REQUIRED',
+        },
+        {
+          id: 'SRS-PROBE-1',
+          pageId: '7713',
+          title: 'SRS Probe',
+          version: 1,
+          sha256Hash: specHash,
+          lastSignedHash: specHash,
+          isSignatureInvalidated: false,
+          contentSnippet: 'Spec',
+          lastUpdated: '2026-11-20T11:00:00Z',
+        },
+        {
+          id: 'w-42',
+          key: 'MED-42',
+          title: 'Probe Work',
+          status: 'Under Review',
+          assignee: 'Dev',
+          labels: ['class-c'],
+        },
+        {
+          id: 't-42',
+          testKey: 'TEST-42',
+          title: 'Probe Test',
+          testType: 'Automated HIL',
+          status: 'PASSED',
+          executionDate: '2026-11-20T11:30:00Z',
+          evidenceUrl: 'https://ci.medtrace.example/runs/42',
+        },
+        {
+          id: 'sig-probe-1',
+          signedBy: 'Dr. QA',
+          signedByAccountId: 'acc-qa',
+          signedAt,
+          role: 'QA Lead',
+          meaning: 'Approved SRS',
+          artifactSha256: specHash,
+          isValid: true,
+          authMethod: 'PART11_ATTESTATION',
+          signatureAlgorithm: 'HMAC-SHA256-SEAL-V1',
+          signatureSeal: validSeal,
+        },
+        undefined,
+        {
+          linkId: 'MED-TRANS-1',
+          part11Secret: process.env.MEDTRACE_PART11_SECRET,
+          requireCryptographicSeal: true,
+          requireTestEvidence: true,
+        }
+      );
+      const suite = ComplianceEngine.generateComplianceReport([underReviewLink], 'LIVE', 'Transition Probe Suite', {
+        initialized: true,
+      });
+      SeederService.getActiveComplianceSuite = async () => suite;
+
+      await withForgeMocks(
+        {
+          asAppImpl: () => ({
+            requestJira: async (routeObj) => {
+              const url = String(routeObj?.value_ || routeObj || '');
+              if (url === '/rest/api/3/status/10002') {
+                return makeJsonResponse(200, {
+                  id: '10002',
+                  name: 'Done',
+                  statusCategory: { key: 'done', name: 'Done' },
+                });
+              }
+              if (url === '/rest/api/3/issue/MED-42/transitions') {
+                return makeJsonResponse(200, {
+                  transitions: [
+                    {
+                      id: '31',
+                      name: 'Release Done',
+                      to: { id: '10002', name: 'Done', statusCategory: { key: 'done', name: 'Done' } },
+                    },
+                  ],
+                });
+              }
+              if (url === '/rest/api/3/status/500') {
+                return makeJsonResponse(500, { errorMessages: ['upstream error'] });
+              }
+              return makeJsonResponse(404, {});
+            },
+          }),
+        },
+        async () => {
+          const byStringStatusId = await workflowValidatorHandler({
+            issue: { key: 'MED-42' },
+            transition: { to: '10002' },
+          });
+          assert.strictEqual(byStringStatusId.result, true);
+
+          const byTransitionId = await workflowValidatorHandler({
+            issue: { key: 'MED-42' },
+            transition: { id: '31' },
+          });
+          assert.strictEqual(byTransitionId.result, true);
+
+          const failClosedOn500 = await workflowValidatorHandler({
+            issue: { key: 'MED-42' },
+            transition: { to: { id: '500' } },
+          });
+          assert.strictEqual(failClosedOn500.result, false);
+        }
+      );
+    } finally {
+      SeederService.getActiveComplianceSuite = origGetActive;
+      if (prevSecret === undefined) delete process.env.MEDTRACE_PART11_SECRET;
+      else process.env.MEDTRACE_PART11_SECRET = prevSecret;
+    }
+  });
+
+  test.it('SeederService.getActiveComplianceSuite({ issueKeyFilter }) matches test.testKey in non-Forge and filterSuiteLinksByIssueKey paths', async () => {
+    SeederService.resetInMemoryState();
+    const { ComplianceEngine: CE } = require('../dist/compliance-engine.js');
+    const link = CE.evaluateTraceLink(
+      {
+        id: 'haz-t12',
+        key: 'HAZ-42',
+        title: 'Test Lookup Hazard',
+        riskClass: 'CLASS_C',
+        mitigationRequirementId: 'srs-t12',
+        status: 'ACTION_REQUIRED',
+      },
+      {
+        id: 'srs-t12',
+        pageId: '7712',
+        title: 'SRS 7712',
+        version: 1,
+        sha256Hash: 'a'.repeat(64),
+        lastSignedHash: 'a'.repeat(64),
+        isSignatureInvalidated: false,
+        contentSnippet: 'Spec',
+        lastUpdated: '2026-11-24T00:00:00Z',
+      },
+      {
+        id: 'w-42',
+        key: 'MED-42',
+        title: 'Work 42',
+        status: 'In Progress',
+        assignee: 'Alice',
+        labels: ['class-c'],
+      },
+      {
+        id: 't-12',
+        testKey: 'MED-12',
+        title: 'Verification Test MED-12',
+        testType: 'Automated HIL',
+        status: 'UNTESTED',
+        source: 'JIRA_ISSUE',
+      },
+      {
+        id: 'sig-t12',
+        signedBy: 'Alice',
+        signedAt: '2026-11-24T00:00:00Z',
+        role: 'QA',
+        meaning: 'Approved',
+        artifactSha256: 'a'.repeat(64),
+        isValid: true,
+      },
+      undefined,
+      { linkId: 'link-testkey-lookup' }
+    );
+    const saved = CE.generateComplianceReport([link], 'LIVE', 'Test Lookup Suite', {
+      initialized: true,
+    });
+    await SeederService.saveComplianceSuite(saved, 0);
+
+    // 1. Non-Forge fast-path (no projectKey)
+    const fastMatch = await SeederService.getActiveComplianceSuite({ issueKeyFilter: 'MED-12' });
+    assert.strictEqual(fastMatch.traceLinks.length, 1, 'non-Forge loadFastPathSuiteByIssueKey must match test.testKey');
+    assert.strictEqual(fastMatch.traceLinks[0].test.testKey, 'MED-12');
+
+    // 2. Fallback filterSuiteLinksByIssueKey path (with projectKey)
+    const projMatch = await SeederService.getActiveComplianceSuite({
+      projectKey: 'MED',
+      issueKeyFilter: 'MED-12',
+    });
+    assert.strictEqual(projMatch.traceLinks.length, 1, 'filterSuiteLinksByIssueKey must match test.testKey');
+    assert.strictEqual(projMatch.traceLinks[0].test.testKey, 'MED-12');
   });
 });

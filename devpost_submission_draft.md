@@ -1,84 +1,53 @@
-# MedTrace
+# Codegeist 2026 — Devpost Submission Draft
 
-## Tagline
-When a signed medical-device requirement changes, MedTrace identifies the affected hazards and verification work, invalidates stale approval evidence, creates linked re-verification tasks, and enforces the configured release gate.
+> Copy-ready sections for Devpost. Every feature, module, UI label, and test count below reflects the verified repository state.
 
----
+## Project Title
+**MedTrace**
 
-## Track & Category Nominations
-* **Primary Category:** Apps for Specialized Industries (Medical Devices & Healthcare Engineering)
-* **Bonus Prize Target:** **Best App with Atlassian MCP** (`rovo:mcp` server `medtrace-mcp-server` exposing `get-hazard-lineage-action`, `verify-iec-compliance-action`, and `create-reverification-task-action` at `https://mcp.atlassian.com/forge/5e49c10e-696f-4984-9d00-4a47d0a5dd99` over OAuth 2.1 when enabled by a site/org admin under Connected apps).
+## Elevator Pitch
+When a medical-device requirement changes in Confluence (e.g., `5.0 -> 5.5 mL/hr`), MedTrace proves the downstream safety impact, automatically revokes stale approvals across Confluence and Jira, blocks unsafe transitions, and lets engineers create linked Jira re-verification tasks without leaving Atlassian.
 
----
+## Category / Track
+* **Primary Category:** Apps for Specialized Industries
+* **Bonus Prize:** Best app with Atlassian MCP
 
-## The Problem
-In medical-device software engineering (IEC 62304, ISO 14971, FDA 21 CFR Part 11), a single specification edit—such as changing an infusion pump bolus limit from `5.0 mL/hr` to `5.5 mL/hr`—invalidates prior clinical sign-offs and requires re-verifying downstream hazards, implementation work, and test evidence.
+## Inspiration
+In regulated medical-device software engineering (IEC 62304, ISO 14971, FDA 21 CFR Part 11), editing a single clinical threshold in Confluence invalidates prior sign-offs and requires re-verifying downstream hazards, Jira work items, and verification tests. Yet engineering teams still maintain traceability matrices in static spreadsheets that drift out of date while developers transition Jira issues to **Done**. MedTrace turns Jira, Confluence, Rovo, and hosted/local MCP clients into a live traceability and release-gate system built natively on Atlassian Forge (`nodejs22.x`).
 
-Teams managing specs in Confluence and work in Jira either reconcile those links manually in spreadsheets or replicate proprietary design history files into external eQMS tools.
+## What it does
+1. **Living 5-Stage Traceability Graph & Matrix:** Connects `ISO 14971 Hazard <-> Confluence SRS <-> Jira Implementation <-> Verification Test <-> Electronic Approval` inside Jira (`jira:projectPage`, `jira:issuePanel`) and Confluence (`confluence:globalPage`, `confluence:contentBylineItem`), clearly distinguishing `UNSIGNED` records from `INVALIDATED` drifted signatures.
+2. **Content-Hashed Confluence Sign-Off (`HMAC-SHA256-SEAL-V1`):** Engineers record verification test evidence (`https://` CI URL + timestamp, synced across all links sharing that `testKey`) and execute a session-bound electronic attestation over the Confluence specification's SHA-256 hash across sibling links sharing that `(hazardKey, specId)` baseline.
+3. **Transition-Aware Release Gate (`jira:workflowValidator`):** Moving a compliant issue from `Under Review` into `Done` succeeds when SRS linkage, passing test evidence, valid Part 11 signature, and software safety class are satisfied—while missing evidence, drifted signatures, unclassified safety issues, or unverified `Test` issues block release.
+4. **Automatic Drift Invalidation & Transitive Blast Radius:** Editing a Confluence SRS page triggers `avi:confluence:updated:page` in Confluence and on-demand cross-partition hash reconciliation in Jira (`reconcileConfluenceSpecs`, prioritizing signed specs across all unique pages in batches), revoking stale baselines without resurrecting invalidated signatures on revert and running deterministic BFS blast-radius analysis.
+5. **Hosted Atlassian MCP (`rovo:mcp`), Rovo Agent & Stdio Bridge:** Exposes `get-hazard-lineage-action`, `verify-iec-compliance-action`, and `create-reverification-task-action` to AI tools over hosted Atlassian MCP / OAuth 2.1 (with Teamwork Graph spec owners and user-scoped RBAC), alongside an HMAC-SHA256 stdio MCP bridge (`mcp-server/index.mjs`) for local IDEs and CI pipelines.
+6. **Hash-Chained Audit Log & FDA Dossier Export:** Records every sync, bind, test update, task creation, and sign-off in a canonical SHA-256 hash-chained Forge KVS ledger with bounded multi-window verification, Jira + Confluence permission filtering, printable reports, formula-safe CSV export, and JSON dossiers.
 
----
+## How we built it
+* **Backend (`src/`, Forge `nodejs22.x`):** TypeScript compliance engine ([src/compliance-engine.ts](src/compliance-engine.ts)), RBAC & target authorization ([src/rbac.ts](src/rbac.ts)), Forge resolver & trigger wiring ([src/index.ts](src/index.ts)), HMAC-SHA256 CI/MCP webtrigger ([src/webtrigger.ts](src/webtrigger.ts)), sharded `SHARDED_V2` Forge KVS with `vlock` optimistic locking and O(1) `issueKeyIndex` / `meta_index` lookups ([src/seeder.ts](src/seeder.ts), [src/seeder-storage.ts](src/seeder-storage.ts)), per-page Confluence & Jira permission checks ([src/seeder-identity.ts](src/seeder-identity.ts)), paginated live sync (`LIVE_SYNC_BUDGET_MS = 11_000`) & event triggers ([src/ingestion.ts](src/ingestion.ts), [src/triggers.ts](src/triggers.ts)), Teamwork Graph queries ([src/teamwork-graph.ts](src/teamwork-graph.ts)), strictly read-only `GET` Rovo actions ([src/mcp-server.ts](src/mcp-server.ts)), and monotonic SHA-256 audit log ([src/audit-log.ts](src/audit-log.ts)).
+* **Frontend (`static/frontend/`):** React 18 Custom UI built with Vite (`@xyflow/react`, Atlassian Design Tokens `--ds-*`, guided 4-step `LIVE` empty-state onboarding via `LiveOnboardingCard`, accessible modal stack, modular `BlastRadiusCard` + `InspectionActionForms`, 30s cache-only polling via `{ skipReconcile: true }`, and Jira/Confluence parity).
+* **No External Backend-Fetch Permission (`manifest.yml`):** Declares **no** `permissions.external.fetch.backend` entries—Jira, Confluence, Rovo, and Forge KVS operations run inside Atlassian Cloud (`npm run lint:manifest` and `forge lint -e production` clean). Note: MedTrace is not enrolled in Runs on Atlassian because `mcp-sync-webtrigger` can return requested compliance data to configured callers.
 
-## One Closed-Loop Workflow in Atlassian Cloud
-1. **Live Atlassian Lineage (`read:jira-work` + Confluence REST v2):** MedTrace ingests safety-labeled Jira issues (`class-a`, `class-b`, `class-c`), Jira `/remotelink` Confluence SRS pages, and native Jira `issuelinks` (resolving linked Hazard and Verification Test issues directly while labeling any unlinked item `App-Managed` and avoiding fabricated ISO severity/probability fields). Incomplete multi-page or budget-truncated syncs persist `syncIncomplete: true` and keep the global release gate blocked until **Resume Sync** finishes.
-2. **Content-Hashed Confluence Approval:** Engineers record verification test evidence (`https://` URL + execution timestamp) and execute a session-bound electronic attestation over the Confluence specification's SHA-256 content hash (`HMAC-SHA256-SEAL-V1`), updating every trace link sharing that `(hazardKey, specId)` approval baseline.
-3. **Transition-Aware Release Gate (`jira:workflowValidator`):** Moving a compliant issue from `Under Review` into `Done` succeeds when spec linkage, passing test evidence, valid Part 11 signature, and software safety class are satisfied—while missing evidence, drifted signatures, or unclassified safety issues block the transition.
-4. **Automatic Drift Invalidation & Transitive Blast Radius:** Editing the Confluence SRS (e.g., `5.0` → `5.5 mL/hr`) triggers `avi:confluence:updated:page` in Confluence and on-demand cross-partition Confluence hash reconciliation in Jira (`reconcileConfluenceSpecs`, bridging Forge's per-product KVS isolation). MedTrace recomputes the SHA-256 digest, revokes the stale approval baseline (without resurrecting invalidated signatures if reverted), and traces transitive impact across shared hazards, Jira work items, and verification tests.
-5. **User-Invoked Linked Re-Verification Task (`write:jira-work`):** Triggered explicitly by an authorized user from the Inspection Drawer, Rovo Agent (`medtrace-regulatory-auditor`), or hosted Atlassian MCP (`create-reverification-task-action`)—never auto-created by Confluence edits—MedTrace creates a Jira re-verification task, attempts Jira `issuelink` creation (honestly reporting any failed or missing links), and appends every event to the SHA-256 hash-chained audit ledger (`FAIL_IF_EXISTS`) for JSON, CWE-1236-safe CSV, or printable dossier export.
+## Honest Scope & Boundaries
+* **Assistive tooling, not formal QMS certification:** MedTrace enforces configured traceability and SHA-256 checks; it does not verify test execution authenticity, enforce dual-person QA sign-off, or replace a validated QMS or official FDA eSTAR submission.
+* **Software tamper-evidence & Forge KVS boundaries:** Hash chaining + `HMAC-SHA256-SEAL-V1` provide software tamper-evidence in Atlassian Cloud (not hardware WORM, HSM, or third-party PKI); Forge `jira:workflowValidator` also requires calling `verify-release-gate` via `mcp-sync-webtrigger` in CI for automated/REST checks, and Confluence triggers keep per-product KVS partitions fresh on read/gate via `reconcileConfluenceSpecs`.
+* **Fallback records:** Tracked Jira issues without native Hazard or Verification Test `issuelinks` use app-managed records labeled `App-Managed` in the UI until native Jira links are added.
 
----
+## Verification & Quality Bar
+* **232 automated tests pass (`0` failures):** **192** backend/MCP/script tests + **40** React/Vitest frontend tests across 7 files, covering RBAC/IDOR isolation, live sync pagination & cursor resume, cross-partition gate reconciliation, `SHARDED_V2` rollback recovery, CAS retry idempotency, and hash-chain verification.
+* Strict verification gates (`npm run typecheck`, `npm run build:all`, `npm run test:coverage:all`, `npm run lint:manifest`, `npm run docs:check -- --strict-listing`, and `forge lint -e production`) pass cleanly.
 
-## What Differentiates MedTrace
-* **Content-hashed Confluence approval baselines:** Signatures bind to the exact SHA-256 of Confluence storage markup, with automatic revocation on edit and revert non-resurrection.
-* **Transitive artifact-node blast radius:** Traverses M:N shared hazards and specs across `SIGNS`, `MITIGATES`, `IMPLEMENTS`, and `VERIFIES` edges.
-* **Dual-surface enforcement (UI + MCP + CI):** `rovo:mcp` exposes read and re-verification write actions under the invoking user's own Atlassian OAuth permissions, while `mcp-sync-webtrigger` enforces HMAC-SHA256 + KVS nonce replay protection for CI release gates.
-* **Cross-project tenant isolation & honest failure states:** Read, mutation, blast-radius, audit-log, and export paths enforce Jira project-level isolation; cold starts fail closed (`UNINITIALIZED`); demo fixtures carry persistent `DEMO DATASET — MODELED RECORDS` badges.
+## Judge Evaluation Guide
+MedTrace starts fail-closed in `LIVE` mode (`UNINITIALIZED (NO DATA)`, `0 hazards`, blocking release gates) and renders a 4-step guided onboarding card (`Connect Your Live Jira & Confluence Artifacts`) without polluting real workspaces. Choose either walkthrough:
 
----
+### Option A: 30-Second Zero-Setup Demo Walkthrough
+1. Open **MedTrace IEC 62304** on any Jira project (`Apps → MedTrace IEC 62304`), click **Explore Demo Suite** (or **Seed Demo Suite** in the header; confirm overwrite via **Confirm Overwrite & Seed Demo** if an initialized `LIVE` suite already exists) to load the **3-hazard** (`HAZ-101`–`HAZ-103`) Smart Infusion Pump safety scenario.
+2. Inspect the live drift on `HAZ-101` / `MED-42` (`5.0 mL/hr -> 5.5 mL/hr`), run **Blast Radius**, test **Test Human Gate**, inspect the hash-chained **Audit Log**, and export the printable **Export Dossier**.
 
-## Architecture
-* **Forge Runtime (`nodejs22.x`):** Custom UI (`React 18` + `@xyflow/react` + Matrix table defaulting to matrix on `>= 25` links), `jira:projectPage`, `jira:issuePanel`, `jira:workflowValidator`, `confluence:globalPage`, `confluence:contentBylineItem`, product triggers (`avi:confluence:updated:page`, `avi:jira:updated:issue`, `avi:jira:created:issuelink`, `avi:jira:deleted:issuelink`), `rovo:agent`, `rovo:mcp`, and `webtrigger`.
-* **Storage:** Sharded Forge KVS (`SHARDED_V2` with `vlock` optimistic locking and save-before-audit rollback), composite `(hazardKey, specId)` `SignedSpecBaseline` records, and SHA-256 hash-chained audit entries.
-* **Network Boundary:** `manifest.yml` declares no `permissions.external.fetch.backend`; Forge executes all Jira/Confluence reads and re-verification issue writes inside Atlassian Cloud. (Configured MCP/CI clients receive requested responses under their own retention policies.)
+### Option B: Live Jira & Confluence End-to-End Drift Walkthrough
+1. Follow the onboarding card: create a Confluence SRS page (e.g., `5.0 mL/hr`), link it to a Jira issue labeled `class-c` in `Under Review` status (optionally linked via native Jira `issuelinks` to `Hazard` and `Test` issues), and click **Sync Live Atlassian**.
+2. Record `PASSED` test evidence (`https://...`), complete **Sign Off Spec (Attestation)** with `"I CERTIFY THIS ELECTRONIC SIGNATURE"` -> status flips to `VERIFIED` and **Under Review -> Done** is unlocked.
+3. Edit the Confluence page (e.g., `5.0` -> `5.5 mL/hr`) -> MedTrace automatically detects SHA-256 drift across Confluence & Jira, blocks **Done** transitions, and traces the impacted work and tests in **Blast Radius** & hosted **Atlassian MCP / MedTrace Auditor** (`create-reverification-task-action`).
 
----
-
-## Honest Scope & Limitations
-* **Assistive tooling, not regulatory certification:** MedTrace enforces configured traceability and hash checks; it does not verify test execution authenticity, require independent second-person QA sign-off, or constitute a validated QMS, HIPAA/BAA control, or official FDA eSTAR submission.
-* **Software tamper-evidence boundary:** Forge KVS is not hardware WORM, HSM-backed, or X.509/PKI; `attestationChecked` is a session confirmation checkbox rather than IdP password re-authentication.
-* **Workflow validator attachment & boundary:** Attaching `jira:workflowValidator` to live Jira workflows requires Jira site-admin privileges (evaluators can also run the shared handler via `Test Human Gate` or CI `verify-release-gate`). See [ECO-624](https://jira.atlassian.com/browse/ECO-624) notes in `SECURITY.md` for workflow boundary context.
-* **Fallback records:** Tracked Jira issues without native Hazard or Verification Test `issuelinks` fall back to app-managed hazard/test records labeled `App-Managed` in the UI.
-* **No measured customer study yet:** The workflow models medical-device change-impact reconciliation; no customer field study or measured time-saving benchmark is claimed.
-
----
-
-## Verification Appendix (Local Suite)
-* Automated tests cover transition-aware `jira:workflowValidator` (`Under Review → Done` positive/negative paths), shared-baseline `signOffPart11`, honest partial-linking & `issuelinks` reuse checks in `createReverificationTask`, resumable multi-page/mid-enrichment `LiveIngestionService` sync, backend RBAC/two-project isolation, `SHARDED_V2` KVS rollback, hash-chained audit verification, Rovo/MCP contracts, manifest validation (`npm run lint:manifest`), and strict docs checks (`npm run docs:check`).
-
----
-
-## Try It Out
-* **Installation Link (Jira + Confluence):** [Install MedTrace (Production App ID `5e49c10e-696f-4984-9d00-4a47d0a5dd99`)](https://developer.atlassian.com/console/install/5e49c10e-696f-4984-9d00-4a47d0a5dd99?signature=AYABeMiP1zS%2Fqyhad83bC8PeCZcAAAADAAdhd3Mta21zAEthcm46YXdzOmttczp1cy13ZXN0LTI6NzA5NTg3ODM1MjQzOmtleS83MDVlZDY3MC1mNTdjLTQxYjUtOWY5Yi1lM2YyZGNjMTQ2ZTcAuAECAQB4CxqLTo9l4lqXuFjNim1xJM%2Bp%2F3TVP9xHS2BrU5DRRucB1BD8mEv4t3Ljf3OukSd5eQAAAH4wfAYJKoZIhvcNAQcGoG8wbQIBADBoBgkqhkiG9w0BBwEwHgYJYIZIAWUDBAEuMBEEDEh%2BKItDcqUwro%2BHrQIBEIA7MA0KHRf%2BF3YuTEAMovFxVALBMAXOWvXwcePSrlXd8eWbO0Gu4PlzXePH9QGutTzgsBB7obWKVcKw55kAB2F3cy1rbXMAS2Fybjphd3M6a21zOmV1LXdlc3QtMTo3MDk1ODc4MzUyNDM6a2V5LzQ2MzBjZTZiLTAwYzMtNGRlMi04NzdiLTYyN2UyMDYwZTVjYwC4AQICAHi9bVMAkme4qVQX1fQHo6ePw3H40A7cGfz7yrmSfBWMXgHlW5ynSsuhZ7zbqiK2sh%2B2AAAAfjB8BgkqhkiG9w0BBwagbzBtAgEAMGgGCSqGSIb3DQEHATAeBglghkgBZQMEAS4wEQQMkPcTbpchY2MsayhfAgEQgDuWokoIpYBa88xi5ggk1L1JkcZBleXY2Fhu75VlWDzfTq%2FPjQu2HTJqqUvWAGr3gQmwdhbGrdneGDgHcgAHYXdzLWttcwBLYXJuOmF3czprbXM6dXMtZWFzdC0xOjcwOTU4NzgzNTI0MzprZXkvNmMxMjBiYTAtNGNkNS00OTg1LWI4MmUtNDBhMDQ5NTJjYzU3ALgBAgIAeDYASx0XCjkny4iLV6vz%2BKtEGSGT6kdt0QRpkn6D%2FlVEAbLrick3%2FS2k9TO8wl7jjBMAAAB%2BMHwGCSqGSIb3DQEHBqBvMG0CAQAwaAYJKoZIhvcNAQcBMB4GCWCGSAFlAwQBLjARBAwPyU3UXZLk3LyqQEcCARCAO56x65zN0k8TKW9hcCjB8AjClKyO30ptqnOAj2gX5CQsUchhHNyCLeBw5CSlVzbE5lnPkVzoFWWWPI9DAgAAAAAMAAAQAAAAAAAAAAAAAAAAAN3ZE3nSZ2UgTJ9uNg%2FExXv%2F%2F%2F%2F%2FAAAAAQAAAAAAAAAAAAAAAQAAADKY080GlKheizYgeQ7j1hfyCGMz%2B3h70XeCt2x8c9Wb68RhMMKY2K8hrL3MNvyTxR4UAv7xImuhzOVtv0ziWd4qqF4%3D&product=jira&product=confluence)
-* **Demo Video (< 5:00):** `[[YOUTUBE_URL]]`
-* **Production UI Screenshots (Tracked in Repo):**
-  * [devpost_thumbnail.png](devpost_thumbnail.png) & [Live Blast Radius & Drift](docs/screenshots/01-live-blast-radius-drift.png)
-  * [Inspection Drawer (`SRS-201` `v4` drift + `MEDTRACE-7`)](docs/screenshots/02-inspection-drawer-drift-and-task.png)
-  * [Live Rovo `MedTrace Auditor`](docs/screenshots/03-rovo-medtrace-auditor-live.png)
-  * [SHA-256 Hash-Chained Audit Ledger](docs/screenshots/04-hash-chained-audit-ledger.png)
-  * [Live Jira `jira:workflowValidator` Gate Block](docs/screenshots/05-jira-workflow-gate-blocked.png)
-* **GitHub Repository:** https://github.com/armageden/MedTrace (Apache-2.0)
-
-### Judge Walkthrough (Fresh Install & Live Evaluation)
-1. **Install on Jira + Confluence:** Install MedTrace on both Jira and Confluence on the same Atlassian Cloud site (or use `--upgrade` when updating scopes). If testing hosted Atlassian MCP (`https://mcp.atlassian.com/forge/5e49c10e-696f-4984-9d00-4a47d0a5dd99`), enable **Expose tools to MCP-compatible apps** in **Atlassian Administration → Apps → Sites → Connected apps** (including the Confluence entry on multi-product sites). Scoped `rovo:mcp` calls (`issueKey`, `hazardKey`, or diff keys) also auto-hydrate an uninitialized product partition under the caller's Atlassian permissions.
-2. **Prepare Jira & Confluence Artifacts:**
-   - **Confluence:** Create an SRS page (e.g., `SRS-201: Bolus Rate Hard Limit` containing `5.0 mL/hr`).
-   - **Jira Issue Types & Labels:** Create a `Story` or `Task` (e.g., `MEDTRACE-1`) in status `Under Review` with label `class-c` (or `class-b` / `class-a`; issues without a class label are flagged fail-closed as Class C unclassified). Optionally create a `Hazard` (or `Risk` / `Safety Hazard`, or label `medtrace-hazard`) and `Test` (or label `medtrace-test`) Jira issue.
-   - **Confluence Remote Link:** On `MEDTRACE-1`, click **Link → Confluence page** (remote link) and attach `SRS-201`.
-   - **Native Jira Issue Links (optional):** Link `MEDTRACE-1` to the `Hazard` issue (`mitigates` / `is mitigated by`) and `Test` issue (`tests` / `is verified by`).
-   - **Workflow Validator (Jira Admin):** Under **Jira Project Settings → Workflows**, attach **MedTrace Safety Gate** (`medtrace-safety-validator`) to the release transition (e.g., `Under Review → Done`).
-3. **Run the Closed-Loop Workflow:**
-   - Open **Jira Project → Apps → MedTrace IEC 62304**. Cold start shows `UNINITIALIZED (NO DATA)` and `RELEASE BLOCKED` (fail-closed). Click **Sync Live Atlassian** (if a large workspace truncates, click **Resume Sync** until `SYNC INCOMPLETE` clears).
-   - Select `MEDTRACE-1` in the Matrix/Graph, record `PASSED` test evidence (`https://...`), and execute **Sign Off Spec (Attestation)** with `"I CERTIFY THIS ELECTRONIC SIGNATURE"`. Expect the link state to flip to `VERIFIED` (along with any sibling work items sharing that `(hazardKey, specId)` baseline).
-   - Transition `MEDTRACE-1` from `Under Review → Done` in Jira: **allowed**.
-   - Edit `SRS-201` in Confluence from `5.0` to `5.5 mL/hr` and publish: `avi:confluence:updated:page` (in Confluence) and automatic cross-partition Confluence hash reconciliation (`reconcileConfluenceSpecs`, in Jira) revoke the signature (`SIGNATURE_DRIFT`) and **Blast Radius** highlights the full chain. Transitioning an unverified/drifted issue to `Done` is **blocked**.
-   - Click **Create Re-Verification Jira Task** (or invoke `verify-iec-compliance-action` + `create-reverification-task-action` via hosted Atlassian MCP): a linked Jira task is created under your user permissions and recorded in **Audit Log** / **Export Dossier**.
-4. **Recovery (Uninitialized or Wrong Partition):** If `rovo:mcp` or `Test Human Gate` reports `uninitialized (0 hazards synced)`, confirm you opened MedTrace in the same product (Jira vs Confluence) exposed in Connected apps and click **Sync Live Atlassian** (or **Seed Demo Suite** on a scratch evaluation site for the labeled `DEMO DATASET` path).
+## Built With
+TypeScript, Node.js (`nodejs22.x`), React 18, Vite, `@xyflow/react`, Atlassian Forge (`@forge/kvs`, Jira REST v3, Confluence REST v2, Teamwork Graph, Rovo Agent & MCP), Model Context Protocol (`@modelcontextprotocol/sdk`).

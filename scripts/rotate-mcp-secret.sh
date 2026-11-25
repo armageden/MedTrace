@@ -122,6 +122,9 @@ FORGE_SITE="${FORGE_SITE:-}"
 FORGE_PRODUCT="${FORGE_PRODUCT:-Jira}"
 ENV_FILE="${ENV_FILE:-.env}"
 MEDTRACE_ALLOW_INSECURE_LOCALHOST="${MEDTRACE_ALLOW_INSECURE_LOCALHOST:-0}"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
+MCP_SERVER_MJS="$REPO_ROOT/mcp-server/index.mjs"
 
 command -v node >/dev/null 2>&1 || { echo "❌ node is required but was not found in PATH."; exit 1; }
 command -v curl >/dev/null 2>&1 || { echo "❌ curl is required but was not found in PATH."; exit 1; }
@@ -188,47 +191,11 @@ parse_dotenv_key() {
   local target_file="$1"
   local target_key="$2"
   [ -f "$target_file" ] || return 0
-  DOTENV_PATH="$target_file" TARGET_KEY="$target_key" node -e '
-    const fs = require("node:fs");
-    const content = fs.readFileSync(process.env.DOTENV_PATH, "utf8");
-    const env = {};
-    for (const rawLine of content.split(/\r?\n/)) {
-      let line = rawLine.trim();
-      if (!line || line.startsWith("#")) continue;
-      line = line.replace(/^export\s+/, "");
-      const m = line.match(/^([\w.-]+)\s*=\s*(.*)$/);
-      if (!m) continue;
-      const key = m[1];
-      const rest = m[2].trimStart();
-      let val = "";
-      if (rest.startsWith("\"") || rest.startsWith("\x27")) {
-        const q = rest[0];
-        let out = "";
-        let closed = false;
-        for (let i = 1; i < rest.length; i += 1) {
-          const ch = rest[i];
-          if (ch === "\\" && i + 1 < rest.length) {
-            const next = rest[i + 1];
-            if (next === q || next === "\\") {
-              out += next;
-              i += 1;
-              continue;
-            }
-          }
-          if (ch === q) {
-            closed = true;
-            break;
-          }
-          out += ch;
-        }
-        val = closed ? out : out.replace(/\s+#.*$/, "").trim();
-      } else if (rest.startsWith("#") || rest === "") {
-        val = "";
-      } else {
-        val = rest.replace(/\s+#.*$/, "").trim();
-      }
-      env[key] = val;
-    }
+  DOTENV_PATH="$target_file" TARGET_KEY="$target_key" MCP_MJS="$MCP_SERVER_MJS" node --input-type=module -e '
+    import fs from "node:fs";
+    import { pathToFileURL } from "node:url";
+    const { parseEnvContent } = await import(pathToFileURL(process.env.MCP_MJS).href);
+    const env = parseEnvContent(fs.readFileSync(process.env.DOTENV_PATH, "utf8"), {});
     const found = env[process.env.TARGET_KEY];
     if (typeof found === "string") {
       process.stdout.write(found);
@@ -238,32 +205,14 @@ parse_dotenv_key() {
 
 validate_webtrigger_url() {
   local raw_url="$1"
-  RAW_URL="$raw_url" ALLOW_INSECURE="$MEDTRACE_ALLOW_INSECURE_LOCALHOST" node -e '
-    const raw = (process.env.RAW_URL || "").trim();
-    if (!raw) process.exit(1);
-    // eslint-disable-next-line no-control-regex
-    if (/[\u0000-\u001f\u007f]/.test(raw)) process.exit(1);
-    let u;
-    try {
-      u = new URL(raw);
-    } catch {
-      process.exit(1);
-    }
-    if (u.username !== "" || u.password !== "") process.exit(1);
-    const host = (u.hostname || "").toLowerCase();
-    if (!host) process.exit(1);
+  RAW_URL="$raw_url" ALLOW_INSECURE="$MEDTRACE_ALLOW_INSECURE_LOCALHOST" MCP_MJS="$MCP_SERVER_MJS" node --input-type=module -e '
+    import { pathToFileURL } from "node:url";
+    const { validateWebtriggerUrl } = await import(pathToFileURL(process.env.MCP_MJS).href);
     const allowInsecure =
       process.env.ALLOW_INSECURE === "1" || process.env.ALLOW_INSECURE === "true";
-    const loopback = new Set(["localhost", "127.0.0.1", "::1", "[::1]"]);
-    if (u.protocol === "https:") {
-      process.stdout.write(u.toString());
-      process.exit(0);
-    }
-    if (u.protocol === "http:" && loopback.has(host) && allowInsecure) {
-      process.stdout.write(u.toString());
-      process.exit(0);
-    }
-    process.exit(1);
+    const res = validateWebtriggerUrl(process.env.RAW_URL || "", allowInsecure);
+    if (!res.ok) process.exit(1);
+    process.stdout.write(res.url);
   '
 }
 
@@ -281,7 +230,9 @@ lookup_webtrigger_url() {
     return 0
   fi
 
-  WT_RAW="$raw_out" ALLOW_INSECURE="$MEDTRACE_ALLOW_INSECURE_LOCALHOST" node -e '
+  WT_RAW="$raw_out" ALLOW_INSECURE="$MEDTRACE_ALLOW_INSECURE_LOCALHOST" MCP_MJS="$MCP_SERVER_MJS" node --input-type=module -e '
+    import { pathToFileURL } from "node:url";
+    const { validateWebtriggerUrl } = await import(pathToFileURL(process.env.MCP_MJS).href);
     const raw = (process.env.WT_RAW || "").trim();
     if (!raw) process.exit(0);
 
@@ -303,23 +254,12 @@ lookup_webtrigger_url() {
       }
     }
 
-    function normalizeValidUrl(rawUrl) {
-      if (typeof rawUrl !== "string") return "";
-      const trimmed = rawUrl.trim();
-      // eslint-disable-next-line no-control-regex
-      if (!trimmed || /[\u0000-\u001f\u007f]/.test(trimmed)) return "";
-      let u;
-      try { u = new URL(trimmed); } catch { return ""; }
-      if (u.username !== "" || u.password !== "") return "";
-      const host = (u.hostname || "").toLowerCase();
-      if (!host) return "";
-      const allowInsecure =
-        process.env.ALLOW_INSECURE === "1" || process.env.ALLOW_INSECURE === "true";
-      const loopback = new Set(["localhost", "127.0.0.1", "::1", "[::1]"]);
-      if (u.protocol === "https:") return u.toString();
-      if (u.protocol === "http:" && loopback.has(host) && allowInsecure) return u.toString();
-      return "";
-    }
+    const allowInsecure =
+      process.env.ALLOW_INSECURE === "1" || process.env.ALLOW_INSECURE === "true";
+    const validUrlOf = (rawUrl) => {
+      const check = validateWebtriggerUrl(rawUrl, allowInsecure);
+      return check.ok ? check.url : "";
+    };
 
     const parsed = parseJsonLoose(raw);
     if (!parsed) process.exit(0);
@@ -348,12 +288,12 @@ lookup_webtrigger_url() {
             item.key === "mcp-sync-webtrigger" ||
             item.functionKey === "mcp-sync-webtrigger" ||
             item.functionKey === "mcp-webtrigger-fn") &&
-          normalizeValidUrl(item.url)
+          validUrlOf(item.url)
       ) ||
-      items.find((item) => item && typeof item === "object" && normalizeValidUrl(item.url));
+      items.find((item) => item && typeof item === "object" && validUrlOf(item.url));
 
     if (preferred) {
-      process.stdout.write(normalizeValidUrl(preferred.url));
+      process.stdout.write(validUrlOf(preferred.url));
     }
   '
 }

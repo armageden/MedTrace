@@ -64,12 +64,9 @@ export interface Part11Signature {
   isValid: boolean;
   invalidationReason?: string;
   authMethod?: string;
-  signatureAlgorithm?: 'HMAC-SHA256-SEAL-V1' | 'ECDSA-P256-SHA256+HMAC-SEAL-V1';
+  signatureAlgorithm?: 'HMAC-SHA256-SEAL-V1';
   signatureSeal?: string;
   sealKeyId?: string;
-  clientPublicKeySpki?: string;
-  clientSignatureBase64?: string;
-  clientKeyFingerprint?: string;
 }
 
 export interface GraphMetadata {
@@ -110,7 +107,8 @@ export interface ComplianceSummary {
   lastAuditTimestamp: string;
   lastSyncedAt?: string;
   syncIncomplete?: boolean;
-  storageFormat?: 'SHARDED_V2' | 'SINGLE_KEY_V1';
+  incompleteProjectKeys?: string[];
+  storageFormat?: 'SHARDED_V2';
   auditEntryCount?: number;
   auditHeadHash?: string;
 }
@@ -201,18 +199,11 @@ export interface AuthorizedUserIdentity {
   authSource?: 'JIRA_MYSELF' | 'CONFLUENCE_CURRENT_USER' | 'LOCAL_TEST' | 'FALLBACK';
 }
 
-// Temporary backward-compatible attestation fields until Phase 1B/2 removes client spoofing.
 export interface Part11Attestation {
   meaning: string;
   attestationConfirmed: boolean;
   attestationPhrase?: string;
   attestationChecked?: boolean;
-  passwordConfirmed?: boolean;
-  signedBy?: string;
-  signedAt?: string;
-  role?: string;
-  clientPublicKeySpki?: string;
-  clientSignatureBase64?: string;
 }
 
 export interface ConfluenceRemoteLinkRef {
@@ -304,7 +295,7 @@ export interface TransitionResult {
 
 export interface MedTraceResolverMap {
   getComplianceSuite: {
-    payload: Record<string, never> | undefined;
+    payload: { skipReconcile?: boolean } | Record<string, never> | undefined;
     response: ComplianceSummary;
   };
   seedDemoSuite: {
@@ -345,8 +336,6 @@ export interface MedTraceResolverMap {
       attestationConfirmed: boolean;
       attestationChecked: boolean;
       attestationPhrase: string;
-      clientPublicKeySpki?: string;
-      clientSignatureBase64?: string;
     };
     response: ComplianceSummary;
   };

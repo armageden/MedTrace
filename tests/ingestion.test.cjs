@@ -1805,32 +1805,21 @@ test.describe('Task 1C-Ingestion: Confluence Revert Non-Resurrection & 3-Attempt
     try {
       const mockClient = makeMockClient();
       await withForgeMocks({ kvsMock, asAppImpl: () => mockClient }, async () => {
-        // Seed a hybrid ECDSA P-256 baseline for CUR-1 / SRS 91001 so live sync re-hydration can be verified too
-        const kp = ComplianceEngine.generateEcdsaP256KeyPair();
+        // Seed a standard HMAC-SHA256-SEAL-V1 baseline for CUR-1 / SRS 91001 so live sync re-hydration can be verified too
         const specHash = sha256Hex('<p>srs body for 91001</p>');
-        const meaning = 'Initial hybrid signoff';
-        const challenge = ComplianceEngine.computePart11ClientChallenge({
-          hazardKey: 'HAZ-CUR-1',
-          specId: 'srs-91001',
-          artifactSha256: specHash,
-          meaning,
-        });
-        const clientSig = ComplianceEngine.signPart11ClientChallenge(challenge, kp.privateKeyPkcs8Base64);
+        const meaning = 'Initial HMAC signoff';
         const signedAt = '2026-11-15T00:00:00.000Z';
         const seal = ComplianceEngine.computePart11Seal(
           {
             hazardKey: 'HAZ-CUR-1',
             specId: 'srs-91001',
             artifactSha256: specHash,
-            signedByAccountId: 'acc-ecdsa-live',
-            signedBy: 'Dr. Live ECDSA',
+            signedByAccountId: 'acc-hmac-live',
+            signedBy: 'Dr. Live Signer',
             role: 'Authorized Atlassian User',
             meaning,
             signedAt,
             authMethod: 'PART11_ATTESTATION',
-            signatureAlgorithm: 'ECDSA-P256-SHA256+HMAC-SEAL-V1',
-            clientPublicKeySpki: kp.publicKeySpkiBase64,
-            clientSignatureBase64: clientSig,
           },
           'cursor-ecdsa-secret'
         );
@@ -1839,21 +1828,18 @@ test.describe('Task 1C-Ingestion: Confluence Revert Non-Resurrection & 3-Attempt
           specId: 'srs-91001',
           pageId: '91001',
           sha256Hash: specHash,
-          signedBy: 'Dr. Live ECDSA',
-          signedByAccountId: 'acc-ecdsa-live',
+          signedBy: 'Dr. Live Signer',
+          signedByAccountId: 'acc-hmac-live',
           signedAt,
           role: 'Authorized Atlassian User',
           meaning,
           authMethod: 'PART11_ATTESTATION',
-          signatureAlgorithm: 'ECDSA-P256-SHA256+HMAC-SEAL-V1',
+          signatureAlgorithm: 'HMAC-SHA256-SEAL-V1',
           signatureSeal: seal,
           sealKeyId: 'env:MEDTRACE_PART11_SECRET',
-          clientPublicKeySpki: kp.publicKeySpkiBase64,
-          clientSignatureBase64: clientSig,
-          clientKeyFingerprint: kp.keyFingerprint,
         });
 
-        // Invocation 1: exact page-size cap maxIssues: 2 -> truncates and persists cursor-tok-2
+        // Invocation 1: exact page-size cap maxIssues: 2 -> truncates and persists cursor-tok-2 + incompleteProjectKeys
         const pass1 = await LiveIngestionService.syncFromAtlassian(
           { projectKey: 'CUR', maxIssues: 2, callerMode: 'APP' },
           'acc-cur'
@@ -1861,17 +1847,17 @@ test.describe('Task 1C-Ingestion: Confluence Revert Non-Resurrection & 3-Attempt
         assert.strictEqual(pass1.truncated, true);
         assert.strictEqual(pass1.nextPageToken, 'cursor-tok-2');
         assert.strictEqual(pass1.resumedFromCursor, undefined);
+        assert.deepStrictEqual(pass1.summary.incompleteProjectKeys, ['CUR']);
         const savedCursor = kvsMock.store.get('medtrace:ingestion:cursor:CUR');
         assert.strictEqual(savedCursor?.nextPageToken, 'cursor-tok-2');
 
         const cur1Link = pass1.summary.traceLinks.find((l) => l.work.key === 'CUR-1');
         assert.ok(cur1Link, 'Expected CUR-1 link in pass1');
-        assert.strictEqual(cur1Link.signature.signatureAlgorithm, 'ECDSA-P256-SHA256+HMAC-SEAL-V1');
-        assert.strictEqual(cur1Link.signature.clientKeyFingerprint, kp.keyFingerprint);
+        assert.strictEqual(cur1Link.signature.signatureAlgorithm, 'HMAC-SHA256-SEAL-V1');
         assert.strictEqual(cur1Link.signature.isValid, true);
         assert.strictEqual(pass1.driftDetectedCount, 0);
 
-        // Invocation 2: resumeFromCursor: true reads cursor-tok-2 from KVS, merges CUR-1/CUR-2 + CUR-3, and deletes cursor
+        // Invocation 2: resumeFromCursor: true reads cursor-tok-2 from KVS, merges CUR-1/CUR-2 + CUR-3, clears cursor & incompleteProjectKeys
         const pass2 = await LiveIngestionService.syncFromAtlassian(
           { projectKey: 'CUR', maxIssues: 2, resumeFromCursor: true, callerMode: 'APP' },
           'acc-cur'
@@ -1879,6 +1865,7 @@ test.describe('Task 1C-Ingestion: Confluence Revert Non-Resurrection & 3-Attempt
         assert.strictEqual(pass2.truncated, false);
         assert.strictEqual(pass2.nextPageToken, undefined);
         assert.strictEqual(pass2.resumedFromCursor, true);
+        assert.strictEqual(pass2.summary.incompleteProjectKeys, undefined);
         assert.strictEqual(kvsMock.store.has('medtrace:ingestion:cursor:CUR'), false, 'Completed sync must clear stored cursor');
         assert.deepStrictEqual(requestedTokens, ['PAGE_1', 'cursor-tok-2']);
         assert.deepStrictEqual(
@@ -2831,5 +2818,236 @@ test.describe('Task 1C-Ingestion: Confluence Revert Non-Resurrection & 3-Attempt
     } finally {
       Date.now = origDateNow;
     }
+  });
+
+  test.it('keeps medtrace-reverification tasks out of Stage 4 link.test and isolates incompleteProjectKeys per Jira project', async () => {
+    const kvsMock = createFullMockForgeKvs();
+    const specBody = '<p>SRS 81001 Verification Spec</p>';
+    const mockClient = () => ({
+      requestJira: async (routeObj) => {
+        const r = String(routeObj?.value_ || routeObj?.value || routeObj);
+        if (r.includes('/rest/api/3/search/jql')) {
+          return makeJsonResponse(200, {
+            issues: [
+              {
+                id: '9001',
+                key: 'REVX-1',
+                self: 'https://api.atlassian.com/ex/jira/11111111-2222-3333-4444-555555555555/rest/api/3/issue/9001',
+                fields: {
+                  summary: 'Infusion Rate Guard',
+                  status: { name: 'Done', statusCategory: { key: 'done', name: 'Done' } },
+                  labels: ['class-c'],
+                  issuetype: { name: 'Task' },
+                  project: { key: 'REVX', name: 'Rev Test' },
+                  issuelinks: [
+                    {
+                      type: { name: 'Relates', inward: 'relates to', outward: 'relates to' },
+                      outwardIssue: {
+                        id: '9002',
+                        key: 'REVX-2',
+                        fields: {
+                          summary: '[MedTrace Re-Verification] REVX-1',
+                          status: { name: 'To Do', statusCategory: { key: 'new', name: 'To Do' } },
+                          labels: ['medtrace-reverification'],
+                          issuetype: { name: 'Task' },
+                        },
+                      },
+                    },
+                    {
+                      type: { name: 'Test', inward: 'tested by', outward: 'tests' },
+                      outwardIssue: {
+                        id: '9003',
+                        key: 'REVX-3',
+                        fields: {
+                          summary: 'HIL Verification Test REVX-3',
+                          status: { name: 'Done', statusCategory: { key: 'done', name: 'Done' } },
+                          labels: ['medtrace-test'],
+                          issuetype: { name: 'Test' },
+                        },
+                      },
+                    },
+                  ],
+                },
+              },
+              {
+                id: '9002',
+                key: 'REVX-2',
+                fields: {
+                  summary: '[MedTrace Re-Verification] REVX-1',
+                  status: { name: 'To Do', statusCategory: { key: 'new', name: 'To Do' } },
+                  labels: ['medtrace-reverification'],
+                  issuetype: { name: 'Task' },
+                  project: { key: 'REVX', name: 'Rev Test' },
+                  issuelinks: [],
+                },
+              },
+              {
+                id: '9003',
+                key: 'REVX-3',
+                fields: {
+                  summary: 'HIL Verification Test REVX-3',
+                  status: { name: 'Done', statusCategory: { key: 'done', name: 'Done' } },
+                  labels: ['medtrace-test'],
+                  issuetype: { name: 'Test' },
+                  project: { key: 'REVX', name: 'Rev Test' },
+                  issuelinks: [],
+                },
+              },
+            ],
+          });
+        }
+        if (r.includes('/rest/api/3/issue/REVX-2?')) {
+          return makeJsonResponse(200, {
+            id: '9002',
+            key: 'REVX-2',
+            fields: {
+              summary: '[MedTrace Re-Verification] REVX-1',
+              status: { name: 'To Do' },
+              labels: ['medtrace-reverification'],
+              issuetype: { name: 'Task' },
+              issuelinks: [],
+            },
+          });
+        }
+        if (r.includes('/rest/api/3/issue/REVX-3?')) {
+          return makeJsonResponse(200, {
+            id: '9003',
+            key: 'REVX-3',
+            fields: {
+              summary: 'HIL Verification Test REVX-3',
+              status: { name: 'Done' },
+              labels: ['medtrace-test'],
+              issuetype: { name: 'Test' },
+              issuelinks: [],
+            },
+          });
+        }
+        if (r.includes('/remotelink')) {
+          return makeJsonResponse(200, [
+            {
+              application: { type: 'com.atlassian.confluence' },
+              globalId: 'pageId=81001',
+              object: { title: 'SRS-81001', url: 'https://example.atlassian.net/wiki/pages/81001' },
+            },
+          ]);
+        }
+        return makeJsonResponse(404, {});
+      },
+      requestConfluence: async (routeObj) => {
+        const r = String(routeObj?.value_ || routeObj?.value || routeObj);
+        if (r.includes('/wiki/api/v2/pages/81001')) {
+          return makeJsonResponse(200, {
+            id: '81001',
+            title: 'SRS-81001',
+            version: { number: 1, createdAt: '2026-11-24T00:00:00Z' },
+            body: { storage: { value: specBody } },
+          });
+        }
+        return makeJsonResponse(200, { results: [] });
+      },
+    });
+
+    await withForgeMocks({ kvsMock, asAppImpl: mockClient }, async () => {
+      const syncRes = await LiveIngestionService.syncFromAtlassian({ projectKey: 'REVX', callerMode: 'APP' }, 'acc-rev');
+      assert.strictEqual(syncRes.summary.traceLinks.length, 1);
+      const link = syncRes.summary.traceLinks[0];
+      assert.strictEqual(link.reverificationTaskKey, 'REVX-2');
+      assert.strictEqual(link.test.testKey, 'REVX-3', 'Re-verification task must NOT hijack Stage 4 link.test');
+
+      // Per-project syncIncomplete isolation via incompleteProjectKeys
+      const otherLink = ComplianceEngine.evaluateTraceLink(
+        { id: 'haz-p2', key: 'HAZ-P2-1', title: 'Other Hazard', riskClass: 'CLASS_A', mitigationRequirementId: 'p2-spec', status: 'MITIGATED' },
+        { id: 'p2-spec', title: 'SRS-P2', version: 1, sha256Hash: sha256Hex('p2'), lastSignedHash: '', isSignatureInvalidated: false, contentSnippet: 'p2', lastUpdated: '2026-11-24T00:00:00Z' },
+        { id: 'w-p2', key: 'MED-1', title: 'MED task', status: 'Done', assignee: 'QA' },
+        { id: 't-p2', testKey: 'TEST-P2', title: 'Test', testType: 'Unit Test', status: 'PASSED' },
+        { id: 'sig-p2', signedBy: 'QA', signedByAccountId: 'acc', signedAt: '2026-11-24T00:00:00Z', role: 'QA', meaning: 'OK', artifactSha256: sha256Hex('p2'), isValid: true }
+      );
+      const multiSuite = ComplianceEngine.generateComplianceReport([link, otherLink], 'LIVE', 'Multi', {
+        initialized: true,
+        syncIncomplete: true,
+        incompleteProjectKeys: ['REVX'],
+      });
+      await SeederService.saveComplianceSuite(multiSuite, 1);
+
+      const medScoped = await SeederService.getActiveComplianceSuite({ projectKey: 'MED' });
+      const revxScoped = await SeederService.getActiveComplianceSuite({ projectKey: 'REVX' });
+      assert.strictEqual(medScoped.syncIncomplete, undefined, 'MED must NOT inherit REVX truncation');
+      assert.strictEqual(revxScoped.syncIncomplete, true, 'REVX must retain syncIncomplete: true');
+    });
+  });
+
+  test.it('reconcileConfluenceSpecs reconciles >20 unique Confluence pages, falls back to asApp on HTTP 403, and uses <=11000ms LIVE_SYNC_BUDGET_MS', async () => {
+    const { LIVE_SYNC_BUDGET_MS } = require('../dist/ingestion.js');
+    assert.ok(LIVE_SYNC_BUDGET_MS <= 11_000, `Expected LIVE_SYNC_BUDGET_MS <= 11000, got ${LIVE_SYNC_BUDGET_MS}`);
+
+    const kvsMock = createFullMockForgeKvs();
+    const specOrig = '<p>signed spec body</p>';
+    const specDrifted = '<p>modified after signoff!</p>';
+    const shaOrig = sha256Hex(specOrig);
+    const links = [];
+
+    for (let i = 1; i <= 25; i++) {
+      const pid = String(70000 + i);
+      links.push(
+        ComplianceEngine.evaluateTraceLink(
+          { id: `haz-p25-${i}`, key: `HAZ-P25-${i}`, title: `Haz ${i}`, riskClass: 'CLASS_C', mitigationRequirementId: `srs-${pid}`, status: 'MITIGATED' },
+          { id: `srs-${pid}`, pageId: pid, title: `SRS-${pid}`, version: 1, sha256Hash: shaOrig, lastSignedHash: shaOrig, isSignatureInvalidated: false, contentSnippet: 'signed spec body', lastUpdated: '2026-11-24T00:00:00Z' },
+          { id: `w-p25-${i}`, key: `MED-${i}`, title: `Work ${i}`, status: 'Done', assignee: 'Alice' },
+          { id: `t-p25-${i}`, testKey: `TST-${i}`, title: `Test ${i}`, testType: 'Unit Test', status: 'PASSED', evidenceUrl: 'https://ci.example/1', executionDate: '2026-11-24T00:00:00Z' },
+          { id: `sig-p25-${i}`, signedBy: 'Alice', signedByAccountId: 'acc-1', signedAt: '2026-11-24T00:00:00Z', role: 'QA', meaning: 'Approved', artifactSha256: shaOrig, isValid: true }
+        )
+      );
+    }
+
+    const userRequests = [];
+    const appRequests = [];
+    const makeConfluenceMock = (mode) => async (routeObj) => {
+      const r = String(routeObj?.value_ || routeObj?.value || routeObj);
+      const match = r.match(/\/wiki\/api\/v2\/pages\/(\d+)/);
+      const pid = match?.[1] || '';
+      if (mode === 'USER') {
+        userRequests.push(pid);
+        if (pid === '70025') {
+          return makeJsonResponse(403, { message: 'User lacks permission, requires app fallback' });
+        }
+      } else {
+        appRequests.push(pid);
+      }
+      return makeJsonResponse(200, {
+        id: pid,
+        title: `SRS-${pid}`,
+        version: { number: pid === '70025' ? 2 : 1 },
+        body: { storage: { value: pid === '70025' ? specDrifted : specOrig } },
+      });
+    };
+
+    const initialSuite = ComplianceEngine.generateComplianceReport(links, 'LIVE', 'Paginated Reconcile Suite', {
+      initialized: true,
+    });
+
+    await withForgeMocks(
+      {
+        kvsMock,
+        asUserImpl: () => ({
+          requestJira: async () => makeJsonResponse(404, {}),
+          requestConfluence: makeConfluenceMock('USER'),
+        }),
+        asAppImpl: () => ({
+          requestJira: async () => makeJsonResponse(404, {}),
+          requestConfluence: makeConfluenceMock('APP'),
+        }),
+      },
+      async () => {
+        await SeederService.saveComplianceSuite(initialSuite, 0);
+        const reconciled = await LiveIngestionService.reconcileConfluenceSpecs(initialSuite, {
+          allowAppFallback: true,
+          actorAccountId: 'gate-reconcile',
+        });
+        assert.ok(userRequests.includes('70025'), `Page 25 (70025) must be fetched, saw ${userRequests.length} user fetches`);
+        assert.ok(appRequests.includes('70025'), 'HTTP 403 from asUser must fall back to asApp when allowAppFallback: true');
+        const link25 = reconciled.traceLinks.find((l) => l.spec.pageId === '70025');
+        assert.strictEqual(link25.complianceState, 'SIGNATURE_DRIFT', 'Page 25 drift must be detected');
+      }
+    );
   });
 });

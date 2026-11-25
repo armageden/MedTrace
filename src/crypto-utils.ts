@@ -5,6 +5,39 @@ const SAFE_KVS_SEGMENT_RE = /^[a-zA-Z0-9:._#-]+$/;
 // eslint-disable-next-line no-control-regex
 const CONTROL_CHAR_RE = /[\u0000-\u001f\u007f]/;
 
+/** Canonical Jira project key pattern (1-21 chars, uppercase). */
+export const JIRA_PROJECT_KEY_RE = /^[A-Z][A-Z0-9_]{0,20}$/;
+
+/** Canonical Jira issue key pattern (`PROJ-123`). */
+export const JIRA_ISSUE_KEY_RE = /^[A-Z][A-Z0-9_]{0,20}-\d+$/;
+
+/**
+ * Deep-clones JSON-serializable values while preserving `undefined`.
+ */
+export function cloneJsonValue<T>(value: T): T {
+  if (value === undefined) return value;
+  return JSON.parse(JSON.stringify(value)) as T;
+}
+
+/**
+ * Returns true if an electronic signature has an invalidation timestamp at or after its signed timestamp
+ * (or if either timestamp is invalid/missing when `invalidatedAt` is present).
+ */
+export function isSignatureTimestampInvalidated(signature?: {
+  signedAt?: string;
+  invalidatedAt?: string;
+}): boolean {
+  if (!signature?.invalidatedAt) {
+    return false;
+  }
+  const invalidatedMs = new Date(signature.invalidatedAt).getTime();
+  const signedMs = signature.signedAt ? new Date(signature.signedAt).getTime() : NaN;
+  if (!Number.isFinite(invalidatedMs) || !Number.isFinite(signedMs)) {
+    return true;
+  }
+  return signedMs <= invalidatedMs;
+}
+
 /**
  * Computes lowercase hexadecimal SHA-256 digest of a UTF-8 string.
  */

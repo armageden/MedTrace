@@ -1,17 +1,10 @@
 import Resolver from '@forge/resolver';
-import api, { route } from '@forge/api';
-import crypto from 'crypto';
 import { ComplianceEngine } from './compliance-engine';
 import { SeederService } from './seeder';
 import {
-  authorizeAndFilterLiveSuite,
   authorizeAndFilterLiveSuiteDetailed,
-  extractAllJiraProjectKeysFromLink,
-  extractJiraProjectKeyFromRawKey,
-  hasJiraBrowsePermissionForCaller,
   redactBlastRadiusReport,
 } from './seeder-identity';
-import { resolveTraceLinkByHazard } from './seeder-storage';
 import {
   LiveIngestionService,
   ConfluencePageUpdatedEvent,
@@ -21,112 +14,68 @@ import {
 } from './ingestion';
 import { AuditLogService, MAX_AUDIT_LOG_PAGE_LIMIT } from './audit-log';
 import { TeamworkGraphService } from './teamwork-graph';
-import { McpToolService, rovoActionHandler } from './mcp-server';
-import { probeUnsyncedSafetyIssue, workflowValidatorHandler } from './workflow-validator';
+import { rovoActionHandler } from './mcp-server';
+import { workflowValidatorHandler } from './workflow-validator';
 import { isForgeRuntime } from './runtime';
 import { validateHttpsUrl } from './crypto-utils';
 import {
-  MAX_TIMESTAMP_AGE_MS,
-  MAX_FUTURE_SKEW_MS,
-  NONCE_TTL_MS,
-  NonceStore,
-  getNonceStore,
-  setNonceStore,
+  AuthorizationTarget,
+  AuthorizedCaller,
+  ForgeExtensionPayload,
+  ForgeResolverContext,
+  ForgeResolverRequest,
+  assertAuthorizedOperator,
+  assertAuthorizedReader,
+  assertJiraOperatorPermissions,
+  assertJiraSiteAdminPermissions,
+  assertOperatorAuthorizedForTarget,
+  filterAuditEntriesForCaller,
+  filterLiveSuiteForCaller,
+  verifyJiraIdentity,
+} from './rbac';
+import {
+  WebtriggerHttpError,
+  WebtriggerRequest,
+  WebtriggerResponse,
+  claimNonce,
+  claimNonceDetailed,
   createInMemoryNonceStore,
-  NonceClaimResult,
-} from './nonce-store';
+  getNonceStore,
+  mcpWebtriggerHandler,
+  setNonceStore,
+  verifyHmacSignature,
+} from './webtrigger';
 import {
   AuditLogEntry,
   ComplianceSummary,
   MedTraceResolverMap,
   PART11_ATTESTATION_PHRASE,
-  TraceLink,
   VerificationTest,
 } from './types';
 
-export interface ForgeExtensionPayload {
-  type?: string;
-  project?: {
-    key?: string;
-    id?: string;
-  };
-  issue?: {
-    key?: string;
-    id?: string;
-  };
-  space?: {
-    key?: string;
-    id?: string;
-  };
-  content?: {
-    id?: string;
-    type?: string;
-  };
-}
-
-export interface ForgeResolverContext {
-  accountId?: string;
-  cloudId?: string;
-  installContext?: string;
-  principal?: {
-    accountId?: string;
-  };
-  extension?: ForgeExtensionPayload;
-  permissions?: string[];
-}
-
-export interface ForgeResolverRequest<TPayload = unknown> {
-  payload?: TPayload;
-  context?: ForgeResolverContext;
-}
-
-export interface AuthorizedCaller {
-  accountId: string;
-  extensionType: string;
-  projectKey?: string;
-  spaceKey?: string;
-  spaceId?: string;
-  contentId?: string;
-}
-
-export interface AuthorizationTarget {
-  projectKey?: string;
-  issueKey?: string;
-  spaceId?: string;
-  contentId?: string;
-}
-
-export interface WebtriggerRequest {
-  method?: string;
-  body?: unknown;
-  path?: string;
-  headers?: Record<string, string | string[] | undefined>;
-  queryParameters?: Record<string, string | string[] | undefined>;
-  query?: Record<string, string | undefined>;
-}
-
-export interface WebtriggerResponse {
-  statusCode: number;
-  headers: { [key: string]: string[] };
-  body: string;
-}
-
-export class WebtriggerHttpError extends Error {
-  public readonly statusCode: number;
-  public readonly publicMessage: string;
-
-  constructor(statusCode: number, publicMessage: string) {
-    super(publicMessage);
-    this.name = 'WebtriggerHttpError';
-    this.statusCode = statusCode;
-    this.publicMessage = publicMessage;
-  }
-}
-
-const PROJECT_KEY_RE = /^[A-Z][A-Z0-9_]{0,20}$/;
-const ISSUE_KEY_RE = /^[A-Z][A-Z0-9_]{0,20}-\d+$/;
-const CONFLUENCE_ID_RE = /^[a-zA-Z0-9_-]{1,64}$/;
-const CONFLUENCE_GLOBAL_SPACES_PROBE_LIMIT = 10;
+export type {
+  AuthorizationTarget,
+  AuthorizedCaller,
+  ForgeExtensionPayload,
+  ForgeResolverContext,
+  ForgeResolverRequest,
+} from './rbac';
+export {
+  assertAuthorizedOperator,
+  assertAuthorizedReader,
+  assertOperatorAuthorizedForTarget,
+} from './rbac';
+export type { WebtriggerRequest, WebtriggerResponse } from './webtrigger';
+export {
+  WebtriggerHttpError,
+  claimNonce,
+  claimNonceDetailed,
+  createInMemoryNonceStore,
+  getNonceStore,
+  mcpWebtriggerHandler,
+  setNonceStore,
+  verifyHmacSignature,
+} from './webtrigger';
 
 const ALLOWED_TEST_STATUSES: ReadonlySet<VerificationTest['status']> = new Set([
   'PASSED',
@@ -135,781 +84,7 @@ const ALLOWED_TEST_STATUSES: ReadonlySet<VerificationTest['status']> = new Set([
   'IN_PROGRESS',
 ]);
 
-const ALLOWED_WEBTRIGGER_POST_ACTIONS: ReadonlySet<string> = new Set([
-  'status',
-  'get-hazard-lineage',
-  'seed',
-  'remediate',
-  'verify',
-  'verify-release-gate',
-  'validate',
-  'simulate_transition',
-]);
-
 const resolver = new Resolver();
-
-function extractCallerAccountId(req?: ForgeResolverRequest<unknown>): string | undefined {
-  const direct = req?.context?.accountId;
-  if (typeof direct === 'string' && direct.trim().length > 0) {
-    return direct.trim();
-  }
-  const principal = req?.context?.principal?.accountId;
-  if (typeof principal === 'string' && principal.trim().length > 0) {
-    return principal.trim();
-  }
-  return undefined;
-}
-
-interface NormalizedAuthScope {
-  extensionType: string;
-  isConfluence: boolean;
-  effectiveProjectKey?: string;
-  effectiveIssueKey?: string;
-  effectiveSpaceId?: string;
-  effectiveContentId?: string;
-  extSpaceKey?: string;
-  hasExplicitJiraTarget: boolean;
-  hasExplicitConfluenceTarget: boolean;
-}
-
-function normalizeAndValidateScope(
-  ext: ForgeExtensionPayload | undefined,
-  target?: AuthorizationTarget
-): NormalizedAuthScope {
-  const extensionType = typeof ext?.type === 'string' ? ext.type.trim().toLowerCase() : '';
-  const isConfluence = extensionType.startsWith('confluence');
-
-  const extProjectKey =
-    typeof ext?.project?.key === 'string' && ext.project.key.trim().length > 0
-      ? ext.project.key.trim().toUpperCase()
-      : undefined;
-  const rawTargetProjectKey =
-    typeof target?.projectKey === 'string' && target.projectKey.trim().length > 0
-      ? target.projectKey.trim().toUpperCase()
-      : undefined;
-
-  if (rawTargetProjectKey && !PROJECT_KEY_RE.test(rawTargetProjectKey)) {
-    throw new Error('Bad Request: Invalid Jira projectKey format.');
-  }
-
-  const rawTargetIssueKey =
-    typeof target?.issueKey === 'string' && target.issueKey.trim().length > 0
-      ? target.issueKey.trim().toUpperCase()
-      : undefined;
-
-  if (rawTargetIssueKey && !ISSUE_KEY_RE.test(rawTargetIssueKey)) {
-    throw new Error('Bad Request: Invalid Jira issueKey format.');
-  }
-
-  if (extProjectKey && rawTargetProjectKey && rawTargetProjectKey !== extProjectKey) {
-    throw new Error(
-      `Forbidden: Cross-project override is not permitted (${rawTargetProjectKey} !== ${extProjectKey}).`
-    );
-  }
-
-  if (extProjectKey && rawTargetIssueKey) {
-    const issueProject = rawTargetIssueKey.split('-')[0];
-    if (issueProject !== extProjectKey) {
-      throw new Error(
-        `Forbidden: Cross-project issue access is not permitted (${rawTargetIssueKey} outside project ${extProjectKey}).`
-      );
-    }
-  }
-
-  if (rawTargetProjectKey && rawTargetIssueKey) {
-    const issueProject = rawTargetIssueKey.split('-')[0];
-    if (issueProject !== rawTargetProjectKey) {
-      throw new Error(
-        `Forbidden: Target issue ${rawTargetIssueKey} does not belong to project ${rawTargetProjectKey}.`
-      );
-    }
-  }
-
-  const rawTargetSpaceId =
-    typeof target?.spaceId === 'string' && target.spaceId.trim().length > 0
-      ? target.spaceId.trim()
-      : undefined;
-  if (rawTargetSpaceId && !CONFLUENCE_ID_RE.test(rawTargetSpaceId)) {
-    throw new Error('Bad Request: Invalid Confluence spaceId format.');
-  }
-
-  const rawTargetContentId =
-    typeof target?.contentId === 'string' && target.contentId.trim().length > 0
-      ? target.contentId.trim()
-      : undefined;
-  if (rawTargetContentId && !CONFLUENCE_ID_RE.test(rawTargetContentId)) {
-    throw new Error('Bad Request: Invalid Confluence contentId format.');
-  }
-
-  const extSpaceId =
-    typeof ext?.space?.id === 'string' && ext.space.id.trim().length > 0
-      ? ext.space.id.trim()
-      : undefined;
-  const extContentId =
-    typeof ext?.content?.id === 'string' && ext.content.id.trim().length > 0
-      ? ext.content.id.trim()
-      : undefined;
-  const extSpaceKey =
-    typeof ext?.space?.key === 'string' && ext.space.key.trim().length > 0
-      ? ext.space.key.trim()
-      : undefined;
-
-  return {
-    extensionType: ext?.type || 'jira:globalPage',
-    isConfluence,
-    effectiveProjectKey: rawTargetProjectKey || extProjectKey,
-    effectiveIssueKey: rawTargetIssueKey,
-    effectiveSpaceId: rawTargetSpaceId || extSpaceId,
-    effectiveContentId: rawTargetContentId || extContentId,
-    extSpaceKey,
-    hasExplicitJiraTarget: Boolean(rawTargetProjectKey || rawTargetIssueKey),
-    hasExplicitConfluenceTarget: Boolean(rawTargetSpaceId || rawTargetContentId),
-  };
-}
-
-interface JiraPermissionEntry {
-  havePermission?: boolean;
-}
-
-interface JiraPermissionsResponse {
-  permissions?: Record<string, JiraPermissionEntry | undefined>;
-}
-
-function isHttpOk(res: { ok?: boolean; status: number }): boolean {
-  return typeof res.ok === 'boolean' ? res.ok : res.status >= 200 && res.status < 300;
-}
-
-async function verifyJiraIdentity(expectedAccountId: string): Promise<void> {
-  const res = await api.asUser().requestJira(route`/rest/api/3/myself`);
-  if (!isHttpOk(res)) {
-    throw new Error(`Forbidden: Jira user session validation failed (HTTP ${res.status}).`);
-  }
-  const myself = (await res.json().catch(() => ({}))) as {
-    accountId?: unknown;
-    active?: unknown;
-  };
-  if (myself.active === false) {
-    throw new Error('Forbidden: Jira user account is inactive.');
-  }
-  if (
-    typeof myself.accountId === 'string' &&
-    myself.accountId.trim().length > 0 &&
-    myself.accountId.trim() !== expectedAccountId
-  ) {
-    throw new Error('Forbidden: Authenticated Jira session account mismatch.');
-  }
-}
-
-async function assertJiraReaderPermissions(projectKey?: string, issueKey?: string): Promise<void> {
-  const permRoute = issueKey
-    ? route`/rest/api/3/mypermissions?issueKey=${issueKey}&permissions=BROWSE_PROJECTS`
-    : projectKey
-    ? route`/rest/api/3/mypermissions?projectKey=${projectKey}&permissions=BROWSE_PROJECTS`
-    : route`/rest/api/3/mypermissions?permissions=BROWSE_PROJECTS`;
-
-  const res = await api.asUser().requestJira(permRoute);
-  if (!isHttpOk(res)) {
-    throw new Error(`Forbidden: Jira user lacks permission (${res.status}).`);
-  }
-  const data = (await res.json().catch(() => ({}))) as JiraPermissionsResponse;
-  const browsePerm = data.permissions?.BROWSE_PROJECTS;
-  if (browsePerm !== undefined) {
-    if (browsePerm.havePermission !== true) {
-      throw new Error('Forbidden: Requires Jira BROWSE_PROJECTS permission.');
-    }
-    return;
-  }
-  // Compatibility fallback when a mock only populates operator permission keys
-  const hasEditOrAdmin =
-    data.permissions?.EDIT_ISSUES?.havePermission === true ||
-    data.permissions?.ADMINISTER_PROJECTS?.havePermission === true;
-  if (!hasEditOrAdmin) {
-    throw new Error('Forbidden: Requires Jira BROWSE_PROJECTS permission.');
-  }
-}
-
-async function assertJiraOperatorPermissions(projectKey?: string, issueKey?: string): Promise<void> {
-  const permRoute = issueKey
-    ? route`/rest/api/3/mypermissions?issueKey=${issueKey}&permissions=BROWSE_PROJECTS,EDIT_ISSUES,ADMINISTER_PROJECTS`
-    : projectKey
-    ? route`/rest/api/3/mypermissions?projectKey=${projectKey}&permissions=BROWSE_PROJECTS,EDIT_ISSUES,ADMINISTER_PROJECTS`
-    : route`/rest/api/3/mypermissions?permissions=EDIT_ISSUES,ADMINISTER_PROJECTS`;
-
-  const res = await api.asUser().requestJira(permRoute);
-  if (!isHttpOk(res)) {
-    throw new Error(`Forbidden: Jira user lacks permission (${res.status}).`);
-  }
-  const data = (await res.json().catch(() => ({}))) as JiraPermissionsResponse;
-  const browsePerm = data.permissions?.BROWSE_PROJECTS;
-  if (browsePerm !== undefined && browsePerm.havePermission === false) {
-    throw new Error('Forbidden: Requires Jira BROWSE_PROJECTS permission.');
-  }
-  const canEdit = data.permissions?.EDIT_ISSUES?.havePermission === true;
-  const canAdmin = data.permissions?.ADMINISTER_PROJECTS?.havePermission === true;
-  if (!canEdit && !canAdmin) {
-    throw new Error('Forbidden: Requires Jira EDIT_ISSUES or ADMINISTER_PROJECTS permission.');
-  }
-}
-
-async function assertJiraSiteAdminPermissions(expectedAccountId: string): Promise<void> {
-  if (!isForgeRuntime()) {
-    return;
-  }
-  await verifyJiraIdentity(expectedAccountId);
-  const res = await api
-    .asUser()
-    .requestJira(route`/rest/api/3/mypermissions?permissions=ADMINISTER`);
-  if (!isHttpOk(res)) {
-    throw new Error(`Forbidden: Jira site administrator permission check failed (${res.status}).`);
-  }
-  const data = (await res.json().catch(() => ({}))) as JiraPermissionsResponse;
-  if (data.permissions?.ADMINISTER?.havePermission !== true) {
-    throw new Error(
-      'Forbidden: Requires Jira site administrator (ADMINISTER) permission to overwrite an initialized LIVE compliance suite.'
-    );
-  }
-}
-
-interface ConfluenceOperation {
-  operation?: unknown;
-  targetType?: unknown;
-}
-
-interface ConfluenceSpaceSummary {
-  id?: unknown;
-  key?: unknown;
-  type?: unknown;
-}
-
-function hasConfluencePageWriteOps(operations: ConfluenceOperation[]): boolean {
-  return operations.some((op) => {
-    const opName = typeof op.operation === 'string' ? op.operation.trim().toLowerCase() : '';
-    const targetType = typeof op.targetType === 'string' ? op.targetType.trim().toLowerCase() : '';
-    return (
-      targetType === 'page' &&
-      (opName === 'update' || opName === 'delete' || opName === 'administer')
-    );
-  });
-}
-
-function hasConfluenceSpaceWriteOps(operations: ConfluenceOperation[]): boolean {
-  return operations.some((op) => {
-    const opName = typeof op.operation === 'string' ? op.operation.trim().toLowerCase() : '';
-    const targetType = typeof op.targetType === 'string' ? op.targetType.trim().toLowerCase() : '';
-    if (opName === 'administer' && (targetType === 'space' || targetType === 'page' || targetType === '')) {
-      return true;
-    }
-    return (
-      (opName === 'create' || opName === 'update' || opName === 'delete') &&
-      (targetType === 'page' || targetType === 'space')
-    );
-  });
-}
-
-async function verifyConfluenceIdentity(expectedAccountId: string): Promise<void> {
-  const userRes = await api.asUser().requestConfluence(route`/wiki/rest/api/user/current`);
-  if (!isHttpOk(userRes)) {
-    throw new Error('Forbidden: Confluence user session lacks access.');
-  }
-  const userData = (await userRes.json().catch(() => ({}))) as {
-    accountId?: unknown;
-    type?: unknown;
-  };
-  if (
-    userData.type === 'anonymous' ||
-    typeof userData.accountId !== 'string' ||
-    userData.accountId.trim() !== expectedAccountId
-  ) {
-    throw new Error('Forbidden: Authenticated Confluence user identity mismatch.');
-  }
-}
-
-async function assertConfluenceReaderPermissions(spaceId?: string, contentId?: string): Promise<void> {
-  if (contentId) {
-    const res = await api.asUser().requestConfluence(route`/wiki/api/v2/pages/${contentId}`);
-    if (!isHttpOk(res)) {
-      throw new Error(`Forbidden: Confluence user lacks read access to page ${contentId}.`);
-    }
-    return;
-  }
-  if (spaceId) {
-    const res = await api.asUser().requestConfluence(route`/wiki/api/v2/spaces/${spaceId}`);
-    if (!isHttpOk(res)) {
-      throw new Error(`Forbidden: Confluence user lacks read access to space ${spaceId}.`);
-    }
-    return;
-  }
-  const res = await api.asUser().requestConfluence(route`/wiki/api/v2/spaces?limit=1`);
-  if (!isHttpOk(res)) {
-    throw new Error('Forbidden: Confluence user session lacks access.');
-  }
-}
-
-async function assertConfluenceOperatorPermissions(spaceId?: string, contentId?: string): Promise<void> {
-  if (contentId) {
-    const res = await api.asUser().requestConfluence(route`/wiki/api/v2/pages/${contentId}/operations`);
-    if (!isHttpOk(res)) {
-      throw new Error(`Forbidden: Confluence user lacks edit access to page ${contentId}.`);
-    }
-    const data = (await res.json().catch(() => ({}))) as { operations?: unknown };
-    const ops = Array.isArray(data.operations) ? (data.operations as ConfluenceOperation[]) : [];
-    if (!hasConfluencePageWriteOps(ops)) {
-      throw new Error('Forbidden: Requires Confluence page update or administer permission.');
-    }
-    return;
-  }
-
-  if (spaceId) {
-    const res = await api.asUser().requestConfluence(route`/wiki/api/v2/spaces/${spaceId}/operations`);
-    if (!isHttpOk(res)) {
-      throw new Error(`Forbidden: Confluence user lacks operator access to space ${spaceId}.`);
-    }
-    const data = (await res.json().catch(() => ({}))) as { operations?: unknown };
-    const ops = Array.isArray(data.operations) ? (data.operations as ConfluenceOperation[]) : [];
-    if (!hasConfluenceSpaceWriteOps(ops)) {
-      throw new Error('Forbidden: Requires Confluence space create/update/administer permission.');
-    }
-    return;
-  }
-
-  const spacesRes = await api
-    .asUser()
-    .requestConfluence(route`/wiki/api/v2/spaces?type=global&limit=25`);
-  if (!isHttpOk(spacesRes)) {
-    throw new Error('Forbidden: Confluence user session lacks access.');
-  }
-  const spacesData = (await spacesRes.json().catch(() => ({}))) as { results?: unknown };
-  const globalSpaces = (Array.isArray(spacesData.results) ? (spacesData.results as ConfluenceSpaceSummary[]) : []).filter(
-    (s) => {
-      if (typeof s.id !== 'string' || s.id.trim().length === 0) return false;
-      const spaceType = typeof s.type === 'string' ? s.type.trim().toLowerCase() : '';
-      return spaceType === '' || spaceType === 'global';
-    }
-  );
-
-  for (const space of globalSpaces.slice(0, CONFLUENCE_GLOBAL_SPACES_PROBE_LIMIT)) {
-    const sid = String(space.id).trim();
-    const opRes = await api.asUser().requestConfluence(route`/wiki/api/v2/spaces/${sid}/operations`);
-    if (!isHttpOk(opRes)) continue;
-    const opData = (await opRes.json().catch(() => ({}))) as { operations?: unknown };
-    const ops = Array.isArray(opData.operations) ? (opData.operations as ConfluenceOperation[]) : [];
-    if (hasConfluenceSpaceWriteOps(ops)) {
-      return;
-    }
-  }
-
-  throw new Error(
-    'Forbidden: Confluence operator requires create, update, or administer permission in at least one global space.'
-  );
-}
-
-/**
- * Verifies authenticated Atlassian caller identity and read permissions (`BROWSE_PROJECTS` / Confluence space/page read),
- * enforcing cross-project confused-deputy checks before executing any read resolver.
- */
-export async function assertAuthorizedReader(
-  req?: ForgeResolverRequest<unknown>,
-  target?: AuthorizationTarget
-): Promise<AuthorizedCaller> {
-  const accountId = extractCallerAccountId(req);
-  if (!accountId) {
-    throw new Error('Unauthorized: Authenticated Atlassian accountId is required in resolver context.');
-  }
-
-  const scope = normalizeAndValidateScope(req?.context?.extension, target);
-
-  if (isForgeRuntime()) {
-    const checkConfluence = scope.isConfluence || scope.hasExplicitConfluenceTarget;
-    const checkJira = !scope.isConfluence || scope.hasExplicitJiraTarget;
-
-    if (checkConfluence) {
-      await verifyConfluenceIdentity(accountId);
-      await assertConfluenceReaderPermissions(scope.effectiveSpaceId, scope.effectiveContentId);
-    }
-
-    if (checkJira) {
-      await verifyJiraIdentity(accountId);
-      await assertJiraReaderPermissions(scope.effectiveProjectKey, scope.effectiveIssueKey);
-    }
-  }
-
-  return {
-    accountId,
-    extensionType: scope.extensionType,
-    projectKey: scope.effectiveProjectKey,
-    spaceKey: scope.extSpaceKey,
-    spaceId: scope.effectiveSpaceId,
-    contentId: scope.effectiveContentId,
-  };
-}
-
-/**
- * Verifies authenticated Atlassian caller identity and write/admin permissions (`EDIT_ISSUES` / `ADMINISTER_PROJECTS`,
- * or Confluence page/global-space write operations), blocking read-only viewers and cross-project overrides.
- */
-export async function assertAuthorizedOperator(
-  req?: ForgeResolverRequest<unknown>,
-  target?: AuthorizationTarget
-): Promise<AuthorizedCaller> {
-  const accountId = extractCallerAccountId(req);
-  if (!accountId) {
-    throw new Error('Unauthorized: Authenticated Atlassian accountId is required in resolver context.');
-  }
-
-  const scope = normalizeAndValidateScope(req?.context?.extension, target);
-
-  if (isForgeRuntime()) {
-    const checkConfluence = scope.isConfluence || scope.hasExplicitConfluenceTarget;
-    const checkJira = !scope.isConfluence || scope.hasExplicitJiraTarget;
-
-    if (checkConfluence) {
-      await verifyConfluenceIdentity(accountId);
-      await assertConfluenceOperatorPermissions(scope.effectiveSpaceId, scope.effectiveContentId);
-    }
-
-    if (checkJira) {
-      await verifyJiraIdentity(accountId);
-      await assertJiraOperatorPermissions(scope.effectiveProjectKey, scope.effectiveIssueKey);
-    }
-  }
-
-  return {
-    accountId,
-    extensionType: scope.extensionType,
-    projectKey: scope.effectiveProjectKey,
-    spaceKey: scope.extSpaceKey,
-    spaceId: scope.effectiveSpaceId,
-    contentId: scope.effectiveContentId,
-  };
-}
-
-async function filterLiveSuiteForCaller(
-  caller: AuthorizedCaller,
-  suite: ComplianceSummary
-): Promise<ComplianceSummary> {
-  if (
-    suite.datasetMode !== 'LIVE' ||
-    suite.initialized === false ||
-    suite.traceLinks.length === 0
-  ) {
-    return suite;
-  }
-
-  const runtimeActive = isForgeRuntime();
-  if (!caller.projectKey && !runtimeActive) {
-    return suite;
-  }
-
-  if (runtimeActive && caller.extensionType.toLowerCase().startsWith('confluence:')) {
-    await verifyJiraIdentity(caller.accountId);
-  }
-
-  return authorizeAndFilterLiveSuite(suite, {
-    extensionType: caller.extensionType,
-    projectKey: caller.projectKey,
-    checkConfluencePages: true,
-  });
-}
-
-interface LinkProjectIndex {
-  byKey: Map<string, Set<string>>;
-  bySpecOrPage: Map<string, Set<string>>;
-}
-
-function buildLinkProjectIndex(suite: ComplianceSummary): LinkProjectIndex {
-  const byKey = new Map<string, Set<string>>();
-  const bySpecOrPage = new Map<string, Set<string>>();
-
-  const addProjects = (map: Map<string, Set<string>>, rawKey: string | undefined, projs: string[]) => {
-    const clean = rawKey?.trim().toLowerCase();
-    if (!clean || projs.length === 0) return;
-    let set = map.get(clean);
-    if (!set) {
-      set = new Set<string>();
-      map.set(clean, set);
-    }
-    for (const p of projs) set.add(p);
-  };
-
-  for (const link of suite.traceLinks) {
-    const projs = extractAllJiraProjectKeysFromLink(link);
-    if (projs.length === 0) continue;
-    addProjects(byKey, link.hazard?.key, projs);
-    addProjects(byKey, link.work?.key, projs);
-    addProjects(byKey, link.test?.testKey, projs);
-    addProjects(byKey, link.reverificationTaskKey, projs);
-    addProjects(bySpecOrPage, link.spec?.id, projs);
-    addProjects(bySpecOrPage, link.spec?.pageId, projs);
-    if (link.spec?.pageId) {
-      addProjects(bySpecOrPage, `page:${link.spec.pageId}`, projs);
-    }
-  }
-
-  return { byKey, bySpecOrPage };
-}
-
-function extractAuditEntryProjectKeys(entry: AuditLogEntry, index: LinkProjectIndex): Set<string> {
-  const projects = new Set<string>();
-  const details =
-    entry.details && typeof entry.details === 'object' ? entry.details : {};
-
-  const addIfProject = (val: unknown) => {
-    if (typeof val !== 'string') return;
-    const upper = val.trim().toUpperCase();
-    if (PROJECT_KEY_RE.test(upper)) {
-      projects.add(upper);
-    }
-  };
-
-  const addFromSpecOrPageKey = (val: unknown) => {
-    if (typeof val !== 'string') return;
-    const trimmed = val.trim();
-    if (!trimmed) return;
-    const mapped = index.bySpecOrPage.get(trimmed.toLowerCase());
-    if (mapped) {
-      for (const p of mapped) projects.add(p);
-    }
-  };
-
-  const addFromArtifactKey = (val: unknown) => {
-    if (typeof val !== 'string') return;
-    const trimmed = val.trim();
-    if (!trimmed) return;
-    const lower = trimmed.toLowerCase();
-    if (lower.startsWith('srs-') || lower.startsWith('page:') || lower.startsWith('unlinked-')) {
-      addFromSpecOrPageKey(trimmed);
-      return;
-    }
-    const directProj = extractJiraProjectKeyFromRawKey(trimmed);
-    if (directProj) projects.add(directProj);
-    const mapped = index.byKey.get(lower) || index.bySpecOrPage.get(lower);
-    if (mapped) {
-      for (const p of mapped) projects.add(p);
-    }
-  };
-
-  addIfProject(details.projectKey);
-  if (Array.isArray(details.projectKeys)) {
-    for (const pk of details.projectKeys) addIfProject(pk);
-  }
-  if (entry.action === 'SYNC_LIVE') {
-    addIfProject(entry.targetKey);
-  }
-
-  addFromArtifactKey(entry.targetKey);
-  for (const field of [
-    details.hazardKey,
-    details.workKey,
-    details.testKey,
-    details.previousIssueKey,
-    details.newIssueKey,
-    details.createdIssueKey,
-    details.issueKey,
-  ]) {
-    addFromArtifactKey(field);
-  }
-  for (const specField of [details.specId, details.pageId]) {
-    addFromSpecOrPageKey(specField);
-  }
-  for (const arrField of [details.affectedHazards, details.affectedWorkKeys, details.linkedIssueKeys]) {
-    if (Array.isArray(arrField)) {
-      for (const item of arrField) addFromArtifactKey(item);
-    }
-  }
-
-  return projects;
-}
-
-async function filterAuditEntriesForCaller(
-  caller: AuthorizedCaller,
-  entries: AuditLogEntry[],
-  rawSuite: ComplianceSummary
-): Promise<AuditLogEntry[]> {
-  if (entries.length === 0) return entries;
-
-  const runtimeActive = isForgeRuntime();
-  if (
-    runtimeActive &&
-    rawSuite.datasetMode === 'LIVE' &&
-    caller.extensionType.toLowerCase().startsWith('confluence:')
-  ) {
-    await verifyJiraIdentity(caller.accountId);
-  }
-
-  const index = buildLinkProjectIndex(rawSuite);
-  const projectPermCache = new Map<string, boolean>();
-  let globalBrowsePerm: boolean | undefined;
-
-  const isProjectAuthorized = async (projectKey: string): Promise<boolean> => {
-    const clean = projectKey.trim().toUpperCase();
-    if (caller.projectKey) {
-      if (clean === caller.projectKey) return true;
-      if (!runtimeActive) return false;
-    }
-    if (!runtimeActive) return true;
-    if (projectPermCache.has(clean)) {
-      return projectPermCache.get(clean) === true;
-    }
-    const allowed = await hasJiraBrowsePermissionForCaller({ projectKey: clean });
-    projectPermCache.set(clean, allowed);
-    return allowed;
-  };
-
-  const canBrowseGlobal = async (): Promise<boolean> => {
-    if (!runtimeActive) return !caller.projectKey;
-    if (globalBrowsePerm === undefined) {
-      globalBrowsePerm = await hasJiraBrowsePermissionForCaller(undefined);
-    }
-    return globalBrowsePerm;
-  };
-
-  const out: AuditLogEntry[] = [];
-  for (const entry of entries) {
-    if (entry.action === 'SEED_DEMO' || entry.action === 'DEMO_SIMULATION') {
-      if (rawSuite.datasetMode === 'DEMO' || (!caller.projectKey && !runtimeActive)) {
-        out.push(entry);
-      }
-      continue;
-    }
-
-    const entryProjects = extractAuditEntryProjectKeys(entry, index);
-
-    if (caller.projectKey) {
-      if (!entryProjects.has(caller.projectKey)) {
-        continue;
-      }
-      const foreignProjects = Array.from(entryProjects).filter((p) => p !== caller.projectKey);
-      if (foreignProjects.length === 0) {
-        out.push(entry);
-        continue;
-      }
-      // Omit multi-project entries entirely if the caller cannot browse all referenced projects so entryHash remains verifiable.
-      let allForeignAllowed = true;
-      for (const fp of foreignProjects) {
-        if (!(await isProjectAuthorized(fp))) {
-          allForeignAllowed = false;
-          break;
-        }
-      }
-      if (allForeignAllowed) {
-        out.push(entry);
-      }
-      continue;
-    }
-
-    // Global / Confluence context without explicit projectKey
-    if (!runtimeActive || rawSuite.datasetMode === 'DEMO') {
-      out.push(entry);
-      continue;
-    }
-
-    if (entryProjects.size === 0) {
-      if (await canBrowseGlobal()) {
-        out.push(entry);
-      }
-      continue;
-    }
-
-    let allAuthorized = true;
-    for (const p of entryProjects) {
-      if (!(await isProjectAuthorized(p))) {
-        allAuthorized = false;
-        break;
-      }
-    }
-    if (allAuthorized) {
-      out.push(entry);
-    }
-  }
-
-  return out;
-}
-
-async function assertOperatorAuthorizedForTarget(
-  req: ForgeResolverRequest<unknown> | undefined,
-  target: {
-    hazardKey?: string;
-    specId?: string;
-    workKey?: string;
-    linkId?: string;
-    testKey?: string;
-  }
-): Promise<void> {
-  const suite = await SeederService.getActiveComplianceSuite();
-  if (suite.datasetMode === 'DEMO') {
-    return;
-  }
-
-  const accountId = extractCallerAccountId(req);
-  const scope = normalizeAndValidateScope(req?.context?.extension, undefined);
-
-  const assertFallbackJiraOperator = async (derivedIssueKey?: string): Promise<void> => {
-    if (derivedIssueKey && ISSUE_KEY_RE.test(derivedIssueKey)) {
-      await assertAuthorizedOperator(req, { issueKey: derivedIssueKey });
-      return;
-    }
-    if (!isForgeRuntime()) {
-      return;
-    }
-    if (scope.effectiveProjectKey) {
-      if (scope.isConfluence) {
-        await assertAuthorizedOperator(req, { projectKey: scope.effectiveProjectKey });
-      }
-      return;
-    }
-    if (scope.isConfluence) {
-      if (!accountId) {
-        throw new Error('Unauthorized: Authenticated Atlassian accountId is required in resolver context.');
-      }
-      await verifyJiraIdentity(accountId);
-      await assertJiraOperatorPermissions();
-    }
-  };
-
-  let idx = -1;
-  if (target.testKey !== undefined || !target.hazardKey) {
-    const cleanLinkId = target.linkId?.trim();
-    const cleanHazard = target.hazardKey?.trim().toLowerCase();
-    const cleanTest = target.testKey?.trim().toLowerCase();
-    idx = cleanLinkId
-      ? suite.traceLinks.findIndex(
-          (l) =>
-            l.id === cleanLinkId &&
-            (!cleanHazard || l.hazard.key.toLowerCase() === cleanHazard) &&
-            (!cleanTest || l.test.testKey.toLowerCase() === cleanTest)
-        )
-      : suite.traceLinks.findIndex(
-          (l) =>
-            (cleanHazard && l.hazard.key.toLowerCase() === cleanHazard) ||
-            (cleanTest && l.test.testKey.toLowerCase() === cleanTest)
-        );
-  } else {
-    idx = resolveTraceLinkByHazard(
-      suite.traceLinks,
-      target.hazardKey,
-      target.specId,
-      target.workKey,
-      target.linkId
-    );
-  }
-
-  if (idx < 0) {
-    await assertFallbackJiraOperator();
-    return;
-  }
-
-  const targetLink = suite.traceLinks[idx];
-  const boundIssueKey = targetLink.work?.key?.trim().toUpperCase();
-  if (boundIssueKey && ISSUE_KEY_RE.test(boundIssueKey)) {
-    await assertAuthorizedOperator(req, { issueKey: boundIssueKey });
-    return;
-  }
-
-  const hazardDerivedKey = targetLink.hazard?.key?.trim().toUpperCase().replace(/^HAZ-/i, '');
-  await assertFallbackJiraOperator(
-    hazardDerivedKey && ISSUE_KEY_RE.test(hazardDerivedKey) ? hazardDerivedKey : undefined
-  );
-}
 
 function defineTypedResolver<K extends keyof MedTraceResolverMap & string>(
   key: K,
@@ -936,10 +111,13 @@ function defineTypedResolver<K extends keyof MedTraceResolverMap & string>(
 defineTypedResolver('getComplianceSuite', async (req) => {
   const caller = await assertAuthorizedReader(req);
   const rawSuite = await SeederService.getActiveComplianceSuite({ projectKey: caller.projectKey });
-  const suite = await LiveIngestionService.reconcileConfluenceSpecs(rawSuite, {
-    actorAccountId: caller.accountId,
-    projectKey: caller.projectKey,
-  });
+  const skipReconcile = req.payload?.skipReconcile === true;
+  const suite = skipReconcile
+    ? rawSuite
+    : await LiveIngestionService.reconcileConfluenceSpecs(rawSuite, {
+        actorAccountId: caller.accountId,
+        projectKey: caller.projectKey,
+      });
   return filterLiveSuiteForCaller(caller, suite);
 });
 
@@ -1087,7 +265,11 @@ defineTypedResolver('recordTestResult', async (req) => {
     normalizedEvidenceUrl = trimmedUrl === '' ? '' : validateHttpsUrl(trimmedUrl);
   }
 
-  await assertOperatorAuthorizedForTarget(req, { hazardKey, testKey, linkId });
+  await assertOperatorAuthorizedForTarget(req, {
+    hazardKey,
+    testKey: testKey ?? '',
+    linkId,
+  });
 
   const updated = await SeederService.recordTestResult({
     hazardKey,
@@ -1124,9 +306,7 @@ defineTypedResolver('signOffPart11', async (req) => {
   const attestationPhrase =
     typeof req.payload?.attestationPhrase === 'string' ? req.payload.attestationPhrase.trim() : '';
   const attestationConfirmed = req.payload?.attestationConfirmed === true;
-  const rawPayload = req.payload as Record<string, unknown> | undefined;
-  const attestationChecked =
-    req.payload?.attestationChecked === true || rawPayload?.passwordConfirmed === true;
+  const attestationChecked = req.payload?.attestationChecked === true;
 
   if (!attestationConfirmed || !attestationChecked) {
     throw new Error(
@@ -1144,17 +324,6 @@ defineTypedResolver('signOffPart11', async (req) => {
     );
   }
 
-  const clientPublicKeySpki =
-    typeof req.payload?.clientPublicKeySpki === 'string' &&
-    req.payload.clientPublicKeySpki.trim().length > 0
-      ? req.payload.clientPublicKeySpki.trim()
-      : undefined;
-  const clientSignatureBase64 =
-    typeof req.payload?.clientSignatureBase64 === 'string' &&
-    req.payload.clientSignatureBase64.trim().length > 0
-      ? req.payload.clientSignatureBase64.trim()
-      : undefined;
-
   // Derive signer role server-side rather than trusting client-supplied role/signedBy fields.
   const role = 'Authorized Atlassian User';
 
@@ -1165,13 +334,10 @@ defineTypedResolver('signOffPart11', async (req) => {
     specId,
     linkId,
     attestation: {
-      role,
       meaning,
       attestationPhrase,
       attestationConfirmed: true,
       attestationChecked: true,
-      ...(clientPublicKeySpki ? { clientPublicKeySpki } : {}),
-      ...(clientSignatureBase64 ? { clientSignatureBase64 } : {}),
     },
     actorAccountId: caller.accountId,
     authMethod: 'PART11_ATTESTATION',
@@ -1310,7 +476,14 @@ defineTypedResolver('simulateTransition', async (req) => {
   const caller = await assertAuthorizedReader(req, issueKey ? { issueKey } : undefined);
 
   if (!issueKey) {
-    const rawSuite = await SeederService.getActiveComplianceSuite({ projectKey: caller.projectKey });
+    let rawSuite = await SeederService.getActiveComplianceSuite({ projectKey: caller.projectKey });
+    if (isForgeRuntime() && rawSuite.datasetMode === 'LIVE' && rawSuite.initialized !== false) {
+      rawSuite = await LiveIngestionService.reconcileConfluenceSpecs(rawSuite, {
+        actorAccountId: caller.accountId,
+        projectKey: caller.projectKey,
+        allowAppFallback: true,
+      });
+    }
     const scopedSuite = await filterLiveSuiteForCaller(caller, rawSuite);
     if (scopedSuite.datasetMode === 'LIVE' || caller.projectKey) {
       const outcome = ComplianceEngine.evaluateIssueReleaseGate(undefined, scopedSuite);
@@ -1449,453 +622,6 @@ export async function jiraIssueUpdatedTrigger(
   event: JiraIssueUpdatedEvent
 ): Promise<JiraIssueUpdatedResult> {
   return LiveIngestionService.handleJiraIssueUpdated(event);
-}
-
-// =========================================================================
-// Authenticated MCP & CI/CD Webtrigger (HMAC + Nonce Replay Protection)
-// =========================================================================
-
-/**
- * Verifies an HMAC-SHA256 request signature over `timestamp.nonce.payload` using timing-safe comparison.
- * Fails closed (`false`) when `secret` is missing/empty or any header/input is malformed.
- */
-export function verifyHmacSignature(
-  payload: string,
-  timestamp: string,
-  signatureHeader: string,
-  secret: string,
-  nonce: string = ''
-): boolean {
-  if (typeof secret !== 'string' || secret.trim() === '') return false;
-  if (typeof payload !== 'string') return false;
-  if (typeof timestamp !== 'string' || !/^\d+$/.test(timestamp.trim())) return false;
-  if (typeof signatureHeader !== 'string' || !/^sha256=[a-f0-9]{64}$/i.test(signatureHeader.trim())) {
-    return false;
-  }
-
-  const cleanTimestamp = timestamp.trim();
-  const cleanNonce = typeof nonce === 'string' ? nonce : '';
-  const signingInput = cleanNonce
-    ? `${cleanTimestamp}.${cleanNonce}.${payload}`
-    : `${cleanTimestamp}.${payload}`;
-  const providedHex = signatureHeader.trim().slice('sha256='.length).toLowerCase();
-  const expectedHex = crypto
-    .createHmac('sha256', secret)
-    .update(signingInput)
-    .digest('hex');
-
-  const sigBuf = Buffer.from(providedHex, 'hex');
-  const expectedBuf = Buffer.from(expectedHex, 'hex');
-  if (sigBuf.length !== expectedBuf.length || sigBuf.length !== 32) {
-    return false;
-  }
-  return crypto.timingSafeEqual(sigBuf, expectedBuf);
-}
-
-/**
- * Atomically claims a request nonce through the active `NonceStore`, distinguishing replays from storage failures.
- */
-export async function claimNonceDetailed(
-  nonce: string,
-  store: NonceStore = getNonceStore(),
-  ttlMs: number = NONCE_TTL_MS
-): Promise<NonceClaimResult> {
-  const cleanNonce = typeof nonce === 'string' ? nonce.trim() : '';
-  if (!cleanNonce) return 'REPLAY';
-
-  // Keep the single `nonce:` prefix; NonceStore hashes the key once via `toKvsNonceKey`.
-  const storageKey = `nonce:${cleanNonce}`;
-  const now = Date.now();
-
-  if (typeof store.claimDetailed === 'function') {
-    return store.claimDetailed(storageKey, { consumedAt: now }, ttlMs);
-  }
-  if (typeof store.claim === 'function') {
-    try {
-      const claimed = await store.claim(storageKey, { consumedAt: now }, ttlMs);
-      return claimed ? 'CLAIMED' : 'REPLAY';
-    } catch (err: unknown) {
-      console.error('[MedTrace NonceStore] claim failed:', err instanceof Error ? err.message : 'Unknown error');
-      return 'STORAGE_ERROR';
-    }
-  }
-
-  const existing = await store.get(storageKey);
-  if (existing && now - existing.consumedAt < ttlMs) {
-    return 'REPLAY';
-  }
-  await store.set(storageKey, { consumedAt: now });
-  return 'CLAIMED';
-}
-
-/**
- * Atomically claims a request nonce and returns `true` when accepted or `false` on replay/rejection.
- */
-export async function claimNonce(
-  nonce: string,
-  store: NonceStore = getNonceStore(),
-  ttlMs: number = NONCE_TTL_MS
-): Promise<boolean> {
-  return (await claimNonceDetailed(nonce, store, ttlMs)) === 'CLAIMED';
-}
-
-export { getNonceStore, setNonceStore, createInMemoryNonceStore };
-
-function getHeader(
-  headers: Record<string, string | string[] | undefined> | undefined,
-  name: string
-): string | undefined {
-  if (!headers) return undefined;
-  const lower = name.toLowerCase();
-  for (const [k, v] of Object.entries(headers)) {
-    if (k.toLowerCase() === lower) {
-      if (Array.isArray(v)) {
-        return typeof v[0] === 'string' ? v[0] : undefined;
-      }
-      return typeof v === 'string' ? v : undefined;
-    }
-  }
-  return undefined;
-}
-
-function timingSafeSecretEquals(provided: string, expected: string): boolean {
-  const hashA = crypto.createHash('sha256').update(provided).digest();
-  const hashB = crypto.createHash('sha256').update(expected).digest();
-  return crypto.timingSafeEqual(hashA, hashB);
-}
-
-function jsonResponse(
-  statusCode: number,
-  payload: unknown,
-  extraHeaders?: Record<string, string[]>
-): WebtriggerResponse {
-  return {
-    statusCode,
-    headers: {
-      'Content-Type': ['application/json'],
-      ...(extraHeaders || {}),
-    },
-    body: JSON.stringify(payload),
-  };
-}
-
-/**
- * Forge webtrigger entrypoint for authenticated MCP/CI-CD requests.
- * Enforces fail-closed HMAC verification, asymmetric timestamp bounds `[-300s, +30s]`, single-use nonces,
- * strict HTTP method/body/action validation, LIVE-mode mutation guards, and sanitized error responses.
- */
-export async function mcpWebtriggerHandler(request: WebtriggerRequest): Promise<WebtriggerResponse> {
-  const configuredSecret = process.env.MEDTRACE_MCP_SECRET;
-  if (typeof configuredSecret !== 'string' || configuredSecret.trim() === '') {
-    return jsonResponse(500, {
-      error: 'Server misconfiguration: MEDTRACE_MCP_SECRET must be configured in Forge environment (fail-closed).',
-    });
-  }
-
-  const method =
-    request.method === undefined
-      ? request.body !== undefined
-        ? 'POST'
-        : 'GET'
-      : String(request.method).trim().toUpperCase();
-
-  if (method !== 'GET' && method !== 'POST') {
-    return jsonResponse(
-      405,
-      { error: `Method Not Allowed: ${method || '(empty)'}. Supported methods: GET, POST.` },
-      { Allow: ['GET, POST'] }
-    );
-  }
-
-  const rawTimestampHeader = getHeader(request.headers, 'x-medtrace-timestamp');
-  const timestampHeader = typeof rawTimestampHeader === 'string' ? rawTimestampHeader.trim() : '';
-  if (!timestampHeader) {
-    return jsonResponse(401, {
-      error: 'Unauthorized: Missing x-medtrace-timestamp header.',
-    });
-  }
-  if (!/^\d+$/.test(timestampHeader)) {
-    return jsonResponse(401, {
-      error: 'Unauthorized: Invalid x-medtrace-timestamp format (epoch milliseconds required).',
-    });
-  }
-
-  const rawNonce =
-    getHeader(request.headers, 'x-medtrace-nonce') ??
-    getHeader(request.headers, 'x-medtrace-event-id');
-  const nonceHeader = typeof rawNonce === 'string' ? rawNonce.trim() : '';
-  if (!nonceHeader || nonceHeader.length > 256) {
-    return jsonResponse(401, {
-      error: 'Unauthorized: Missing or invalid x-medtrace-nonce header (1-256 characters required).',
-    });
-  }
-
-  const signatureHeader = getHeader(request.headers, 'x-medtrace-signature')?.trim();
-  if (!signatureHeader || !/^sha256=[a-f0-9]{64}$/i.test(signatureHeader)) {
-    return jsonResponse(401, {
-      error: 'Unauthorized: Missing or invalid x-medtrace-signature header.',
-    });
-  }
-
-  const suppliedKey = getHeader(request.headers, 'x-medtrace-key');
-  if (suppliedKey !== undefined && !timingSafeSecretEquals(suppliedKey, configuredSecret)) {
-    return jsonResponse(401, { error: 'Unauthorized: Invalid MedTrace MCP key.' });
-  }
-
-  const reqTime = Number(timestampHeader);
-  const now = Date.now();
-  if (!Number.isSafeInteger(reqTime)) {
-    return jsonResponse(401, { error: 'Unauthorized: Invalid x-medtrace-timestamp value.' });
-  }
-  if (now - reqTime > MAX_TIMESTAMP_AGE_MS || reqTime - now > MAX_FUTURE_SKEW_MS) {
-    return jsonResponse(401, {
-      error: 'Unauthorized: Request timestamp outside allowed replay window.',
-    });
-  }
-
-  let rawBody: string;
-  if (typeof request.body === 'string') {
-    rawBody = request.body;
-  } else if (request.body === undefined || request.body === null) {
-    rawBody = '';
-  } else if (!isForgeRuntime() && typeof request.body === 'object') {
-    rawBody = JSON.stringify(request.body);
-  } else {
-    return jsonResponse(401, { error: 'Unauthorized: Malformed request body.' });
-  }
-
-  if (!verifyHmacSignature(rawBody, timestampHeader, signatureHeader, configuredSecret, nonceHeader)) {
-    return jsonResponse(401, { error: 'Unauthorized: Invalid HMAC-SHA256 request signature.' });
-  }
-
-  const claimOutcome = await claimNonceDetailed(nonceHeader, getNonceStore(), NONCE_TTL_MS);
-  if (claimOutcome === 'REPLAY') {
-    return jsonResponse(409, {
-      error: 'Conflict: Replay attack detected — nonce has already been consumed within TTL window.',
-    });
-  }
-  if (claimOutcome === 'STORAGE_ERROR') {
-    return jsonResponse(500, {
-      error: 'Internal Server Error: Replay protection store unavailable.',
-    });
-  }
-
-  try {
-    if (method === 'GET') {
-      if (rawBody !== '') {
-        throw new WebtriggerHttpError(400, 'Bad Request: GET requests must not include a request body.');
-      }
-
-      const rawQueryAction =
-        (Array.isArray(request.queryParameters?.action)
-          ? request.queryParameters?.action[0]
-          : request.queryParameters?.action) ?? request.query?.action;
-      const cleanQueryAction =
-        typeof rawQueryAction === 'string' && rawQueryAction.trim().length > 0
-          ? rawQueryAction.trim()
-          : undefined;
-      if (cleanQueryAction && cleanQueryAction !== 'status') {
-        throw new WebtriggerHttpError(
-          400,
-          `Bad Request: Unsupported GET query action "${cleanQueryAction}". Use POST for data queries.`
-        );
-      }
-
-      const suite = await SeederService.getActiveComplianceSuite();
-      const { traceLinks: _traceLinks, ...statusSummary } = suite;
-      return jsonResponse(200, statusSummary);
-    }
-
-    if (rawBody.trim() === '') {
-      throw new WebtriggerHttpError(400, 'Bad Request: POST requests must include a JSON object body.');
-    }
-
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(rawBody);
-    } catch {
-      throw new WebtriggerHttpError(400, 'Bad Request: Malformed JSON payload.');
-    }
-
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-      throw new WebtriggerHttpError(400, 'Bad Request: JSON payload must be a plain object.');
-    }
-
-    const body = parsed as Record<string, unknown>;
-    const action = typeof body.action === 'string' ? body.action.trim() : '';
-    if (!action || !ALLOWED_WEBTRIGGER_POST_ACTIONS.has(action)) {
-      throw new WebtriggerHttpError(
-        400,
-        `Bad Request: Unknown or missing webtrigger action "${action || '(empty)'}".`
-      );
-    }
-
-    switch (action) {
-      case 'status': {
-        const suite = await SeederService.getActiveComplianceSuite();
-        const { traceLinks: _traceLinks, ...statusSummary } = suite;
-        return jsonResponse(200, statusSummary);
-      }
-
-      case 'get-hazard-lineage': {
-        const hazardKey = typeof body.hazardKey === 'string' ? body.hazardKey.trim() : '';
-        const issueKey = typeof body.issueKey === 'string' ? body.issueKey.trim() : '';
-        if (!hazardKey && !issueKey) {
-          const suite = await SeederService.getActiveComplianceSuite();
-          const { traceLinks: _traceLinks, ...statusSummary } = suite;
-          return jsonResponse(200, statusSummary);
-        }
-        const result = await McpToolService.getHazardLineage({
-          hazardKey: hazardKey || undefined,
-          issueKey: issueKey || undefined,
-        });
-        return jsonResponse(200, result);
-      }
-
-      case 'seed': {
-        const active = await SeederService.getActiveComplianceSuite();
-        if (active.datasetMode === 'LIVE') {
-          throw new WebtriggerHttpError(
-            403,
-            'Forbidden: Cannot overwrite a LIVE compliance suite with demo data via webtrigger.'
-          );
-        }
-        const summary = await SeederService.seedEnterpriseDemoSuite(
-          'service:mcp-webtrigger',
-          'HMAC_WEBTRIGGER'
-        );
-        return jsonResponse(200, { success: true, summary });
-      }
-
-      case 'remediate': {
-        const active = await SeederService.getActiveComplianceSuite();
-        if (active.datasetMode === 'LIVE') {
-          throw new WebtriggerHttpError(
-            403,
-            'Forbidden: Cannot auto-remediate gaps on a LIVE compliance suite via webtrigger.'
-          );
-        }
-        const hazardKey = typeof body.hazardKey === 'string' ? body.hazardKey.trim() : '';
-        if (!hazardKey) {
-          throw new WebtriggerHttpError(400, 'Bad Request: hazardKey is required for remediate action.');
-        }
-        const exists = active.traceLinks.some(
-          (link) => link.hazard.key.toLowerCase() === hazardKey.toLowerCase()
-        );
-        if (!exists) {
-          throw new WebtriggerHttpError(
-            404,
-            `Not Found: Hazard ${hazardKey} not found in active compliance suite; nothing was remediated.`
-          );
-        }
-        const summary = await SeederService.remediateClassCGap(hazardKey, 'service:mcp-webtrigger', {
-          simulate: body.simulate === true,
-          attestationConfirmed: body.attestationConfirmed === true,
-          meaning: typeof body.meaning === 'string' ? body.meaning.trim() : undefined,
-          authMethod: 'HMAC_WEBTRIGGER',
-        });
-        return jsonResponse(200, { success: true, summary });
-      }
-
-      case 'verify': {
-        const result = await McpToolService.verifyIecCompliance({
-          prDiff: typeof body.prDiff === 'string' ? body.prDiff : '',
-          componentName: typeof body.componentName === 'string' ? body.componentName : undefined,
-          issueKey:
-            typeof body.issueKey === 'string' && body.issueKey.trim() !== ''
-              ? body.issueKey.trim()
-              : undefined,
-        });
-        return jsonResponse(200, result);
-      }
-
-      case 'verify-release-gate': {
-        const issueKey =
-          typeof body.issueKey === 'string' && body.issueKey.trim() !== ''
-            ? body.issueKey.trim()
-            : undefined;
-        const requireLiveMode = body.requireLiveMode === true;
-        const suite = await SeederService.getActiveComplianceSuite(
-          issueKey ? { issueKeyFilter: issueKey } : undefined
-        );
-
-        if (
-          requireLiveMode &&
-          (suite.datasetMode !== 'LIVE' || suite.initialized === false || suite.totalHazards === 0)
-        ) {
-          return jsonResponse(403, {
-            result: false,
-            releaseBlocked: true,
-            datasetMode: suite.datasetMode,
-            initialized: suite.initialized ?? false,
-            errorMessage:
-              'Safety Gate Blocked: Release gate requires an initialized LIVE compliance suite (DEMO or uninitialized suites cannot authorize clinical release).',
-          });
-        }
-
-        const isInitialized =
-          suite.initialized !== false &&
-          Array.isArray(suite.traceLinks) &&
-          !(suite.traceLinks.length === 0 && (!issueKey || (suite.totalHazards ?? 0) === 0));
-        const cleanUpper = issueKey ? issueKey.toUpperCase() : '';
-        const matchedInSuite =
-          Boolean(cleanUpper) &&
-          suite.traceLinks.some(
-            (l) =>
-              (l.work?.key || '').toUpperCase() === cleanUpper ||
-              (l.hazard?.key || '').toUpperCase() === cleanUpper
-          );
-        const safetyProbe =
-          issueKey && isInitialized && !matchedInSuite
-            ? await probeUnsyncedSafetyIssue(issueKey)
-            : undefined;
-
-        const gate = ComplianceEngine.evaluateIssueReleaseGate(issueKey, suite, safetyProbe);
-        return jsonResponse(gate.result ? 200 : 403, {
-          ...gate,
-          evaluatedIssueKey: issueKey,
-        });
-      }
-
-      case 'validate':
-      case 'simulate_transition': {
-        const issueKey =
-          typeof body.issueKey === 'string' && body.issueKey.trim() !== ''
-            ? body.issueKey.trim()
-            : undefined;
-        const transitionName =
-          typeof body.transitionName === 'string' && body.transitionName.trim() !== ''
-            ? body.transitionName.trim()
-            : 'Done';
-
-        const outcome = await workflowValidatorHandler(
-          issueKey
-            ? { issue: { key: issueKey }, transition: { name: transitionName } }
-            : { transition: { name: transitionName } }
-        );
-        return jsonResponse(200, {
-          ...outcome,
-          evaluatedIssueKey: issueKey,
-        });
-      }
-
-      default:
-        throw new WebtriggerHttpError(400, `Bad Request: Unsupported action "${action}".`);
-    }
-  } catch (err: unknown) {
-    if (err instanceof WebtriggerHttpError) {
-      return jsonResponse(err.statusCode, { error: err.publicMessage });
-    }
-    const errorId = crypto.randomUUID();
-    console.error(
-      `[MedTrace MCP Webtrigger] Error (${errorId}):`,
-      err instanceof Error ? err.message : 'Unknown error'
-    );
-    return jsonResponse(500, {
-      error: 'Internal Server Error: Request could not be processed.',
-      errorId,
-    });
-  }
 }
 
 export { rovoActionHandler, workflowValidatorHandler };

@@ -8,13 +8,22 @@ import { X, ShieldCheck, ShieldAlert, RefreshCw, ScrollText } from 'lucide-react
 interface AuditLogModalProps {
   isOpen: boolean;
   onClose: () => void;
+  projectKey?: string;
+  datasetMode?: 'DEMO' | 'LIVE';
 }
 
 const AUDIT_PAGE_SIZE = 100;
 
-export const AuditLogModal: React.FC<AuditLogModalProps> = ({ isOpen, onClose }) => {
+export const AuditLogModal: React.FC<AuditLogModalProps> = ({
+  isOpen,
+  onClose,
+  projectKey,
+  datasetMode,
+}) => {
   const dialogRef = useRef<HTMLDivElement>(null);
   const requestSeqRef = useRef(0);
+  const cleanProjectKey = projectKey?.trim().toUpperCase() || undefined;
+  const isProjectScoped = Boolean(cleanProjectKey && datasetMode === 'LIVE');
 
   const [entries, setEntries] = useState<AuditLogEntry[]>([]);
   const [verification, setVerification] = useState<AuditChainVerification | null>(null);
@@ -39,6 +48,12 @@ export const AuditLogModal: React.FC<AuditLogModalProps> = ({ isOpen, onClose })
       const newestFirst = Array.isArray(logRes) ? [...logRes].reverse() : [];
       setEntries(newestFirst);
       setVerification(verifyRes || null);
+      if (
+        newestFirst.length < AUDIT_PAGE_SIZE &&
+        (!isProjectScoped || (verifyRes?.totalEntries ?? 0) <= 1000)
+      ) {
+        setHasExhaustedOlder(true);
+      }
     } catch (err) {
       if (reqId !== requestSeqRef.current) return;
       setError(
@@ -109,7 +124,11 @@ export const AuditLogModal: React.FC<AuditLogModalProps> = ({ isOpen, onClose })
 
   const oldestLoadedSeq =
     entries.length > 0 ? entries.reduce((min, item) => Math.min(min, item.seq), entries[0].seq) : null;
-  const isTruncated = Boolean(verification && verification.totalEntries > entries.length);
+  const isTruncated = Boolean(
+    verification &&
+      verification.totalEntries > entries.length &&
+      (!isProjectScoped || !hasExhaustedOlder)
+  );
   const canLoadOlder =
     isTruncated && !hasExhaustedOlder && oldestLoadedSeq !== null && oldestLoadedSeq > 1;
 
@@ -254,6 +273,26 @@ export const AuditLogModal: React.FC<AuditLogModalProps> = ({ isOpen, onClose })
             </div>
           )}
 
+          {isProjectScoped && verification && !isTruncated && (
+            <div
+              role="status"
+              style={{
+                marginBottom: 14,
+                padding: '10px 12px',
+                borderRadius: 6,
+                background: 'var(--mt-brand-subtle-bg, #deebff)',
+                border: '1px solid var(--mt-border-subtle)',
+                color: 'var(--mt-text-primary)',
+                fontSize: 12,
+                fontWeight: 600,
+              }}
+            >
+              Showing all {entries.length} audit {entries.length === 1 ? 'entry' : 'entries'} for
+              project {cleanProjectKey} (global ledger holds {verification.totalEntries} chained
+              entries; hash-chain verification covers the full ledger).
+            </div>
+          )}
+
           {isTruncated && verification && (
             <div
               role="status"
@@ -268,8 +307,9 @@ export const AuditLogModal: React.FC<AuditLogModalProps> = ({ isOpen, onClose })
                 fontWeight: 600,
               }}
             >
-              Showing {entries.length} of {verification.totalEntries} audit entries. Hash-chain
-              verification above covers all {verification.totalEntries} entries.
+              {isProjectScoped
+                ? `Showing ${entries.length} audit entries for project ${cleanProjectKey} (global ledger holds ${verification.totalEntries} entries; click Load Older Entries for earlier pages).`
+                : `Showing ${entries.length} of ${verification.totalEntries} audit entries. Hash-chain verification above covers all ${verification.totalEntries} entries.`}
             </div>
           )}
 

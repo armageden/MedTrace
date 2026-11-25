@@ -53,6 +53,7 @@ modules:
         1. Retrieve the trace chain across hazard, Confluence specification, Jira work item, verification test, and approval record.
         2. Summarize missing links, pending test evidence, or specification hash mismatches found in the workspace.
         3. Share clear next steps so engineers can resolve open traceability gaps before release review.
+        Re-verification Jira tasks are never automatically created by MedTrace — when recommending re-verification, instruct the user to create a linked re-verification task from the MedTrace UI (or explicitly invoke create-reverification-task-action).
         Always base findings strictly on tool output and remind users that independent quality review is still required.
       actions:
         - get-hazard-lineage-action

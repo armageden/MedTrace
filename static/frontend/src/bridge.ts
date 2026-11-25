@@ -1,5 +1,6 @@
 import type { FullContext } from '@forge/bridge';
 import type { MedTraceResolverMap } from './types';
+import { isPlainRecord } from './utils';
 
 type ForgeInvokePayload = Parameters<typeof import('@forge/bridge').invoke>[1];
 
@@ -81,14 +82,6 @@ export async function enableForgeTheme(): Promise<boolean> {
   }
 }
 
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-    return false;
-  }
-  const proto = Object.getPrototypeOf(value);
-  return proto === Object.prototype || proto === null;
-}
-
 /**
  * Unwraps Forge `{ body, metadata }` response envelopes strictly: only unwraps when
  * `response` is a plain object whose own keys are a non-empty subset of `['body', 'metadata']`
@@ -96,7 +89,7 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
  * other properties from being stripped.
  */
 export function unwrapInvokeResponse<T>(response: unknown): T {
-  if (!isPlainObject(response)) {
+  if (!isPlainRecord(response)) {
     return response as T;
   }
   const keys = Object.keys(response);

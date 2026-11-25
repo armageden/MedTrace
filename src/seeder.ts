@@ -3,8 +3,8 @@ import { kvs } from '@forge/kvs';
 import { AuditLogService } from './audit-log';
 import { ComplianceEngine } from './compliance-engine';
 import {
-  canonicalJsonStringify,
   isKvsConflictError,
+  JIRA_ISSUE_KEY_RE,
   measureJsonBytes,
   sanitizeKvsKeySegment,
   sha256Hex,
@@ -26,7 +26,6 @@ import {
   buildSignedBaselineRecord,
   cloneJsonValue,
   getBaselineKeyCandidates,
-  LEGACY_STORAGE_KEY,
   LINK_KEY_PREFIX,
   MAX_AUDIT_DETAILS_BYTES,
   MAX_TRANSACT_BYTES,
@@ -196,19 +195,17 @@ export interface CreateReverificationTaskResult {
   summary: ComplianceSummary;
 }
 
-const JIRA_ISSUE_KEY_PATTERN = /^[A-Z][A-Z0-9_]{0,20}-\d+$/;
-
 function extractProjectKeyFromTraceLink(link: TraceLink): string | undefined {
   const workKey = link.work?.key?.trim().toUpperCase();
-  if (workKey && JIRA_ISSUE_KEY_PATTERN.test(workKey)) {
+  if (workKey && JIRA_ISSUE_KEY_RE.test(workKey)) {
     return workKey.split('-')[0];
   }
   const hazDerived = link.hazard?.key?.trim().toUpperCase().replace(/^HAZ-/i, '');
-  if (hazDerived && JIRA_ISSUE_KEY_PATTERN.test(hazDerived)) {
+  if (hazDerived && JIRA_ISSUE_KEY_RE.test(hazDerived)) {
     return hazDerived.split('-')[0];
   }
   const testDerived = link.test?.testKey?.trim().toUpperCase().replace(/^TEST-/i, '');
-  if (testDerived && JIRA_ISSUE_KEY_PATTERN.test(testDerived)) {
+  if (testDerived && JIRA_ISSUE_KEY_RE.test(testDerived)) {
     return testDerived.split('-')[0];
   }
   return undefined;
@@ -223,10 +220,6 @@ export class SeederService {
   private static inMemoryVersion = 0;
   private static inMemorySignedSpecs = new Map<string, SignedSpecBaseline>();
   private static inMemoryLiveBackup: LiveSuiteBackupSnapshot | null = null;
-  private static lastKvsShardState: {
-    version: number;
-    entriesByLogicalId: Map<string, { key: string; contentHash: string }>;
-  } | null = null;
 
   /**
    * Resets volatile in-memory suite and baseline caches (used by local unit tests).
@@ -236,7 +229,6 @@ export class SeederService {
     this.inMemoryVersion = 0;
     this.inMemorySignedSpecs.clear();
     this.inMemoryLiveBackup = null;
-    this.lastKvsShardState = null;
   }
 
   /**
@@ -248,28 +240,6 @@ export class SeederService {
     }
     const stored = await kvs.get<LiveSuiteBackupSnapshot>(LIVE_BACKUP_KEY);
     return stored ?? null;
-  }
-
-  private static computeTraceLinkHash(link: TraceLink): string {
-    return sha256Hex(canonicalJsonStringify(link));
-  }
-
-  private static buildLogicalLinkId(link: TraceLink): string {
-    return link.id || ComplianceEngine.buildTraceLinkId(link.hazard.key, link.spec.id, link.work?.key);
-  }
-
-  private static recordKvsShardState(
-    version: number,
-    entries: Array<{ key: string; value: TraceLink }>
-  ): void {
-    const entriesByLogicalId = new Map<string, { key: string; contentHash: string }>();
-    for (const { key, value } of entries) {
-      entriesByLogicalId.set(this.buildLogicalLinkId(value), {
-        key,
-        contentHash: this.computeTraceLinkHash(value),
-      });
-    }
-    this.lastKvsShardState = { version, entriesByLogicalId };
   }
 
   /**
@@ -323,48 +293,31 @@ export class SeederService {
   }
 
   /**
-   * Retrieves a persisted Part 11 spec baseline. When `hazardKey` is supplied, reads strictly
-   * from composite `(hazardKey, specOrPageId)` storage so unrelated hazards stay isolated.
+   * Retrieves a persisted Part 11 spec baseline scoped by composite `(hazardKey, specOrPageId)`.
    */
-  static async getSignedSpecBaseline(specOrPageId: string, hazardKey?: string): Promise<SignedSpecBaseline | undefined> {
+  static async getSignedSpecBaseline(
+    specOrPageId: string,
+    hazardKey?: string
+  ): Promise<SignedSpecBaseline | undefined> {
     const cleanId = (specOrPageId || '').trim();
-    if (!cleanId) return undefined;
-
     const cleanHaz = hazardKey?.trim();
-    if (cleanHaz) {
-      const compKey = sanitizeKvsKeySegment(`${cleanHaz}--${cleanId}`, 180);
-      return await this.readBaselineEntry(compKey);
-    }
+    if (!cleanId || !cleanHaz) return undefined;
 
-    const unscopedKey = sanitizeKvsKeySegment(cleanId, 180);
-    return await this.readBaselineEntry(unscopedKey);
+    const compKey = sanitizeKvsKeySegment(`${cleanHaz}--${cleanId}`, 180);
+    return await this.readBaselineEntry(compKey);
   }
 
   /**
-   * Persists a Part 11 signed spec baseline under composite `(hazardKey, specId)` keys when
-   * `hazardKey` is present, plus legacy unscoped keys when unscoped or unowned.
+   * Persists a Part 11 signed spec baseline under composite `(hazardKey, specId)` keys.
    */
   static async setSignedSpecBaseline(baseline: SignedSpecBaseline): Promise<void> {
-    const { compositeKeys, unscopedKeys } = getBaselineKeyCandidates(
+    const { compositeKeys } = getBaselineKeyCandidates(
       baseline.specId,
       baseline.pageId,
       baseline.hazardKey
     );
 
-    if (compositeKeys.length > 0) {
-      for (const key of compositeKeys) {
-        await this.writeBaselineEntry(key, baseline);
-      }
-      for (const key of unscopedKeys) {
-        const existing = await this.readBaselineEntry(key);
-        if (!existing || !existing.hazardKey || existing.hazardKey === baseline.hazardKey) {
-          await this.writeBaselineEntry(key, baseline);
-        }
-      }
-      return;
-    }
-
-    for (const key of unscopedKeys) {
+    for (const key of compositeKeys) {
       await this.writeBaselineEntry(key, baseline);
     }
   }
@@ -375,14 +328,11 @@ export class SeederService {
    */
   static async invalidateSignedSpecBaselines(input: InvalidateSignedSpecBaselineInput): Promise<void> {
     const at = input.invalidatedAt || new Date().toISOString();
-    const { compositeKeys, unscopedKeys } = getBaselineKeyCandidates(input.specId, input.pageId, input.hazardKey);
+    const { compositeKeys } = getBaselineKeyCandidates(input.specId, input.pageId, input.hazardKey);
 
-    const updateIfMatches = async (shortKey: string, requireMatchingHazard: boolean): Promise<void> => {
+    const updateIfMatches = async (shortKey: string): Promise<void> => {
       const existing = await this.readBaselineEntry(shortKey);
       if (!existing) return;
-      if (requireMatchingHazard && input.hazardKey && existing.hazardKey && existing.hazardKey !== input.hazardKey) {
-        return;
-      }
       const updated: SignedSpecBaseline = {
         ...existing,
         invalidatedAt: at,
@@ -394,15 +344,12 @@ export class SeederService {
 
     if (compositeKeys.length > 0) {
       for (const key of compositeKeys) {
-        await updateIfMatches(key, false);
-      }
-      for (const key of unscopedKeys) {
-        await updateIfMatches(key, true);
+        await updateIfMatches(key);
       }
       return;
     }
 
-    // Spec-wide invalidation when hazardKey was omitted: update composite baselines of linked hazards + unscoped
+    // Spec-wide invalidation when hazardKey was omitted: update composite baselines of linked hazards
     const { summary } = await this.getSuiteWithVersion();
     const linkedHazards = new Set<string>();
     for (const link of summary.traceLinks) {
@@ -413,11 +360,8 @@ export class SeederService {
     for (const haz of linkedHazards) {
       const candidates = getBaselineKeyCandidates(input.specId, input.pageId, haz);
       for (const key of candidates.compositeKeys) {
-        await updateIfMatches(key, false);
+        await updateIfMatches(key);
       }
-    }
-    for (const key of unscopedKeys) {
-      await updateIfMatches(key, false);
     }
   }
 
@@ -428,7 +372,6 @@ export class SeederService {
       if (!target) continue;
       const candidates = getBaselineKeyCandidates(target.specId, target.pageId, target.hazardKey);
       for (const k of candidates.compositeKeys) keys.add(k);
-      for (const k of candidates.unscopedKeys) keys.add(k);
     }
     return Array.from(keys);
   }
@@ -541,40 +484,18 @@ export class SeederService {
         for (const oldKey of smallObsoleteKeys) tx.delete(oldKey);
         await tx.execute();
         committed = true;
-        this.recordKvsShardState(nextVersion, unversionedLinkItems);
         return cloneJsonValue(enrichedSummary);
       }
 
-      const canReusePriorShards =
-        this.lastKvsShardState !== null &&
-        currentVersion > 0 &&
-        this.lastKvsShardState.version === currentVersion;
-
       const versionedLinkKeys: string[] = [];
       const versionedLinkItemsToWrite: Array<{ key: string; value: TraceLink }> = [];
-      const allVersionedLinkEntries: Array<{ key: string; value: TraceLink }> = [];
 
       for (const link of enrichedSummary.traceLinks) {
-        const logicalId = this.buildLogicalLinkId(link);
-        const contentHash = this.computeTraceLinkHash(link);
-        const prior = canReusePriorShards
-          ? this.lastKvsShardState!.entriesByLogicalId.get(logicalId)
-          : undefined;
-        if (
-          prior &&
-          prior.contentHash === contentHash &&
-          prior.key.startsWith(`${LINK_KEY_PREFIX}v`) &&
-          previousKeys.has(prior.key)
-        ) {
-          versionedLinkKeys.push(prior.key);
-          allVersionedLinkEntries.push({ key: prior.key, value: link });
-          continue;
-        }
-
+        const logicalId =
+          link.id || ComplianceEngine.buildTraceLinkId(link.hazard.key, link.spec.id, link.work?.key);
         const key = buildSafeKvsKey(`${LINK_KEY_PREFIX}v${nextVersion}:`, logicalId);
         versionedLinkKeys.push(key);
         versionedLinkItemsToWrite.push({ key, value: link });
-        allVersionedLinkEntries.push({ key, value: link });
       }
 
       const { meta, metaShardItems } = buildMetaAndShardItems(
@@ -605,7 +526,6 @@ export class SeederService {
       ]);
       const obsoleteKeys = Array.from(previousKeys).filter((k) => !newKeySet.has(k));
       await batchDeleteBestEffort(obsoleteKeys);
-      this.recordKvsShardState(nextVersion, allVersionedLinkEntries);
       return cloneJsonValue(enrichedSummary);
     } finally {
       if (!committed) {
@@ -645,10 +565,6 @@ export class SeederService {
     const linkMap = await batchGetStrict<TraceLink>(resolvedLinkKeys);
     const traceLinks = resolvedLinkKeys.map((key) => linkMap.get(key)!);
     const auditHead = await AuditLogService.getHead();
-    this.recordKvsShardState(
-      meta.version ?? 0,
-      resolvedLinkKeys.map((key) => ({ key, value: linkMap.get(key)! }))
-    );
 
     return {
       version: meta.version ?? 0,
@@ -669,6 +585,9 @@ export class SeederService {
         lastAuditTimestamp: meta.lastAuditTimestamp,
         ...(meta.lastSyncedAt ? { lastSyncedAt: meta.lastSyncedAt } : {}),
         ...(meta.syncIncomplete === true ? { syncIncomplete: true } : {}),
+        ...(meta.incompleteProjectKeys && meta.incompleteProjectKeys.length > 0
+          ? { incompleteProjectKeys: meta.incompleteProjectKeys }
+          : {}),
         storageFormat: 'SHARDED_V2',
         auditEntryCount: auditHead.lastSeq,
         auditHeadHash: auditHead.headHash,
@@ -738,8 +657,12 @@ export class SeederService {
         }
       }
       if (suiteSaved) {
-        const rollbackExpectedVersion = params.expectedVersion + 1;
-        await this.saveComplianceSuite(previousSuiteSnapshot, rollbackExpectedVersion);
+        try {
+          const rollbackExpectedVersion = params.expectedVersion + 1;
+          await this.saveComplianceSuite(previousSuiteSnapshot, rollbackExpectedVersion);
+        } catch (rollbackErr) {
+          console.error('[MedTrace] Failed to roll back compliance suite after failed commit:', rollbackErr);
+        }
       }
       throw err;
     }
@@ -1071,7 +994,16 @@ export class SeederService {
         (link.work?.key || '').trim().toUpperCase().startsWith(prefix) ||
         (link.hazard?.key || '').trim().toUpperCase().startsWith(prefix)
     );
-    if (filteredLinks.length === suite.traceLinks.length) {
+    const hasProjectIncompleteList =
+      Array.isArray(suite.incompleteProjectKeys) && suite.incompleteProjectKeys.length > 0;
+    const projectSyncIncomplete = hasProjectIncompleteList
+      ? suite.incompleteProjectKeys!.includes(cleanProject)
+      : suite.syncIncomplete;
+
+    if (
+      filteredLinks.length === suite.traceLinks.length &&
+      Boolean(projectSyncIncomplete) === Boolean(suite.syncIncomplete)
+    ) {
       return suite;
     }
 
@@ -1085,7 +1017,10 @@ export class SeederService {
         auditHeadHash: suite.auditHeadHash,
         initialized: true,
         lastSyncedAt: suite.lastSyncedAt,
-        syncIncomplete: suite.syncIncomplete,
+        syncIncomplete: projectSyncIncomplete,
+        ...(hasProjectIncompleteList && suite.incompleteProjectKeys!.includes(cleanProject)
+          ? { incompleteProjectKeys: [cleanProject] }
+          : {}),
       }
     );
   }
@@ -1106,7 +1041,8 @@ export class SeederService {
       const filteredLinks = this.inMemorySuite.traceLinks.filter(
         (link) =>
           (link.work?.key || '').trim().toUpperCase() === cleanKey ||
-          (link.hazard?.key || '').trim().toUpperCase() === cleanKey
+          (link.hazard?.key || '').trim().toUpperCase() === cleanKey ||
+          (link.test?.testKey || '').trim().toUpperCase() === cleanKey
       );
       return cloneJsonValue({
         ...this.inMemorySuite,
@@ -1184,6 +1120,9 @@ export class SeederService {
       lastAuditTimestamp: meta.lastAuditTimestamp,
       ...(meta.lastSyncedAt ? { lastSyncedAt: meta.lastSyncedAt } : {}),
       ...(meta.syncIncomplete === true ? { syncIncomplete: true } : {}),
+      ...(meta.incompleteProjectKeys && meta.incompleteProjectKeys.length > 0
+        ? { incompleteProjectKeys: meta.incompleteProjectKeys }
+        : {}),
       storageFormat: 'SHARDED_V2',
       auditEntryCount: auditHead.lastSeq,
       auditHeadHash: auditHead.headHash,
@@ -1203,7 +1142,8 @@ export class SeederService {
       traceLinks: suite.traceLinks.filter(
         (link) =>
           (link.work?.key || '').trim().toUpperCase() === cleanKey ||
-          (link.hazard?.key || '').trim().toUpperCase() === cleanKey
+          (link.hazard?.key || '').trim().toUpperCase() === cleanKey ||
+          (link.test?.testKey || '').trim().toUpperCase() === cleanKey
       ),
     };
   }
@@ -1236,24 +1176,6 @@ export class SeederService {
     if (sharded) {
       return this.filterSuiteLinksByIssueKey(
         this.applyProjectKeyFilter(sharded.summary, options?.projectKey),
-        options?.issueKeyFilter
-      );
-    }
-
-    const legacy = await kvs.get<ComplianceSummary>(LEGACY_STORAGE_KEY);
-    if (legacy && Array.isArray(legacy.traceLinks) && legacy.traceLinks.length > 0) {
-      const migrated = await this.saveComplianceSuite(
-        {
-          ...legacy,
-          datasetMode: legacy.datasetMode ?? 'LIVE',
-          initialized: true,
-          storageFormat: 'SHARDED_V2',
-        },
-        0
-      );
-      await kvs.delete(LEGACY_STORAGE_KEY);
-      return this.filterSuiteLinksByIssueKey(
-        this.applyProjectKeyFilter(migrated, options?.projectKey),
         options?.issueKeyFilter
       );
     }
@@ -1362,7 +1284,12 @@ export class SeederService {
       current.traceLinks,
       current.datasetMode ?? 'LIVE',
       current.projectName,
-      { initialized: current.initialized ?? true, lastSyncedAt: current.lastSyncedAt, syncIncomplete: current.syncIncomplete }
+      {
+        initialized: current.initialized ?? true,
+        lastSyncedAt: current.lastSyncedAt,
+        syncIncomplete: current.syncIncomplete,
+        incompleteProjectKeys: current.incompleteProjectKeys,
+      }
     );
 
     return await this.commitSuiteMutation({
@@ -1419,51 +1346,97 @@ export class SeederService {
 
     const targetLink = current.traceLinks[idx];
     const previousStatus = targetLink.test.status;
-    targetLink.test.status = params.status;
-    targetLink.test.executionDate = params.executionDate?.trim() || new Date().toISOString();
-    targetLink.test.recordedBy = params.actorAccountId.trim();
+    const resolvedTestKeyLower = (targetLink.test?.testKey || cleanTest || '').trim().toLowerCase();
+    const executionDate = params.executionDate?.trim() || new Date().toISOString();
+    const recordedBy = params.actorAccountId.trim();
 
+    let validatedEvidenceUrl: string | undefined;
+    let shouldSetEvidence = false;
+    let shouldClearEvidence = false;
     if (params.evidenceUrl !== undefined) {
       const trimmedUrl = params.evidenceUrl.trim();
       if (trimmedUrl === '') {
-        delete targetLink.test.evidenceUrl;
+        shouldClearEvidence = true;
       } else {
-        targetLink.test.evidenceUrl = validateHttpsUrl(trimmedUrl);
+        validatedEvidenceUrl = validateHttpsUrl(trimmedUrl);
+        shouldSetEvidence = true;
       }
     }
 
+    let trimmedNotesValue: string | undefined;
+    let shouldSetNotes = false;
+    let shouldClearNotes = false;
     if (params.notes !== undefined) {
       const trimmedNotes = params.notes.trim();
       if (trimmedNotes === '') {
-        delete targetLink.test.notes;
+        shouldClearNotes = true;
       } else {
-        targetLink.test.notes = trimmedNotes;
+        trimmedNotesValue = trimmedNotes;
+        shouldSetNotes = true;
       }
     }
 
-    const evaluated = ComplianceEngine.evaluateTraceLink(
-      targetLink.hazard,
-      targetLink.spec,
-      targetLink.work,
-      targetLink.test,
-      targetLink.signature,
-      targetLink.graphMetadata,
-      {
-        linkId: targetLink.id,
-        part11Secret: process.env.MEDTRACE_PART11_SECRET,
-        requireCryptographicSeal: true,
-        requireTestEvidence: current.datasetMode === 'LIVE',
-        reverificationTaskKey: targetLink.reverificationTaskKey,
+    const affectedWorkKeys: string[] = [];
+    for (let i = 0; i < current.traceLinks.length; i++) {
+      const candidate = current.traceLinks[i];
+      const matchesSharedTest =
+        i === idx ||
+        (resolvedTestKeyLower !== '' &&
+          (candidate.test?.testKey || '').trim().toLowerCase() === resolvedTestKeyLower);
+      if (!matchesSharedTest) {
+        continue;
       }
-    );
-    evaluated.hazard.status = ComplianceEngine.deriveHazardStatus(evaluated.complianceState);
-    current.traceLinks[idx] = evaluated;
+
+      candidate.test.status = params.status;
+      candidate.test.executionDate = executionDate;
+      candidate.test.recordedBy = recordedBy;
+
+      if (shouldClearEvidence) {
+        delete candidate.test.evidenceUrl;
+      } else if (shouldSetEvidence) {
+        candidate.test.evidenceUrl = validatedEvidenceUrl;
+      }
+
+      if (shouldClearNotes) {
+        delete candidate.test.notes;
+      } else if (shouldSetNotes) {
+        candidate.test.notes = trimmedNotesValue;
+      }
+
+      const evaluated = ComplianceEngine.evaluateTraceLink(
+        candidate.hazard,
+        candidate.spec,
+        candidate.work,
+        candidate.test,
+        candidate.signature,
+        candidate.graphMetadata,
+        {
+          linkId: candidate.id,
+          part11Secret: process.env.MEDTRACE_PART11_SECRET,
+          requireCryptographicSeal: true,
+          requireTestEvidence: current.datasetMode === 'LIVE',
+          reverificationTaskKey: candidate.reverificationTaskKey,
+        }
+      );
+      evaluated.hazard.status = ComplianceEngine.deriveHazardStatus(evaluated.complianceState);
+      current.traceLinks[i] = evaluated;
+      if (evaluated.work?.key && !affectedWorkKeys.includes(evaluated.work.key)) {
+        affectedWorkKeys.push(evaluated.work.key);
+      }
+    }
+
+    const evaluatedTarget = current.traceLinks[idx];
 
     const updated = ComplianceEngine.generateComplianceReport(
       current.traceLinks,
       current.datasetMode ?? 'LIVE',
       current.projectName,
-      { initialized: current.initialized ?? true, lastSyncedAt: current.lastSyncedAt, syncIncomplete: current.syncIncomplete }
+      {
+        initialized: current.initialized ?? true,
+        lastSyncedAt: current.lastSyncedAt,
+        syncIncomplete: current.syncIncomplete,
+        incompleteProjectKeys: current.incompleteProjectKeys,
+      }
     );
 
     return await this.commitSuiteMutation({
@@ -1472,15 +1445,16 @@ export class SeederService {
       auditEntry: {
         actorAccountId: params.actorAccountId,
         action: 'RECORD_TEST_RESULT',
-        targetKey: targetLink.test.testKey,
+        targetKey: evaluatedTarget.test.testKey,
         details: {
-          hazardKey: targetLink.hazard.key,
-          workKey: targetLink.work?.key || null,
-          projectKey: extractProjectKeyFromTraceLink(evaluated) || null,
+          hazardKey: evaluatedTarget.hazard.key,
+          workKey: evaluatedTarget.work?.key || null,
+          affectedWorkKeys,
+          projectKey: extractProjectKeyFromTraceLink(evaluatedTarget) || null,
           previousStatus,
           newStatus: params.status,
-          evidenceUrl: targetLink.test.evidenceUrl || null,
-          notes: targetLink.test.notes || null,
+          evidenceUrl: evaluatedTarget.test.evidenceUrl || null,
+          notes: evaluatedTarget.test.notes || null,
         },
         authMethod: params.authMethod || 'FORGE_USER_SESSION',
       },
@@ -1503,10 +1477,7 @@ export class SeederService {
         '21 CFR Part 11 Violation: Explicit attestation confirmation (attestationConfirmed: true) is required.'
       );
     }
-    if (
-      params.attestation?.attestationChecked !== true &&
-      params.attestation?.passwordConfirmed !== true
-    ) {
+    if (params.attestation?.attestationChecked !== true) {
       throw new Error(
         'Part 11 attestation: Explicit signer confirmation (attestationChecked: true) is required.'
       );
@@ -1557,41 +1528,7 @@ export class SeederService {
     const signedByAccountId = resolvedIdentity.accountId;
     const role = resolvedIdentity.role;
     const authMethod = params.authMethod || 'PART11_ATTESTATION';
-
-    const rawClientPub =
-      typeof params.attestation?.clientPublicKeySpki === 'string'
-        ? params.attestation.clientPublicKeySpki.trim()
-        : '';
-    const rawClientSig =
-      typeof params.attestation?.clientSignatureBase64 === 'string'
-        ? params.attestation.clientSignatureBase64.trim()
-        : '';
-    const hasHybridInput = rawClientPub.length > 0 || rawClientSig.length > 0;
-    let signatureAlgorithm: 'HMAC-SHA256-SEAL-V1' | 'ECDSA-P256-SHA256+HMAC-SEAL-V1' =
-      'HMAC-SHA256-SEAL-V1';
-    let clientKeyFingerprint: string | undefined;
-
-    if (hasHybridInput) {
-      if (!rawClientPub || !rawClientSig) {
-        throw new Error(
-          '21 CFR Part 11 Violation (PART11_CLIENT_SIGNATURE_INVALID): Both clientPublicKeySpki and clientSignatureBase64 are required for asymmetric signing.'
-        );
-      }
-      const challengePayload = ComplianceEngine.computePart11ClientChallenge({
-        hazardKey: targetLink.hazard.key,
-        specId: targetLink.spec.id,
-        artifactSha256: targetLink.spec.sha256Hash,
-        meaning,
-        attestationPhrase: PART11_ATTESTATION_PHRASE,
-      });
-      if (!ComplianceEngine.verifyPart11ClientSignature(challengePayload, rawClientSig, rawClientPub)) {
-        throw new Error(
-          '21 CFR Part 11 Violation (PART11_CLIENT_SIGNATURE_INVALID): Client ECDSA P-256 signature failed verification against live SRS SHA-256 and attestation meaning.'
-        );
-      }
-      clientKeyFingerprint = ComplianceEngine.computeClientKeyFingerprint(rawClientPub);
-      signatureAlgorithm = 'ECDSA-P256-SHA256+HMAC-SEAL-V1';
-    }
+    const signatureAlgorithm = 'HMAC-SHA256-SEAL-V1' as const;
 
     const existingBaseline = await this.getSignedSpecBaseline(targetLink.spec.id, targetLink.hazard.key);
     let signedMs = Date.now();
@@ -1617,13 +1554,6 @@ export class SeederService {
         meaning,
         signedAt,
         authMethod,
-        ...(hasHybridInput
-          ? {
-              signatureAlgorithm,
-              clientPublicKeySpki: rawClientPub,
-              clientSignatureBase64: rawClientSig,
-            }
-          : {}),
       },
       part11Secret
     );
@@ -1660,15 +1590,6 @@ export class SeederService {
       candidate.signature.signatureAlgorithm = signatureAlgorithm;
       candidate.signature.signatureSeal = signatureSeal;
       candidate.signature.sealKeyId = 'env:MEDTRACE_PART11_SECRET';
-      if (hasHybridInput) {
-        candidate.signature.clientPublicKeySpki = rawClientPub;
-        candidate.signature.clientSignatureBase64 = rawClientSig;
-        candidate.signature.clientKeyFingerprint = clientKeyFingerprint;
-      } else {
-        candidate.signature.clientPublicKeySpki = undefined;
-        candidate.signature.clientSignatureBase64 = undefined;
-        candidate.signature.clientKeyFingerprint = undefined;
-      }
       candidate.signature.invalidatedAt = undefined;
       candidate.signature.invalidationReason = undefined;
       candidate.spec.lastSignedHash = signedHash;
@@ -1706,22 +1627,19 @@ export class SeederService {
       role,
       meaning,
       authMethod,
-      signatureSeal,
-      hasHybridInput
-        ? {
-            signatureAlgorithm,
-            clientPublicKeySpki: rawClientPub,
-            clientSignatureBase64: rawClientSig,
-            clientKeyFingerprint,
-          }
-        : undefined
+      signatureSeal
     );
 
     const updated = ComplianceEngine.generateComplianceReport(
       current.traceLinks,
       current.datasetMode ?? 'LIVE',
       current.projectName,
-      { initialized: current.initialized ?? true, lastSyncedAt: current.lastSyncedAt, syncIncomplete: current.syncIncomplete }
+      {
+        initialized: current.initialized ?? true,
+        lastSyncedAt: current.lastSyncedAt,
+        syncIncomplete: current.syncIncomplete,
+        incompleteProjectKeys: current.incompleteProjectKeys,
+      }
     );
 
     return await this.commitSuiteMutation({
@@ -1743,7 +1661,6 @@ export class SeederService {
           role,
           meaning,
           signatureAlgorithm,
-          ...(clientKeyFingerprint ? { clientKeyFingerprint } : {}),
         },
         authMethod,
       },
@@ -1796,7 +1713,7 @@ export class SeederService {
     const targetLink = current.traceLinks[idx];
     const targetProjectKey =
       extractProjectKeyFromTraceLink(targetLink) ||
-      (params.issueKey && JIRA_ISSUE_KEY_PATTERN.test(params.issueKey.trim().toUpperCase())
+      (params.issueKey && JIRA_ISSUE_KEY_RE.test(params.issueKey.trim().toUpperCase())
         ? params.issueKey.trim().toUpperCase().split('-')[0]
         : undefined);
 
@@ -1837,7 +1754,7 @@ export class SeederService {
         new Set(
           rawTargets
             .map((k) => (typeof k === 'string' ? k.trim().toUpperCase() : ''))
-            .filter((k) => k && k !== excluded && JIRA_ISSUE_KEY_PATTERN.test(k))
+            .filter((k) => k && k !== excluded && JIRA_ISSUE_KEY_RE.test(k))
         )
       );
     };
@@ -2060,53 +1977,107 @@ export class SeederService {
       }
     }
 
-    targetLink.reverificationTaskKey = createdIssueKey;
-    const evaluated = ComplianceEngine.evaluateTraceLink(
-      targetLink.hazard,
-      targetLink.spec,
-      targetLink.work,
-      targetLink.test,
-      targetLink.signature,
-      targetLink.graphMetadata,
-      {
-        linkId: targetLink.id,
-        part11Secret: process.env.MEDTRACE_PART11_SECRET,
-        requireCryptographicSeal: true,
-        requireTestEvidence: true,
-        reverificationTaskKey: createdIssueKey,
-      }
-    );
-    evaluated.hazard.status = ComplianceEngine.deriveHazardStatus(evaluated.complianceState);
-    current.traceLinks[idx] = evaluated;
+    const attachTaskToSuiteAndCommit = async (
+      suiteToUpdate: ComplianceSummary,
+      linkIndex: number,
+      expectedVersion: number
+    ): Promise<ComplianceSummary> => {
+      const link = suiteToUpdate.traceLinks[linkIndex];
+      link.reverificationTaskKey = createdIssueKey;
+      const evaluated = ComplianceEngine.evaluateTraceLink(
+        link.hazard,
+        link.spec,
+        link.work,
+        link.test,
+        link.signature,
+        link.graphMetadata,
+        {
+          linkId: link.id,
+          part11Secret: process.env.MEDTRACE_PART11_SECRET,
+          requireCryptographicSeal: true,
+          requireTestEvidence: true,
+          reverificationTaskKey: createdIssueKey,
+        }
+      );
+      evaluated.hazard.status = ComplianceEngine.deriveHazardStatus(evaluated.complianceState);
+      suiteToUpdate.traceLinks[linkIndex] = evaluated;
 
-    const updated = ComplianceEngine.generateComplianceReport(
-      current.traceLinks,
-      current.datasetMode ?? 'LIVE',
-      current.projectName,
-      { initialized: current.initialized ?? true, lastSyncedAt: current.lastSyncedAt, syncIncomplete: current.syncIncomplete }
-    );
+      const updated = ComplianceEngine.generateComplianceReport(
+        suiteToUpdate.traceLinks,
+        suiteToUpdate.datasetMode ?? 'LIVE',
+        suiteToUpdate.projectName,
+        {
+          initialized: suiteToUpdate.initialized ?? true,
+          lastSyncedAt: suiteToUpdate.lastSyncedAt,
+          syncIncomplete: suiteToUpdate.syncIncomplete,
+          incompleteProjectKeys: suiteToUpdate.incompleteProjectKeys,
+        }
+      );
 
-    const committed = await this.commitSuiteMutation({
-      summary: updated,
-      expectedVersion: version,
-      auditEntry: {
-        actorAccountId: actor,
-        action: 'CREATE_REVERIFICATION_TASK',
-        targetKey: createdIssueKey,
-        details: {
-          projectKey: targetProjectKey,
-          hazardKey: targetLink.hazard.key,
-          workKey: targetLink.work?.key || null,
-          testKey: targetLink.test?.testKey || null,
-          specId: targetLink.spec.id,
-          createdIssueKey,
-          linkedIssueKeys,
-          ...(failedLinkKeys.length > 0 ? { failedLinkKeys } : {}),
-          reason: reasonText,
+      return this.commitSuiteMutation({
+        summary: updated,
+        expectedVersion,
+        auditEntry: {
+          actorAccountId: actor,
+          action: 'CREATE_REVERIFICATION_TASK',
+          targetKey: createdIssueKey,
+          details: {
+            projectKey: targetProjectKey,
+            hazardKey: link.hazard.key,
+            workKey: link.work?.key || null,
+            testKey: link.test?.testKey || null,
+            specId: link.spec.id,
+            createdIssueKey,
+            linkedIssueKeys,
+            ...(failedLinkKeys.length > 0 ? { failedLinkKeys } : {}),
+            reason: reasonText,
+          },
+          authMethod: params.authMethod || 'FORGE_USER_SESSION',
         },
-        authMethod: params.authMethod || 'FORGE_USER_SESSION',
-      },
-    });
+      });
+    };
+
+    const maxCommitRetries = 3;
+    let committed: ComplianceSummary | undefined;
+    let candidateSuite = current;
+    let candidateIdx = idx;
+    let candidateVersion = version;
+
+    for (let attempt = 1; attempt <= maxCommitRetries; attempt++) {
+      try {
+        committed = await attachTaskToSuiteAndCommit(candidateSuite, candidateIdx, candidateVersion);
+        break;
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        const isCasConflict = /concurrent modification detected|cas conflict|vlock/i.test(msg);
+        if (!isCasConflict || attempt >= maxCommitRetries) {
+          throw err;
+        }
+        const latest = await this.getSuiteWithVersion();
+        candidateSuite = cloneJsonValue(latest.summary);
+        candidateVersion = latest.version;
+        const matchedIdx = candidateSuite.traceLinks.findIndex((l) => l.id === targetLink.id);
+        candidateIdx =
+          matchedIdx !== -1
+            ? matchedIdx
+            : resolveTraceLinkByHazard(
+                candidateSuite.traceLinks,
+                targetLink.hazard.key,
+                targetLink.spec.id,
+                targetLink.work?.key || params.issueKey,
+                params.linkId
+              );
+        if (candidateIdx === -1) {
+          throw new Error(
+            `Re-verification task ${createdIssueKey} was created in Jira, but TraceLink "${targetLink.id}" was removed concurrently before saving.`
+          );
+        }
+      }
+    }
+
+    if (!committed) {
+      throw new Error(`Failed to persist re-verification task ${createdIssueKey} due to concurrent suite updates.`);
+    }
 
     const fullyLinked = failedLinkKeys.length === 0;
     return {

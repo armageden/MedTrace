@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import type { FullContext } from '@forge/bridge';
 import { enableForgeTheme, getForgeContext, invokeResolver } from './bridge';
+import { isPlainRecord } from './utils';
 import {
   BlastRadiusReport,
   ClientTransitionResult,
@@ -25,10 +26,6 @@ const DEFAULT_PANEL_CONTEXT: ForgePanelContext = {
   isCompactPanel: false,
   isConfluence: false,
 };
-
-function isPlainRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
 
 function isComplianceSummary(value: unknown): value is ComplianceSummary {
   return (
@@ -64,13 +61,17 @@ type MutationSummaryOutcome =
 
 function resolveMutationSummaryResponse(
   raw: unknown,
-  actionLabel: string
+  actionLabel: string,
+  acceptWarningWithSummary = false
 ): MutationSummaryOutcome {
   if (!isPlainRecord(raw)) {
     return { ok: false, error: `${actionLabel} returned an empty or malformed response.` };
   }
   if (raw.success === false) {
-    if (raw.partialSuccess === true && isComplianceSummary(raw.summary)) {
+    if (
+      (raw.partialSuccess === true || (acceptWarningWithSummary && typeof raw.error !== 'string')) &&
+      isComplianceSummary(raw.summary)
+    ) {
       return { ok: true, summary: raw.summary };
     }
     return {
@@ -201,7 +202,10 @@ export const App: React.FC = () => {
       }
 
       try {
-        const result: unknown = (await invokeResolver('getComplianceSuite')) ?? null;
+        const result: unknown =
+          (await (mode === 'poll'
+            ? invokeResolver('getComplianceSuite', { skipReconcile: true })
+            : invokeResolver('getComplianceSuite'))) ?? null;
         if (
           reqSeq !== suiteRequestSeqRef.current ||
           mutEpoch !== mutationEpochRef.current ||
@@ -332,7 +336,7 @@ export const App: React.FC = () => {
     }
   }, [summary, panelContext, selectedLinkId]);
 
-  // Initial load + adaptive 8s polling + deduplicated focus/visibility refresh
+  // Initial load + adaptive 30s cache-only polling + deduplicated focus/visibility refresh
   useEffect(() => {
     void fetchAndApplySuite('initial');
 
@@ -342,7 +346,7 @@ export const App: React.FC = () => {
       }
       if (activeMutationRef.current || pollPausedRef.current) return;
       void fetchAndApplySuite('poll');
-    }, 8000);
+    }, 30000);
 
     const onVisibilityOrFocus = () => {
       if (typeof document !== 'undefined' && document.visibilityState !== 'visible') {
@@ -371,6 +375,7 @@ export const App: React.FC = () => {
     setBusy: (busy: boolean) => void;
     actionLabel: string;
     noticeSource?: UiNotice['source'];
+    acceptWarningWithSummary?: boolean;
     invoke: () => Promise<unknown>;
     onSuccess?: (raw: unknown, nextSummary: ComplianceSummary) => void;
     formatError: (detail: string, threw: boolean) => string;
@@ -384,7 +389,11 @@ export const App: React.FC = () => {
 
     try {
       const raw: unknown = await opts.invoke();
-      const outcome = resolveMutationSummaryResponse(raw, opts.actionLabel);
+      const outcome = resolveMutationSummaryResponse(
+        raw,
+        opts.actionLabel,
+        opts.acceptWarningWithSummary === true
+      );
       if (outcome.ok) {
         suiteRequestSeqRef.current += 1;
         commitSummary(outcome.summary);
@@ -445,6 +454,7 @@ export const App: React.FC = () => {
       setBusy: setIsSyncingLive,
       actionLabel: options?.resumeFromCursor ? 'Resume Live Atlassian sync' : 'Live Atlassian sync',
       noticeSource: 'sync',
+      acceptWarningWithSummary: true,
       invoke: () => {
         const payload: Omit<LiveSyncOptions, 'callerMode'> = {
           projectKey: panelContext.projectKey,
@@ -888,9 +898,22 @@ export const App: React.FC = () => {
             summary={summary}
             compact={panelContext.isCompactPanel}
             onSelectTraceLink={setSelectedLinkId}
+            onSyncLive={() => {
+              void handleSyncLive();
+            }}
+            onSeedDemo={handleSeed}
+            isBusy={isBusy}
           />
         ) : (
-          <TraceMatrixTable summary={summary} onSelectTraceLink={setSelectedLinkId} />
+          <TraceMatrixTable
+            summary={summary}
+            onSelectTraceLink={setSelectedLinkId}
+            onSyncLive={() => {
+              void handleSyncLive();
+            }}
+            onSeedDemo={handleSeed}
+            isBusy={isBusy}
+          />
         )}
       </main>
 
@@ -925,9 +948,20 @@ export const App: React.FC = () => {
         }}
       />
 
-      {isExportOpen && <FdaExportModal summary={summary} onClose={() => setIsExportOpen(false)} />}
+      {isExportOpen && (
+        <FdaExportModal
+          summary={summary}
+          projectKey={panelContext.projectKey}
+          onClose={() => setIsExportOpen(false)}
+        />
+      )}
 
-      <AuditLogModal isOpen={isAuditLogOpen} onClose={() => setIsAuditLogOpen(false)} />
+      <AuditLogModal
+        isOpen={isAuditLogOpen}
+        projectKey={panelContext.projectKey}
+        datasetMode={summary.datasetMode}
+        onClose={() => setIsAuditLogOpen(false)}
+      />
 
       <TransitionModal
         isOpen={isTransitionModalOpen}

@@ -1,6 +1,14 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { invokeResolver } from '../bridge';
 import { useDialogA11y } from '../hooks/useDialogA11y';
+import { getSafeHttpsUrl, validateHttpsUrlError } from '../utils';
+import { BlastRadiusCard } from './BlastRadiusCard';
+import {
+  BindIssueForm,
+  DemoSimulationForm,
+  RecordTestForm,
+  SignOffAttestationForm,
+} from './InspectionActionForms';
 import {
   BlastRadiusReport,
   ForgePanelContext,
@@ -13,17 +21,12 @@ import {
   Activity,
   AlertOctagon,
   CheckCircle2,
-  Clock,
-  ClipboardCheck,
   FileText,
   GitPullRequest,
-  Link2,
   Lock,
-  PenTool,
   Share2,
   ShieldAlert,
   X,
-  Zap,
 } from 'lucide-react';
 
 export interface InspectionDrawerProps {
@@ -69,31 +72,6 @@ export interface InspectionDrawerProps {
 }
 
 const DEFAULT_SIGN_MEANING = 'Approval of IEC 62304 safety specification and risk mitigation';
-// eslint-disable-next-line no-control-regex
-const CONTROL_CHAR_RE = /[\u0000-\u001f\u007f]/;
-
-function validateEvidenceHttpsUrl(rawUrl: string): string | null {
-  const trimmed = rawUrl.trim();
-  if (!trimmed) {
-    return null;
-  }
-  if (CONTROL_CHAR_RE.test(trimmed)) {
-    return 'Evidence URL must not contain control characters.';
-  }
-  let parsed: URL;
-  try {
-    parsed = new URL(trimmed);
-  } catch {
-    return 'Evidence URL must be a valid https:// URL.';
-  }
-  if (parsed.protocol !== 'https:') {
-    return 'Evidence URL must start with https:// (http:// and javascript: URLs are not permitted).';
-  }
-  if (parsed.username !== '' || parsed.password !== '' || !parsed.hostname) {
-    return 'Evidence URL must be a valid https:// URL without embedded credentials.';
-  }
-  return null;
-}
 
 export const InspectionDrawer: React.FC<InspectionDrawerProps> = ({
   link,
@@ -258,8 +236,7 @@ export const InspectionDrawer: React.FC<InspectionDrawerProps> = ({
       : 'e.g. MED-42';
 
   const savedEvidenceUrl = link.test.evidenceUrl?.trim() || '';
-  const isSavedEvidenceSafeHttps =
-    savedEvidenceUrl.length > 0 && validateEvidenceHttpsUrl(savedEvidenceUrl) === null;
+  const isSavedEvidenceSafeHttps = getSafeHttpsUrl(savedEvidenceUrl) !== null;
 
   const handleBindClick = async () => {
     const trimmedIssue = bindIssueInput.trim();
@@ -274,7 +251,7 @@ export const InspectionDrawer: React.FC<InspectionDrawerProps> = ({
   const handleRecordTestClick = async () => {
     if (isBusy) return;
     const trimmedUrl = testEvidenceUrl.trim();
-    const urlError = validateEvidenceHttpsUrl(trimmedUrl);
+    const urlError = validateHttpsUrlError(trimmedUrl);
     if (urlError) {
       setTestValidationError(urlError);
       return;
@@ -383,110 +360,7 @@ export const InspectionDrawer: React.FC<InspectionDrawerProps> = ({
         <div style={{ flex: 1, overflowY: 'auto', padding: 20 }}>
           {/* Blast Radius Dossier Card */}
           {blastRadius && blastRadius.affectedHazardKeys.includes(link.hazard.key) && (
-            <div
-              style={{
-                marginBottom: 16,
-                padding: '14px 16px',
-                borderRadius: 8,
-                background: 'var(--mt-warning-bg)',
-                border: '1.5px solid var(--mt-warning-border)',
-                boxShadow: '0 2px 6px rgba(255, 171, 0, 0.15)',
-              }}
-            >
-              <div
-                style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'space-between',
-                  marginBottom: 6,
-                }}
-              >
-                <div
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: 6,
-                    color: 'var(--mt-warning-text)',
-                    fontWeight: 800,
-                    fontSize: 13,
-                  }}
-                >
-                  <Zap size={16} /> Transitive Regulatory Blast Radius
-                </div>
-                <span
-                  style={{
-                    fontSize: 10,
-                    fontFamily: 'monospace',
-                    background: 'var(--mt-bg-surface)',
-                    padding: '2px 6px',
-                    borderRadius: 4,
-                    border: '1px solid var(--mt-warning-border)',
-                    color: 'var(--mt-text-secondary)',
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: 4,
-                  }}
-                >
-                  <Clock size={11} /> {blastRadius.executionTimeMs} ms
-                </span>
-              </div>
-
-              <div style={{ fontSize: 11, color: 'var(--mt-text-primary)', marginBottom: 8 }}>
-                Trigger: <b>{blastRadius.triggerArtifact.title}</b> ({blastRadius.triggerArtifact.deltaReason})
-              </div>
-
-              <div
-                style={{
-                  background: 'var(--mt-bg-surface)',
-                  borderRadius: 6,
-                  padding: '8px 10px',
-                  border: '1px solid var(--mt-border-subtle)',
-                  marginBottom: 10,
-                }}
-              >
-                <div
-                  style={{
-                    fontSize: 10,
-                    fontWeight: 700,
-                    color: 'var(--mt-text-muted)',
-                    textTransform: 'uppercase',
-                    marginBottom: 4,
-                  }}
-                >
-                  Deterministic Graph Traversal (BFS):
-                </div>
-                {blastRadius.traversalPath.map((hop, idx) => (
-                  <div key={idx} style={{ fontSize: 11, lineHeight: '16px', marginTop: 4, display: 'flex', gap: 6 }}>
-                    <span style={{ fontWeight: 700, color: 'var(--mt-brand-text)', minWidth: 40 }}>
-                      Hop {hop.hop}:
-                    </span>
-                    <span style={{ color: 'var(--mt-text-secondary)' }}>
-                      <span style={{ fontWeight: 600, color: 'var(--mt-text-primary)' }}>{hop.edge}</span> →{' '}
-                      {hop.effect}
-                    </span>
-                  </div>
-                ))}
-              </div>
-
-              <div>
-                <div
-                  style={{
-                    fontSize: 10,
-                    fontWeight: 700,
-                    color: 'var(--mt-text-muted)',
-                    textTransform: 'uppercase',
-                    marginBottom: 4,
-                  }}
-                >
-                  Mandatory Re-audit Actions:
-                </div>
-                {blastRadius.transitiveActionPlan.map((action, idx) => (
-                  <div key={idx} style={{ fontSize: 11, color: 'var(--mt-text-primary)', lineHeight: '16px', marginTop: 3 }}>
-                    • {action}
-                  </div>
-                ))}
-              </div>
-            </div>
+            <BlastRadiusCard blastRadius={blastRadius} />
           )}
 
           {/* Violations Alert Banner */}
@@ -684,38 +558,18 @@ export const InspectionDrawer: React.FC<InspectionDrawerProps> = ({
               </span>
             </div>
 
-            <div style={{ marginTop: 10, paddingTop: 10, borderTop: '1px solid var(--mt-border-subtle)' }}>
-              <label htmlFor="bind-issue-input" style={labelStyle}>
-                Bind Jira Issue Key to {link.hazard.key}
-              </label>
-              <div className="mt-form-row" style={{ marginTop: 4 }}>
-                <input
-                  id="bind-issue-input"
-                  type="text"
-                  className="mt-input"
-                  value={bindIssueInput}
-                  onChange={(e) => {
-                    bindDirtyRef.current = true;
-                    setBindIssueInput(e.target.value);
-                  }}
-                  placeholder={bindPlaceholder}
-                />
-                <button
-                  type="button"
-                  disabled={isBusy || !bindIssueInput.trim()}
-                  onClick={handleBindClick}
-                  className="mt-btn"
-                  style={{
-                    whiteSpace: 'nowrap',
-                    border: '1px solid var(--mt-brand-bg)',
-                    background: 'var(--mt-brand-subtle-bg)',
-                    color: 'var(--mt-brand-text)',
-                  }}
-                >
-                  <Link2 size={13} /> Bind
-                </button>
-              </div>
-            </div>
+            <BindIssueForm
+              hazardKey={link.hazard.key}
+              bindIssueInput={bindIssueInput}
+              bindPlaceholder={bindPlaceholder}
+              isBusy={isBusy}
+              labelStyle={labelStyle}
+              onChangeInput={(val) => {
+                bindDirtyRef.current = true;
+                setBindIssueInput(val);
+              }}
+              onSubmit={handleBindClick}
+            />
           </div>
 
           {/* Stage 4: IEC 62304 Verification Test + Record Result Form */}
@@ -783,93 +637,24 @@ export const InspectionDrawer: React.FC<InspectionDrawerProps> = ({
               </div>
             )}
 
-            <div
-              style={{
-                marginTop: 10,
-                paddingTop: 10,
-                borderTop: '1px solid var(--mt-border-subtle)',
-                display: 'flex',
-                flexDirection: 'column',
-                gap: 6,
+            <RecordTestForm
+              testKey={link.test.testKey}
+              panelContext={panelContext}
+              testStatusInput={testStatusInput}
+              testEvidenceUrl={testEvidenceUrl}
+              testNotes={testNotes}
+              testValidationError={testValidationError}
+              isBusy={isBusy}
+              onChangeStatus={setTestStatusInput}
+              onChangeEvidenceUrl={(val) => {
+                setTestEvidenceUrl(val);
+                if (testValidationError) {
+                  setTestValidationError(null);
+                }
               }}
-            >
-              <div
-                style={{
-                  fontSize: 11,
-                  fontWeight: 700,
-                  color: 'var(--mt-text-primary)',
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: 5,
-                }}
-              >
-                <ClipboardCheck size={13} color="var(--mt-brand-text)" /> Record Verification Test Execution
-              </div>
-              <div className="mt-form-row">
-                <select
-                  aria-label="Test execution status"
-                  className="mt-input"
-                  style={{ width: panelContext?.isCompactPanel ? '100%' : '42%' }}
-                  value={testStatusInput}
-                  onChange={(e) => setTestStatusInput(e.target.value as VerificationTest['status'])}
-                >
-                  <option value="PASSED">PASSED</option>
-                  <option value="FAILED">FAILED</option>
-                  <option value="IN_PROGRESS">IN_PROGRESS</option>
-                  <option value="UNTESTED">UNTESTED</option>
-                </select>
-                <input
-                  type="text"
-                  aria-label="Evidence URL"
-                  className="mt-input"
-                  value={testEvidenceUrl}
-                  onChange={(e) => {
-                    setTestEvidenceUrl(e.target.value);
-                    if (testValidationError) {
-                      setTestValidationError(null);
-                    }
-                  }}
-                  placeholder="https://... (leave blank to clear)"
-                />
-              </div>
-              <input
-                type="text"
-                aria-label="Test execution notes"
-                className="mt-input"
-                value={testNotes}
-                onChange={(e) => setTestNotes(e.target.value)}
-                placeholder="Execution summary / build SHA / HIL run ID"
-              />
-              {testValidationError && (
-                <div
-                  role="alert"
-                  style={{
-                    padding: '6px 8px',
-                    borderRadius: 4,
-                    background: 'var(--mt-danger-bg)',
-                    border: '1px solid var(--mt-danger-border)',
-                    color: 'var(--mt-danger-text)',
-                    fontSize: 11,
-                    fontWeight: 600,
-                  }}
-                >
-                  {testValidationError}
-                </div>
-              )}
-              <button
-                type="button"
-                disabled={isBusy}
-                onClick={handleRecordTestClick}
-                className="mt-btn"
-                style={{
-                  border: '1px solid var(--mt-success-bold)',
-                  background: 'var(--mt-success-bg)',
-                  color: 'var(--mt-success-text)',
-                }}
-              >
-                <ClipboardCheck size={14} /> Record Test Result ({link.test.testKey})
-              </button>
-            </div>
+              onChangeNotes={setTestNotes}
+              onSubmit={handleRecordTestClick}
+            />
           </div>
 
           {/* Stage 5: 21 CFR Part 11 Electronic Signature + Explicit Attestation Sign-Off */}
@@ -883,19 +668,37 @@ export const InspectionDrawer: React.FC<InspectionDrawerProps> = ({
               />
               <span>5. Electronic Attestation &amp; Audit Trail</span>
             </div>
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
-              <span style={{ fontWeight: 700, fontSize: 12, color: 'var(--mt-text-primary)' }}>
-                {link.signature.signedBy || 'Unsigned'}
-              </span>
-              <span
-                style={pillStyle(
-                  link.signature.isValid ? 'var(--mt-success-bg)' : 'var(--mt-danger-bg)',
-                  link.signature.isValid ? 'var(--mt-success-text)' : 'var(--mt-danger-text)'
-                )}
-              >
-                {link.signature.isValid ? 'VALID SIGNATURE' : 'SIGNATURE REVOKED'}
-              </span>
-            </div>
+            {(() => {
+              const hasPriorSig = Boolean(
+                link.signature.artifactSha256 ||
+                  link.signature.signedBy ||
+                  link.signature.signedAt ||
+                  link.signature.invalidatedAt
+              );
+              const sigBg = link.signature.isValid
+                ? 'var(--mt-success-bg)'
+                : hasPriorSig
+                  ? 'var(--mt-danger-bg)'
+                  : 'var(--mt-warning-bg)';
+              const sigColor = link.signature.isValid
+                ? 'var(--mt-success-text)'
+                : hasPriorSig
+                  ? 'var(--mt-danger-text)'
+                  : 'var(--mt-warning-text)';
+              const sigBadgeText = link.signature.isValid
+                ? 'VALID SIGNATURE'
+                : hasPriorSig
+                  ? 'SIGNATURE REVOKED'
+                  : 'UNSIGNED';
+              return (
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+                  <span style={{ fontWeight: 700, fontSize: 12, color: 'var(--mt-text-primary)' }}>
+                    {link.signature.signedBy || 'Unsigned'}
+                  </span>
+                  <span style={pillStyle(sigBg, sigColor)}>{sigBadgeText}</span>
+                </div>
+              );
+            })()}
             <div style={{ fontSize: 11, color: 'var(--mt-text-muted)', marginTop: 2 }}>
               Role: {link.signature.role} {link.signature.authMethod ? `• Auth: ${link.signature.authMethod}` : ''}
             </div>
@@ -915,127 +718,22 @@ export const InspectionDrawer: React.FC<InspectionDrawerProps> = ({
               </div>
             )}
 
-            <div
-              style={{
-                marginTop: 10,
-                paddingTop: 10,
-                borderTop: '1px solid var(--mt-border-subtle)',
-                display: 'flex',
-                flexDirection: 'column',
-                gap: 8,
-              }}
-            >
-              <div
-                style={{
-                  fontSize: 11,
-                  fontWeight: 700,
-                  color: 'var(--mt-text-primary)',
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: 5,
-                }}
-              >
-                <PenTool size={13} color="var(--mt-brand-text)" /> Execute Electronic Attestation Sign-Off
-              </div>
-              <div
-                style={{
-                  fontSize: 10,
-                  color: 'var(--mt-text-secondary)',
-                  background: 'var(--mt-bg-page)',
-                  padding: '6px 8px',
-                  borderRadius: 4,
-                }}
-              >
-                Signer identity and role are derived server-side from your authenticated Atlassian session.
-              </div>
-              <div>
-                <label htmlFor="signoff-meaning" style={labelStyle}>
-                  Attestation Meaning (min 5 chars)
-                </label>
-                <input
-                  id="signoff-meaning"
-                  type="text"
-                  className="mt-input"
-                  style={{ marginTop: 3 }}
-                  value={signMeaning}
-                  onChange={(e) => setSignMeaning(e.target.value)}
-                  placeholder="e.g. Clinical safety approval of SRS revision"
-                />
-              </div>
-              <div>
-                <label htmlFor="signoff-attestation-phrase" style={labelStyle}>
-                  Required Attestation Phrase: <code>{PART11_ATTESTATION_PHRASE}</code>
-                </label>
-                <input
-                  id="signoff-attestation-phrase"
-                  type="text"
-                  className="mt-input"
-                  style={{ marginTop: 3 }}
-                  value={attestationPhrase}
-                  onChange={(e) => setAttestationPhrase(e.target.value)}
-                  placeholder={PART11_ATTESTATION_PHRASE}
-                />
-                {trimmedPhrase.length > 0 && !phraseMatches && (
-                  <div style={{ fontSize: 10, color: 'var(--mt-danger-text)', marginTop: 2 }}>
-                    Must exactly match: {PART11_ATTESTATION_PHRASE}
-                  </div>
-                )}
-              </div>
-              <label
-                style={{
-                  display: 'flex',
-                  alignItems: 'flex-start',
-                  gap: 6,
-                  fontSize: 11,
-                  color: 'var(--mt-text-primary)',
-                  cursor: 'pointer',
-                }}
-              >
-                <input
-                  type="checkbox"
-                  checked={attestationChecked}
-                  onChange={(e) => setAttestationChecked(e.target.checked)}
-                  style={{ marginTop: 2 }}
-                />
-                <span>
-                  I confirm I am the signer and intend this electronic attestation.
-                </span>
-              </label>
-              <label
-                style={{
-                  display: 'flex',
-                  alignItems: 'flex-start',
-                  gap: 6,
-                  fontSize: 11,
-                  color: 'var(--mt-text-primary)',
-                  cursor: 'pointer',
-                }}
-              >
-                <input
-                  type="checkbox"
-                  checked={attestationConfirmed}
-                  onChange={(e) => setAttestationConfirmed(e.target.checked)}
-                  style={{ marginTop: 2 }}
-                />
-                <span>
-                  I attest that this electronic attestation is my deliberate approval record and
-                  certifies SHA-256 hash <code>{link.spec.sha256Hash.slice(0, 10)}...</code>.
-                </span>
-              </label>
-              <button
-                type="button"
-                disabled={!canSubmitSignOff}
-                onClick={handleSignOffClick}
-                className="mt-btn"
-                style={{
-                  border: 'none',
-                  background: 'var(--mt-brand-bg)',
-                  color: '#ffffff',
-                }}
-              >
-                <PenTool size={14} /> Sign Off Spec (Attestation)
-              </button>
-            </div>
+            <SignOffAttestationForm
+              specSha256Hash={link.spec.sha256Hash}
+              signMeaning={signMeaning}
+              attestationPhrase={attestationPhrase}
+              trimmedPhrase={trimmedPhrase}
+              phraseMatches={phraseMatches}
+              attestationChecked={attestationChecked}
+              attestationConfirmed={attestationConfirmed}
+              canSubmitSignOff={canSubmitSignOff}
+              labelStyle={labelStyle}
+              onChangeSignMeaning={setSignMeaning}
+              onChangeAttestationPhrase={setAttestationPhrase}
+              onChangeAttestationChecked={setAttestationChecked}
+              onChangeAttestationConfirmed={setAttestationConfirmed}
+              onSubmit={handleSignOffClick}
+            />
           </div>
 
           {/* Atlassian Lineage Metadata (Jira REST + Teamwork Graph) */}
@@ -1257,65 +955,15 @@ export const InspectionDrawer: React.FC<InspectionDrawerProps> = ({
               <CheckCircle2 size={16} /> Unbroken IEC 62304 Regulatory Compliance
             </div>
           ) : datasetMode === 'DEMO' ? (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-              <div
-                style={{
-                  fontSize: 10,
-                  fontWeight: 800,
-                  color: 'var(--mt-warning-text)',
-                  textTransform: 'uppercase',
-                }}
-              >
-                DEMO MODE ONLY — Simulated Quick-Remediation
-              </div>
-              <input
-                type="text"
-                aria-label="Demo simulation meaning"
-                className="mt-input"
-                value={demoSimMeaning}
-                onChange={(e) => setDemoSimMeaning(e.target.value)}
-                placeholder="Simulated remediation note (optional)"
-              />
-              <label
-                style={{
-                  display: 'flex',
-                  alignItems: 'flex-start',
-                  gap: 6,
-                  fontSize: 11,
-                  color: 'var(--mt-text-secondary)',
-                  cursor: 'pointer',
-                }}
-              >
-                <input
-                  type="checkbox"
-                  checked={demoSimConfirmed}
-                  onChange={(e) => setDemoSimConfirmed(e.target.checked)}
-                  style={{ marginTop: 2 }}
-                />
-                <span>
-                  Confirm simulated demo remediation (logs <code>DEMO_SIMULATION</code> to the Forge
-                  KVS audit chain; disabled in LIVE mode).
-                </span>
-              </label>
-              <button
-                type="button"
-                onClick={handleRemediateDemoClick}
-                disabled={isBusy || !demoSimConfirmed}
-                className="mt-btn"
-                style={{
-                  width: '100%',
-                  padding: '9px 14px',
-                  border: '1.5px solid var(--mt-warning-border)',
-                  background: 'var(--mt-warning-bg)',
-                  color: 'var(--mt-warning-text)',
-                }}
-              >
-                <Zap size={15} />
-                {isBusy
-                  ? 'Recording Simulated Demo Remediation...'
-                  : `Run Simulated Demo Remediation (${link.hazard.key})`}
-              </button>
-            </div>
+            <DemoSimulationForm
+              hazardKey={link.hazard.key}
+              demoSimMeaning={demoSimMeaning}
+              demoSimConfirmed={demoSimConfirmed}
+              isBusy={isBusy}
+              onChangeDemoSimMeaning={setDemoSimMeaning}
+              onChangeDemoSimConfirmed={setDemoSimConfirmed}
+              onSubmit={handleRemediateDemoClick}
+            />
           ) : (
             <div
               style={{

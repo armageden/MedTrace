@@ -21,7 +21,8 @@ For local client JSON configuration (`mcpServers`), see [mcp-server/README.md](.
 - **Optional environment flags:**
   - `MEDTRACE_ALLOW_INSECURE_LOCALHOST=true`: Permits `http://` **only** for loopback hosts (`localhost`, `127.0.0.1`, `::1`, `[::1]`) in local development or test harnesses. Remote `http://` and non-HTTP schemes are always rejected.
   - `MEDTRACE_REQUEST_TIMEOUT_MS`: Webtrigger HTTP request timeout in milliseconds (default `DEFAULT_REQUEST_TIMEOUT_MS = 15000`, clamped to `1000..60000`).
-- **Separate signing secret:** `MEDTRACE_PART11_SECRET` (plus optional `MEDTRACE_PART11_PREVIOUS_SECRETS` key-ring rotation secrets) is provisioned solely inside Forge encrypted variables for `HMAC-SHA256-SEAL-V1` / `ECDSA-P256-SHA256+HMAC-SEAL-V1` Part 11 seals ([src/seeder.ts](../../src/seeder.ts), [src/compliance-engine.ts](../../src/compliance-engine.ts)) and must **never** be placed in local MCP `.env` files.
+- **Separate signing secret:** `MEDTRACE_PART11_SECRET` (plus optional `MEDTRACE_PART11_PREVIOUS_SECRETS` key-ring rotation secrets) is provisioned solely inside Forge encrypted variables for `HMAC-SHA256-SEAL-V1` Part 11 seals ([src/seeder.ts](../../src/seeder.ts), [src/compliance-engine.ts](../../src/compliance-engine.ts)) and must **never** be placed in local MCP `.env` files. ([scripts/rotate-mcp-secret.sh](../../scripts/rotate-mcp-secret.sh) reuses `parseEnvContent` and `validateWebtriggerUrl` from [mcp-server/index.mjs](../../mcp-server/index.mjs).)
+- **Cross-Partition Confluence Reconciliation:** `McpToolService.getHazardLineage`, `McpToolService.verifyIecCompliance`, `verify-release-gate`, and keyless `workflowValidatorHandler` invoke `LiveIngestionService.reconcileConfluenceSpecs` so external MCP/CI callers and workflow gates see live Confluence drift immediately.
 
 ## JSON-RPC 2.0 Transport ([mcp-server/index.mjs](../../mcp-server/index.mjs))
 

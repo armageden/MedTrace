@@ -1,6 +1,6 @@
 import { kvs } from '@forge/kvs';
 import crypto from 'node:crypto';
-import { canonicalJsonStringify, isKvsConflictError, measureJsonBytes } from './crypto-utils';
+import { canonicalJsonStringify, cloneJsonValue, isKvsConflictError, measureJsonBytes } from './crypto-utils';
 import { isForgeRuntime } from './runtime';
 import {
   AuditActionType,
@@ -35,14 +35,6 @@ export interface AuditStorageAdapter {
 
 export type BatchAuditStorageAdapter = AuditStorageAdapter &
   Required<Pick<AuditStorageAdapter, 'getEntriesBatch'>>;
-
-function cloneAuditValue<T>(value: T): T {
-  if (value === undefined) return value;
-  if (typeof structuredClone === 'function') {
-    return structuredClone(value);
-  }
-  return JSON.parse(JSON.stringify(value)) as T;
-}
 
 async function fetchEntriesBatchFromAdapter(
   adapter: AuditStorageAdapter,
@@ -145,6 +137,14 @@ export const kvsAuditStorageAdapter: BatchAuditStorageAdapter = {
     }
     let targetHead = head;
     for (let attempt = 0; attempt < 8; attempt++) {
+      const existing = await kvsAuditStorageAdapter.getHead();
+      if (existing && typeof existing.lastSeq === 'number' && existing.lastSeq >= targetHead.lastSeq) {
+        const tailHead = await resolveChainTailFromHead(kvsAuditStorageAdapter, existing);
+        if (tailHead.lastSeq <= existing.lastSeq && tailHead.headHash === existing.headHash) {
+          return;
+        }
+        targetHead = tailHead;
+      }
       const prev = await kvs.set<AuditHead, AuditHead>(AUDIT_HEAD_KEY, targetHead, {
         keyPolicy: 'OVERRIDE',
         returnValue: 'PREVIOUS',
@@ -237,7 +237,7 @@ export function createInMemoryAuditStorageAdapter(): BatchAuditStorageAdapter {
     },
     getEntry: async (seq: number) => {
       const entry = entries.get(seq);
-      return entry ? cloneAuditValue(entry) : undefined;
+      return entry ? cloneJsonValue(entry) : undefined;
     },
     getEntriesBatch: async (seqs: number[]) => {
       const uniqueSeqs = Array.from(new Set(seqs.filter((seq) => Number.isInteger(seq) && seq >= 1)));
@@ -245,7 +245,7 @@ export function createInMemoryAuditStorageAdapter(): BatchAuditStorageAdapter {
       for (const seq of uniqueSeqs) {
         const entry = entries.get(seq);
         if (entry) {
-          result.set(seq, cloneAuditValue(entry));
+          result.set(seq, cloneJsonValue(entry));
         }
       }
       return result;
@@ -254,7 +254,7 @@ export function createInMemoryAuditStorageAdapter(): BatchAuditStorageAdapter {
       if (entries.has(seq)) {
         return 'EXISTS';
       }
-      entries.set(seq, cloneAuditValue(entry));
+      entries.set(seq, cloneJsonValue(entry));
       return 'CREATED';
     },
   };

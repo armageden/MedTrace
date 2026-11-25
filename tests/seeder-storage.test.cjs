@@ -367,24 +367,58 @@ test.describe('Task 1B-Seeder: Cold-Start LIVE Isolation, Migration & Overwrite 
     });
   });
 
-  test.it('migrates legacy SINGLE_KEY_V1 active_suite to SHARDED_V2 and deletes legacy key', async () => {
-    const links = makeSyntheticLinks(2);
-    const legacySuite = ComplianceEngine.generateComplianceReport(links, 'LIVE', 'Legacy Medical Suite');
-    delete legacySuite.initialized;
-    legacySuite.storageFormat = 'SINGLE_KEY_V1';
-
-    const kvsMock = createFullMockForgeKvs({
-      'medtrace:compliance:active_suite': legacySuite,
-    });
-
+  test.it('commitSuiteMutation catches rollback save failure cleanly and rethrows primary audit error', async () => {
+    const kvsMock = createFullMockForgeKvs();
     await withForgeMocks({ kvsMock }, async () => {
-      const migrated = await SeederService.getActiveComplianceSuite();
-      assert.strictEqual(migrated.storageFormat, 'SHARDED_V2');
-      assert.strictEqual(migrated.datasetMode, 'LIVE');
-      assert.strictEqual(migrated.initialized, true);
-      assert.strictEqual(migrated.totalHazards, 2);
-      assert.ok(kvsMock.store.has('medtrace:compliance:suite_meta'));
-      assert.strictEqual(kvsMock.store.has('medtrace:compliance:active_suite'), false, 'Legacy key must be deleted after migration');
+      const links = makeSyntheticLinks(1);
+      const suiteV1 = ComplianceEngine.generateComplianceReport(links, 'LIVE', 'Rollback Guard Suite', {
+        initialized: true,
+      });
+      await SeederService.saveComplianceSuite(suiteV1, 0);
+
+      const suiteV2 = ComplianceEngine.generateComplianceReport(
+        makeSyntheticLinks(2),
+        'LIVE',
+        'Rollback Guard Suite',
+        { initialized: true }
+      );
+
+      const origAppend = AuditLogService.append;
+      AuditLogService.append = async () => {
+        throw new Error('Primary audit append failure');
+      };
+
+      const origSave = SeederService.saveComplianceSuite.bind(SeederService);
+      let saveCount = 0;
+      SeederService.saveComplianceSuite = async (summary, expectedVersion) => {
+        saveCount += 1;
+        if (saveCount === 2) {
+          throw new Error('Secondary rollback error that must not mask primary');
+        }
+        return origSave(summary, expectedVersion);
+      };
+
+      try {
+        await assert.rejects(
+          () =>
+            SeederService.commitSuiteMutation({
+              summary: suiteV2,
+              expectedVersion: 1,
+              auditEntry: {
+                actorAccountId: 'acc-1',
+                action: 'SYNC_LIVE',
+                targetKey: 'Rollback Guard Suite',
+                details: { ok: true },
+                authMethod: 'FORGE_USER_SESSION',
+              },
+            }),
+          /Primary audit append failure/
+        );
+        assert.strictEqual(saveCount, 2, 'Expected commit save followed by guarded rollback attempt');
+      } finally {
+        AuditLogService.append = origAppend;
+        SeederService.saveComplianceSuite = origSave;
+      }
     });
   });
 
@@ -1031,7 +1065,7 @@ test.describe('Task 1B-Seeder: bindIssueToHazard & recordTestResult Hardening (C
     assert.strictEqual(linkAfterFail.hazard.status, 'UNVERIFIED_RISK');
   });
 
-  test.it('reuses unchanged v<version> link shards on delta writes and serves issueKeyFilter reads in O(1) KVS reads', async () => {
+  test.it('stages >25 links across v<version> shards, rolls back failed v3 staging cleanly, and serves issueKeyFilter reads in O(1) KVS reads', async () => {
     const links30 = makeSyntheticLinks(30);
     const kvsMock = createFullMockForgeKvs();
 
@@ -1041,7 +1075,7 @@ test.describe('Task 1B-Seeder: bindIssueToHazard & recordTestResult Hardening (C
       });
       await SeederService.saveComplianceSuite(suiteV1, 0);
 
-      // Modify only link #1 and shrink/preserve remaining 29 unchanged links -> v2 delta write
+      // Modify link #1 -> writes v2 shards cleanly without relying on volatile per-isolate state
       const modifiedLinks = links30.map((l, idx) =>
         idx === 0
           ? {
@@ -1054,20 +1088,9 @@ test.describe('Task 1B-Seeder: bindIssueToHazard & recordTestResult Hardening (C
         initialized: true,
       });
 
-      kvsMock.calls.batchSet.length = 0;
-      kvsMock.calls.batchDelete.length = 0;
       await SeederService.saveComplianceSuite(suiteV2, 1);
 
-      const totalStagedWrites = kvsMock.calls.batchSet.reduce((acc, batch) => acc + batch.length, 0);
-      assert.strictEqual(
-        totalStagedWrites,
-        1,
-        `Expected delta write of 1 modified link shard (reusing 29 unchanged v1 shards), wrote ${totalStagedWrites}`
-      );
-      const deletedCount = kvsMock.calls.batchDelete.reduce((acc, batch) => acc + batch.length, 0);
-      assert.strictEqual(deletedCount, 1, 'Expected only superseded v1 key for modified HAZ-1 to be deleted');
-
-      // Simulate cold lambda staging failure rollback on v3: reused v1 shards must survive!
+      // Simulate cold lambda staging failure rollback on v3: committed v2 shards must survive!
       const v3Links = modifiedLinks.map((l, idx) =>
         idx === 1 ? { ...l, work: { ...l.work, title: 'Mutate 2 Fails' } } : l
       );
@@ -1166,116 +1189,6 @@ test.describe('Task 1B-Seeder: bindIssueToHazard & recordTestResult Hardening (C
       );
       assert.strictEqual(remainingIndexShards.length, 0, 'Old meta_index shards must be garbage-collected');
     });
-  });
-
-  test.it('signOffPart11 accepts valid ECDSA P-256 + HMAC hybrid signatures, rejects forged keys, and clears stale ECDSA fields on HMAC-only re-sign', async () => {
-    const links = makeSyntheticLinks(1);
-    const target = links[0];
-    await SeederService.saveComplianceSuite(
-      ComplianceEngine.generateComplianceReport(links, 'LIVE', 'Hybrid ECDSA Suite', { initialized: true }),
-      0
-    );
-
-    seederMod.setUserIdentityResolver({
-      resolveSignerIdentity: async ({ actorAccountId }) => ({
-        accountId: actorAccountId,
-        displayName: `ECDSA Signer (${actorAccountId})`,
-        role: 'Authorized Atlassian User',
-        authSource: 'JIRA_MYSELF',
-      }),
-    });
-
-    const kp = ComplianceEngine.generateEcdsaP256KeyPair();
-    const otherKp = ComplianceEngine.generateEcdsaP256KeyPair();
-    const challenge = ComplianceEngine.computePart11ClientChallenge({
-      hazardKey: target.hazard.key,
-      specId: target.spec.id,
-      artifactSha256: target.spec.sha256Hash,
-      meaning: 'Hybrid ECDSA P-256 clinical sign-off',
-      attestationPhrase: PART11_ATTESTATION_PHRASE,
-    });
-    const validClientSig = ComplianceEngine.signPart11ClientChallenge(challenge, kp.privateKeyPkcs8Base64);
-    const wrongClientSig = ComplianceEngine.signPart11ClientChallenge(challenge, otherKp.privateKeyPkcs8Base64);
-
-    // Mismatched signature/keypair must fail before mutating suite or audit log
-    await assert.rejects(
-      () =>
-        SeederService.signOffPart11({
-          hazardKey: target.hazard.key,
-          specId: target.spec.id,
-          attestation: {
-            meaning: 'Hybrid ECDSA P-256 clinical sign-off',
-            attestationConfirmed: true,
-            attestationChecked: true,
-            attestationPhrase: PART11_ATTESTATION_PHRASE,
-            clientPublicKeySpki: kp.publicKeySpkiBase64,
-            clientSignatureBase64: wrongClientSig,
-          },
-          actorAccountId: 'acc-ecdsa-signer',
-        }),
-      /PART11_CLIENT_SIGNATURE_INVALID/
-    );
-
-    // Valid hybrid signature succeeds and records ECDSA metadata on link, baseline, and audit log
-    const hybridSigned = await SeederService.signOffPart11({
-      hazardKey: target.hazard.key,
-      specId: target.spec.id,
-      attestation: {
-        meaning: 'Hybrid ECDSA P-256 clinical sign-off',
-        attestationConfirmed: true,
-        attestationChecked: true,
-        attestationPhrase: PART11_ATTESTATION_PHRASE,
-        clientPublicKeySpki: kp.publicKeySpkiBase64,
-        clientSignatureBase64: validClientSig,
-      },
-      actorAccountId: 'acc-ecdsa-signer',
-    });
-
-    const sig = hybridSigned.traceLinks[0].signature;
-    assert.strictEqual(hybridSigned.traceLinks[0].complianceState, 'VERIFIED');
-    assert.strictEqual(sig.signatureAlgorithm, 'ECDSA-P256-SHA256+HMAC-SEAL-V1');
-    assert.strictEqual(sig.clientPublicKeySpki, kp.publicKeySpkiBase64);
-    assert.strictEqual(sig.clientSignatureBase64, validClientSig);
-    assert.strictEqual(sig.clientKeyFingerprint, kp.keyFingerprint);
-    assert.strictEqual(
-      ComplianceEngine.verifyPart11Seal(
-        target.hazard.key,
-        target.spec.id,
-        sig,
-        process.env.MEDTRACE_PART11_SECRET
-      ),
-      true
-    );
-
-    const baseline = await SeederService.getSignedSpecBaseline(target.spec.id, target.hazard.key);
-    assert.strictEqual(baseline.signatureAlgorithm, 'ECDSA-P256-SHA256+HMAC-SEAL-V1');
-    assert.strictEqual(baseline.clientKeyFingerprint, kp.keyFingerprint);
-    assert.strictEqual(baseline.clientSignatureBase64, validClientSig);
-
-    const auditEntries = await AuditLogService.getAuditLog(10);
-    const signOffAudit = auditEntries.find((e) => e.action === 'PART11_SIGNOFF');
-    assert.ok(signOffAudit);
-    assert.strictEqual(signOffAudit.details.signatureAlgorithm, 'ECDSA-P256-SHA256+HMAC-SEAL-V1');
-    assert.strictEqual(signOffAudit.details.clientKeyFingerprint, kp.keyFingerprint);
-
-    // Re-signing without client ECDSA fields cleanly resets to HMAC-SHA256-SEAL-V1 without stale ECDSA leftovers
-    const hmacOnly = await SeederService.signOffPart11({
-      hazardKey: target.hazard.key,
-      specId: target.spec.id,
-      attestation: {
-        meaning: 'Standard HMAC re-certification',
-        attestationConfirmed: true,
-        attestationChecked: true,
-        attestationPhrase: PART11_ATTESTATION_PHRASE,
-      },
-      actorAccountId: 'acc-hmac-signer',
-    });
-    const resetSig = hmacOnly.traceLinks[0].signature;
-    assert.strictEqual(hmacOnly.traceLinks[0].complianceState, 'VERIFIED');
-    assert.strictEqual(resetSig.signatureAlgorithm, 'HMAC-SHA256-SEAL-V1');
-    assert.strictEqual(resetSig.clientSignatureBase64, undefined);
-    assert.strictEqual(resetSig.clientPublicKeySpki, undefined);
-    assert.strictEqual(resetSig.clientKeyFingerprint, undefined);
   });
 
   test.it('signOffPart11 rejects missing-sentinel / empty-sha256 specs and enforces LIVE test evidence & cryptographic seals consistently', async () => {
@@ -1509,8 +1422,15 @@ test.describe('Task 1B-Seeder: bindIssueToHazard & recordTestResult Hardening (C
   test.it('signOffPart11 updates all sibling links sharing the same (hazardKey, specId) approval baseline', async () => {
     const kvsMock = createFullMockForgeKvs();
     const asUserImpl = () => ({
-      requestJira: async () =>
-        makeJsonResponse(200, { accountId: 'acc-qa-lead', displayName: 'QA Lead', active: true }),
+      requestJira: async (routeObj) => {
+        const r = String(routeObj?.value_ || routeObj?.value || routeObj);
+        if (r.includes('/rest/api/3/mypermissions')) {
+          return makeJsonResponse(200, {
+            permissions: { EDIT_ISSUES: { havePermission: true } },
+          });
+        }
+        return makeJsonResponse(200, { accountId: 'acc-qa-lead', displayName: 'QA Lead', active: true });
+      },
     });
     await withForgeMocks({ kvsMock, asUserImpl }, async () => {
       const specHash = crypto.createHash('sha256').update('shared-srs-5.5').digest('hex');
@@ -1613,5 +1533,182 @@ test.describe('Task 1B-Seeder: bindIssueToHazard & recordTestResult Hardening (C
       assert.strictEqual(med3.complianceState, 'SIGNATURE_DRIFT');
       assert.strictEqual(med3.signature.isValid, false);
     });
+  });
+
+  test.it('recordTestResult updates all trace links sharing the same testKey and records affectedWorkKeys', async () => {
+    SeederService.resetInMemoryState();
+    resetInMemoryAuditStorage();
+
+    const spec = {
+      id: 'srs-test-shared',
+      pageId: '88010',
+      title: 'SRS-88010: Shared Test Spec',
+      version: 1,
+      sha256Hash: 'hash-shared-test',
+      lastSignedHash: 'hash-shared-test',
+      isSignatureInvalidated: false,
+      contentSnippet: 'Shared test spec',
+      lastUpdated: '2026-11-20T00:00:00Z',
+    };
+    const untested = {
+      id: 't-shared-88',
+      testKey: 'TEST-88',
+      title: 'Shared HIL Verification',
+      testType: 'Automated HIL (Hardware-in-Loop)',
+      status: 'UNTESTED',
+    };
+    const emptySig = {
+      id: 'sig-shared-test',
+      signedBy: '',
+      signedAt: '',
+      role: 'Regulatory Authority',
+      meaning: 'Pending',
+      artifactSha256: '',
+      isValid: false,
+    };
+
+    const link1 = ComplianceEngine.evaluateTraceLink(
+      { id: 'haz-t1', key: 'HAZ-T1', title: 'Hazard 1', riskClass: 'CLASS_C', mitigationRequirementId: 'srs-test-shared', status: 'UNVERIFIED_RISK' },
+      { ...spec },
+      { id: 'w-t1', key: 'MED-1', title: 'Work 1', status: 'Done', assignee: 'Alice' },
+      { ...untested },
+      { ...emptySig },
+      undefined,
+      { linkId: 'link-shared-t1', requireTestEvidence: true }
+    );
+    const link2 = ComplianceEngine.evaluateTraceLink(
+      { id: 'haz-t2', key: 'HAZ-T2', title: 'Hazard 2', riskClass: 'CLASS_C', mitigationRequirementId: 'srs-test-shared', status: 'UNVERIFIED_RISK' },
+      { ...spec },
+      { id: 'w-t2', key: 'MED-2', title: 'Work 2', status: 'Done', assignee: 'Bob' },
+      { ...untested },
+      { ...emptySig },
+      undefined,
+      { linkId: 'link-shared-t2', requireTestEvidence: true }
+    );
+    const link3 = ComplianceEngine.evaluateTraceLink(
+      { id: 'haz-t3', key: 'HAZ-T3', title: 'Hazard 3', riskClass: 'CLASS_A', mitigationRequirementId: 'srs-test-shared', status: 'UNVERIFIED_RISK' },
+      { ...spec },
+      { id: 'w-t3', key: 'MED-3', title: 'Work 3', status: 'Done', assignee: 'Cara' },
+      { ...untested, id: 't-other-99', testKey: 'TEST-99' },
+      { ...emptySig },
+      undefined,
+      { linkId: 'link-other-t3', requireTestEvidence: true }
+    );
+
+    await SeederService.saveComplianceSuite(
+      ComplianceEngine.generateComplianceReport([link1, link2, link3], 'LIVE', 'Shared Test Suite', { initialized: true }),
+      0
+    );
+
+    const updated = await SeederService.recordTestResult({
+      hazardKey: 'HAZ-T1',
+      linkId: 'link-shared-t1',
+      testKey: 'TEST-88',
+      status: 'PASSED',
+      evidenceUrl: 'https://ci.example/runs/hil-88',
+      executionDate: '2026-11-25T10:00:00Z',
+      notes: 'All HIL assertions passed',
+      actorAccountId: 'acc-qa-1',
+    });
+
+    const out1 = updated.traceLinks.find((l) => l.id === 'link-shared-t1');
+    const out2 = updated.traceLinks.find((l) => l.id === 'link-shared-t2');
+    const out3 = updated.traceLinks.find((l) => l.id === 'link-other-t3');
+    assert.strictEqual(out1.test.status, 'PASSED');
+    assert.strictEqual(out2.test.status, 'PASSED');
+    assert.strictEqual(out2.test.evidenceUrl, 'https://ci.example/runs/hil-88');
+    assert.strictEqual(out2.test.notes, 'All HIL assertions passed');
+    assert.strictEqual(out3.test.status, 'UNTESTED');
+
+    const audit = await AuditLogService.getAuditLog(5);
+    const recEntry = audit.find((e) => e.action === 'RECORD_TEST_RESULT');
+    assert.ok(recEntry);
+    assert.deepStrictEqual(recEntry.details.affectedWorkKeys, ['MED-1', 'MED-2']);
+  });
+
+  test.it('createReverificationTask retries CAS conflict after Jira issue creation without duplicate POST /rest/api/3/issue', async () => {
+    const kvsMock = createFullMockForgeKvs();
+    const spec = {
+      id: 'srs-cas-1',
+      pageId: '4401',
+      title: 'SRS Cas 1',
+      version: 2,
+      sha256Hash: 'b'.repeat(64),
+      lastSignedHash: 'a'.repeat(64),
+      isSignatureInvalidated: true,
+      contentSnippet: 'Drifted spec',
+      lastUpdated: '2026-11-25T00:00:00Z',
+    };
+    const link1 = ComplianceEngine.evaluateTraceLink(
+      { id: 'haz-cas-1', key: 'HAZ-CAS-1', title: 'Cas Hazard 1', riskClass: 'CLASS_C', mitigationRequirementId: 'srs-cas-1', status: 'ACTION_REQUIRED' },
+      spec,
+      { id: 'w-cas-1', key: 'MED-1', title: 'Cas Work 1', status: 'Done', assignee: 'Alice' },
+      { id: 't-cas-1', testKey: 'TEST-CAS-1', title: 'Cas Test 1', testType: 'Unit Test', status: 'UNTESTED' },
+      { id: 'sig-cas-1', signedBy: 'Alice', signedByAccountId: 'acc-1', signedAt: '2026-11-24T00:00:00Z', role: 'QA', meaning: 'Approved', artifactSha256: 'a'.repeat(64), isValid: false },
+      undefined,
+      { linkId: 'link-cas-1' }
+    );
+    const baseSuite = ComplianceEngine.generateComplianceReport([link1], 'LIVE', 'CAS Retry Suite', {
+      initialized: true,
+    });
+
+    let postIssueCalls = 0;
+    let simulatedConcurrentBump = false;
+    const mockReq = async (routeObj, opts) => {
+      const r = String(routeObj?.value_ || routeObj || '');
+      if (r.includes('/rest/api/3/mypermissions')) {
+        return makeJsonResponse(200, {
+          permissions: {
+            BROWSE_PROJECTS: { havePermission: true },
+            EDIT_ISSUES: { havePermission: true },
+            CREATE_ISSUES: { havePermission: true },
+          },
+        });
+      }
+      if (r.includes('/rest/api/3/issue/createmeta/MED/issuetypes')) {
+        return makeJsonResponse(200, { issueTypes: [{ id: '1', name: 'Task', subtask: false }] });
+      }
+      if (r === '/rest/api/3/issue' && opts?.method === 'POST') {
+        postIssueCalls++;
+        if (!simulatedConcurrentBump) {
+          simulatedConcurrentBump = true;
+          const { summary: concurrentSuite, version: concurrentVer } = await SeederService.getSuiteWithVersion();
+          await SeederService.saveComplianceSuite(
+            { ...concurrentSuite, projectName: 'CAS Retry Suite Concurrent Update' },
+            concurrentVer
+          );
+        }
+        return makeJsonResponse(201, { id: '201', key: 'MED-201' });
+      }
+      if (r === '/rest/api/3/issueLinkType') {
+        return makeJsonResponse(200, { issueLinkTypes: [{ name: 'Relates' }] });
+      }
+      if (r === '/rest/api/3/issueLink' && opts?.method === 'POST') {
+        return makeJsonResponse(201, {});
+      }
+      return makeJsonResponse(404, {});
+    };
+
+    await withForgeMocks(
+      {
+        kvsMock,
+        asUserImpl: () => ({ requestJira: mockReq }),
+        asAppImpl: () => ({ requestJira: mockReq }),
+      },
+      async () => {
+        await SeederService.saveComplianceSuite(baseSuite, 0);
+
+        const res = await SeederService.createReverificationTask({
+          hazardKey: 'HAZ-CAS-1',
+          linkId: 'link-cas-1',
+          actorAccountId: 'acc-qa',
+          callerMode: 'USER',
+        });
+        assert.strictEqual(res.createdIssueKey, 'MED-201');
+        assert.strictEqual(postIssueCalls, 1, 'Jira POST /issue must be called only once across CAS retries');
+        const reloaded = await SeederService.getActiveComplianceSuite();
+        assert.strictEqual(reloaded.traceLinks[0].reverificationTaskKey, 'MED-201');
+      }
+    );
   });
 });

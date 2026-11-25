@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { invokeResolver } from '../bridge';
 import { verifyAuditChainBounded } from '../auditVerify';
 import { useDialogA11y } from '../hooks/useDialogA11y';
+import { getSafeHttpsUrl } from '../utils';
 import { AuditChainVerification, AuditLogEntry, ComplianceSummary } from '../types';
 import {
   X,
@@ -15,6 +16,7 @@ import {
 
 interface FdaExportModalProps {
   summary: ComplianceSummary;
+  projectKey?: string;
   onClose: () => void;
   isOpen?: boolean;
 }
@@ -36,25 +38,6 @@ function getDynamicClassification(summary: ComplianceSummary): string {
     return `IEC 62304 Class A (A:${summary.classACount})`;
   }
   return 'IEC 62304 Unclassified (0 hazards)';
-}
-
-function getSafeHttpsUrl(rawUrl?: string): string | null {
-  if (!rawUrl || typeof rawUrl !== 'string') {
-    return null;
-  }
-  const trimmed = rawUrl.trim();
-  if (!/^https:\/\//.test(trimmed)) {
-    return null;
-  }
-  try {
-    const parsed = new URL(trimmed);
-    if (parsed.protocol !== 'https:' || parsed.username || parsed.password) {
-      return null;
-    }
-    return trimmed;
-  } catch {
-    return null;
-  }
 }
 
 /**
@@ -83,6 +66,7 @@ function triggerDownload(filename: string, content: string, mimeType: string): v
 
 export const FdaExportModal: React.FC<FdaExportModalProps> = ({
   summary,
+  projectKey,
   onClose,
   isOpen = true,
 }) => {
@@ -134,10 +118,18 @@ export const FdaExportModal: React.FC<FdaExportModalProps> = ({
   if (!isOpen) return null;
 
   const modePrefix = summary.datasetMode.toLowerCase();
-  const auditTotalEntries =
+  const cleanProjectKey = projectKey?.trim().toUpperCase() || undefined;
+  const isProjectScoped = Boolean(cleanProjectKey && summary.datasetMode === 'LIVE');
+  const auditTotalEntries = isProjectScoped
+    ? auditLogEntries.length
+    : auditVerification?.totalEntries ?? summary.auditEntryCount ?? auditLogEntries.length;
+  const auditGlobalTotalEntries =
     auditVerification?.totalEntries ?? summary.auditEntryCount ?? auditLogEntries.length;
   const auditLedgerTruncated = Boolean(
-    auditVerification && auditVerification.totalEntries > auditLogEntries.length
+    auditVerification &&
+      (isProjectScoped
+        ? auditLogEntries.length >= 200 && auditVerification.totalEntries > auditLogEntries.length
+        : auditVerification.totalEntries > auditLogEntries.length)
   );
 
   const handleDownloadJson = () => {
@@ -152,6 +144,7 @@ export const FdaExportModal: React.FC<FdaExportModalProps> = ({
         blockingReasons: summary.blockingReasons,
         auditEntriesIncluded: auditLogEntries.length,
         auditTotalEntries,
+        auditGlobalTotalEntries,
         auditLedgerTruncated,
         clientGeneratedNotice:
           'Client-assembled export snapshot of Forge KVS compliance and project-scoped audit state; verify chain integrity independently before regulatory reliance.',
@@ -557,6 +550,26 @@ export const FdaExportModal: React.FC<FdaExportModalProps> = ({
                 )}
               </div>
             )}
+            {isProjectScoped && auditVerification && !auditLedgerTruncated && auditGlobalTotalEntries > auditLogEntries.length && (
+              <div
+                role="status"
+                style={{
+                  marginTop: 8,
+                  padding: '8px 10px',
+                  borderRadius: 4,
+                  background: 'var(--mt-brand-subtle-bg, #deebff)',
+                  border: '1px solid var(--mt-border-subtle)',
+                  color: 'var(--mt-text-primary)',
+                  fontSize: 11,
+                  fontWeight: 600,
+                }}
+              >
+                Export includes {auditLogEntries.length} audit{' '}
+                {auditLogEntries.length === 1 ? 'entry' : 'entries'} scoped to project{' '}
+                {cleanProjectKey} (global ledger holds {auditGlobalTotalEntries} verified chained
+                entries).
+              </div>
+            )}
             {auditLedgerTruncated && auditVerification && (
               <div
                 role="status"
@@ -678,10 +691,22 @@ export const FdaExportModal: React.FC<FdaExportModalProps> = ({
                         padding: '8px 10px',
                         color: link.signature.isValid
                           ? 'var(--mt-success-text)'
-                          : 'var(--mt-danger-text)',
+                          : link.signature.artifactSha256 ||
+                              link.signature.signedBy ||
+                              link.signature.signedAt ||
+                              link.signature.invalidatedAt
+                            ? 'var(--mt-danger-text)'
+                            : 'var(--mt-warning-text)',
                       }}
                     >
-                      {link.signature.isValid ? 'VALID' : 'INVALIDATED (DRIFT)'}
+                      {link.signature.isValid
+                        ? 'VALID'
+                        : link.signature.artifactSha256 ||
+                            link.signature.signedBy ||
+                            link.signature.signedAt ||
+                            link.signature.invalidatedAt
+                          ? 'INVALIDATED (DRIFT)'
+                          : 'UNSIGNED'}
                     </td>
                   </tr>
                 );

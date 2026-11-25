@@ -12,6 +12,7 @@ import {
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import { HazardNode, SpecNode, WorkNode, TestNode, SignatureNode, FlowLinkRef, FlowNodePayload } from './CustomNodes';
+import { LiveOnboardingCard } from './LiveOnboardingCard';
 import { ComplianceSummary } from '../types';
 import { useDialogA11y } from '../hooks/useDialogA11y';
 
@@ -19,6 +20,9 @@ interface LineageGraphProps {
   summary: ComplianceSummary;
   compact?: boolean;
   onSelectTraceLink: (linkId: string) => void;
+  onSyncLive?: () => void;
+  onSeedDemo?: () => void;
+  isBusy?: boolean;
 }
 
 const nodeTypes: NodeTypes = {
@@ -133,7 +137,14 @@ const StageHeaderOverlay: React.FC = () => {
   );
 };
 
-export const LineageGraph: React.FC<LineageGraphProps> = ({ summary, compact = false, onSelectTraceLink }) => {
+export const LineageGraph: React.FC<LineageGraphProps> = ({
+  summary,
+  compact = false,
+  onSelectTraceLink,
+  onSyncLive,
+  onSeedDemo,
+  isBusy = false,
+}) => {
   const [ambiguousRefs, setAmbiguousRefs] = useState<FlowLinkRef[] | null>(null);
   const popoverRef = useRef<HTMLDivElement | null>(null);
   const prefersReducedMotion = usePrefersReducedMotion();
@@ -343,6 +354,28 @@ export const LineageGraph: React.FC<LineageGraphProps> = ({ summary, compact = f
         <Controls />
         {!compact && <MiniMap nodeColor={minimapNodeColor} style={{ height: 100, width: 140 }} />}
       </ReactFlow>
+      {summary.datasetMode === 'LIVE' &&
+        summary.initialized === false &&
+        summary.traceLinks.length === 0 && (
+          <div
+            style={{
+              position: 'absolute',
+              inset: 0,
+              zIndex: 20,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              padding: 24,
+              pointerEvents: 'auto',
+            }}
+          >
+            <LiveOnboardingCard
+              onSyncLive={onSyncLive}
+              onSeedDemo={onSeedDemo}
+              isBusy={isBusy}
+            />
+          </div>
+        )}
     </div>
   );
 };

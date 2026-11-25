@@ -249,11 +249,12 @@ describe('FE-01..FE-04 & FE-07: App races, bridge errors, confirm seed, and tran
     await user.click(screen.getByRole('button', { name: /matrix/i }));
     await user.click(screen.getByRole('button', { name: 'Inspect HAZ-101 lineage' }));
 
-    // Trigger 8s poll while drawer is open
+    // Trigger 30s poll while drawer is open
     await act(async () => {
-      vi.advanceTimersByTime(8000);
+      vi.advanceTimersByTime(30000);
     });
     expect(getSuiteCount).toBe(2);
+    expect(mockedInvokeResolver).toHaveBeenCalledWith('getComplianceSuite', { skipReconcile: true });
 
     // Execute Part 11 sign-off while slow poll is still pending
     await user.type(
@@ -407,7 +408,7 @@ describe('FE-01..FE-04 & FE-07: App races, bridge errors, confirm seed, and tran
     });
 
     await waitFor(() => {
-      expect(screen.getByRole('alert')).toHaveTextContent(
+      expect(screen.getByRole('status')).toHaveTextContent(
         /No safety-tracked Jira issues matched the live sync query/i
       );
       expect(syncBtn).toBeEnabled();
@@ -918,7 +919,7 @@ describe('FE-01..FE-04 & FE-07: App races, bridge errors, confirm seed, and tran
     ).toBeInTheDocument();
   });
 
-  it('pauses background 8s polling when initial/auth load fails and resumes on Retry Live Load', async () => {
+  it('pauses background 30s polling when initial/auth load fails and resumes on Retry Live Load', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
     let suiteCalls = 0;
@@ -953,11 +954,45 @@ describe('FE-01..FE-04 & FE-07: App races, bridge errors, confirm seed, and tran
       const callsAfterRetry = suiteCalls;
 
       await act(async () => {
-        vi.advanceTimersByTime(8000);
+        vi.advanceTimersByTime(30000);
       });
       expect(suiteCalls).toBeGreaterThan(callsAfterRetry);
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('renders 4-step live onboarding instructions in uninitialized LIVE state across Graph and Matrix views', async () => {
+    const user = userEvent.setup();
+    const uninitializedLive = makeSuite({
+      projectName: 'Uninitialized Live Workspace',
+      datasetMode: 'LIVE',
+      initialized: false,
+      totalHazards: 0,
+      classCCount: 0,
+      verifiedPercentage: 0,
+      releaseBlocked: true,
+      blockingReasons: ['Run Sync Live Atlassian to scan Jira & Confluence artifacts.'],
+      traceLinks: [],
+    });
+
+    mockedInvokeResolver.mockImplementation(async (key) => {
+      if (key === 'getComplianceSuite') return uninitializedLive;
+      if (key === 'queryGraphContext') return null;
+      return null;
+    });
+
+    cleanup();
+    render(<App />);
+    await screen.findByText('Uninitialized Live Workspace');
+
+    // Graph view (default) must show the guided 4-step live onboarding instructions
+    expect(screen.getByText(/Connect Your Live Jira & Confluence Artifacts/i)).toBeInTheDocument();
+    expect(screen.getByText(/class-a, class-b, or class-c/i)).toBeInTheDocument();
+    expect(screen.getByText(/21 CFR Part 11/i)).toBeInTheDocument();
+
+    // Switching to Matrix view must also show the 4-step live onboarding card
+    await user.click(screen.getByRole('button', { name: /matrix/i }));
+    expect(screen.getByText(/Connect Your Live Jira & Confluence Artifacts/i)).toBeInTheDocument();
   });
 });

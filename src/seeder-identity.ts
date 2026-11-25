@@ -1,6 +1,7 @@
 import api, { route } from '@forge/api';
 import { AuditLogService } from './audit-log';
 import { ComplianceEngine } from './compliance-engine';
+import { JIRA_ISSUE_KEY_RE, JIRA_PROJECT_KEY_RE } from './crypto-utils';
 import { isForgeRuntime } from './runtime';
 import {
   AuthorizedUserIdentity,
@@ -288,8 +289,7 @@ export function mapJiraStatusToWorkStatus(statusField?: {
   return 'To Do';
 }
 
-export const JIRA_PROJECT_KEY_RE = /^[A-Z][A-Z0-9_]{0,20}$/;
-export const JIRA_ISSUE_KEY_RE = /^[A-Z][A-Z0-9_]{0,20}-\d+$/;
+export { JIRA_PROJECT_KEY_RE, JIRA_ISSUE_KEY_RE };
 
 interface JiraBrowsePermissionEntry {
   havePermission?: boolean;
@@ -403,13 +403,20 @@ export function extractPrimaryJiraProjectKeyFromLink(link: TraceLink): string | 
   );
 }
 
+export interface JiraBrowsePermissionResult {
+  httpOk: boolean;
+  status: number;
+  inactive: boolean;
+  allowed: boolean;
+}
+
 /**
- * Checks Jira `BROWSE_PROJECTS` permission for the calling user (failing closed on errors or inactive accounts).
+ * Checks Jira `BROWSE_PROJECTS` permission for the calling user with HTTP/inactive metadata.
  */
-export async function hasJiraBrowsePermissionForCaller(target?: {
+export async function checkJiraBrowsePermissionDetailed(target?: {
   projectKey?: string;
   issueKey?: string;
-}): Promise<boolean> {
+}): Promise<JiraBrowsePermissionResult> {
   const permRoute = target?.issueKey
     ? route`/rest/api/3/mypermissions?issueKey=${target.issueKey}&permissions=BROWSE_PROJECTS`
     : target?.projectKey
@@ -419,23 +426,33 @@ export async function hasJiraBrowsePermissionForCaller(target?: {
   try {
     const res = await api.asUser().requestJira(permRoute);
     if (!isIdentityHttpOk(res)) {
-      return false;
+      return { httpOk: false, status: res.status, inactive: false, allowed: false };
     }
     const data = (await res.json().catch(() => ({}))) as JiraBrowsePermissionsPayload;
     if (data.active === false) {
-      return false;
+      return { httpOk: true, status: res.status, inactive: true, allowed: false };
     }
     const browsePerm = data.permissions?.BROWSE_PROJECTS;
-    if (browsePerm !== undefined) {
-      return browsePerm.havePermission === true;
-    }
-    return (
-      data.permissions?.EDIT_ISSUES?.havePermission === true ||
-      data.permissions?.ADMINISTER_PROJECTS?.havePermission === true
-    );
+    const allowed =
+      browsePerm !== undefined
+        ? browsePerm.havePermission === true
+        : data.permissions?.EDIT_ISSUES?.havePermission === true ||
+          data.permissions?.ADMINISTER_PROJECTS?.havePermission === true;
+    return { httpOk: true, status: res.status, inactive: false, allowed };
   } catch {
-    return false;
+    return { httpOk: false, status: 500, inactive: false, allowed: false };
   }
+}
+
+/**
+ * Checks Jira `BROWSE_PROJECTS` permission for the calling user (failing closed on errors or inactive accounts).
+ */
+export async function hasJiraBrowsePermissionForCaller(target?: {
+  projectKey?: string;
+  issueKey?: string;
+}): Promise<boolean> {
+  const res = await checkJiraBrowsePermissionDetailed(target);
+  return res.httpOk && !res.inactive && res.allowed;
 }
 
 /**
@@ -664,12 +681,24 @@ export async function authorizeAndFilterLiveSuiteDetailed(
     }
 
     jiraAuthorizedLinks.push(link);
+  }
 
-    const pageId = typeof link.spec?.pageId === 'string' ? link.spec.pageId.trim() : '';
-    if (checkConfluence && pageId && !link.spec?.isMissingSentinel) {
-      const readable = await canReadPage(pageId);
-      if (!readable) {
-        restrictedPageIds.add(pageId);
+  if (checkConfluence && jiraAuthorizedLinks.length > 0) {
+    const pageIdsToCheck = Array.from(
+      new Set(
+        jiraAuthorizedLinks
+          .map((link) => (typeof link.spec?.pageId === 'string' && !link.spec?.isMissingSentinel ? link.spec.pageId.trim() : ''))
+          .filter(Boolean)
+      )
+    );
+    const CONFLUENCE_PERM_BATCH_SIZE = 5;
+    for (let i = 0; i < pageIdsToCheck.length; i += CONFLUENCE_PERM_BATCH_SIZE) {
+      const batch = pageIdsToCheck.slice(i, i + CONFLUENCE_PERM_BATCH_SIZE);
+      const results = await Promise.all(batch.map((pageId) => canReadPage(pageId)));
+      for (let j = 0; j < batch.length; j += 1) {
+        if (!results[j]) {
+          restrictedPageIds.add(batch[j]);
+        }
       }
     }
   }
@@ -678,6 +707,13 @@ export async function authorizeAndFilterLiveSuiteDetailed(
     cleanScopeProject && !suite.projectName.toUpperCase().startsWith(cleanScopeProject)
       ? `${cleanScopeProject} (${suite.projectName})`
       : suite.projectName;
+
+  const hasProjectIncompleteList =
+    Array.isArray(suite.incompleteProjectKeys) && suite.incompleteProjectKeys.length > 0;
+  const scopedSyncIncomplete =
+    cleanScopeProject && hasProjectIncompleteList
+      ? suite.incompleteProjectKeys!.includes(cleanScopeProject)
+      : suite.syncIncomplete;
 
   const unredactedSuite =
     jiraAuthorizedLinks.length === suite.traceLinks.length
@@ -692,6 +728,12 @@ export async function authorizeAndFilterLiveSuiteDetailed(
             auditHeadHash: suite.auditHeadHash,
             initialized: suite.initialized,
             lastSyncedAt: suite.lastSyncedAt,
+            syncIncomplete: scopedSyncIncomplete,
+            ...(hasProjectIncompleteList && (!cleanScopeProject || suite.incompleteProjectKeys!.includes(cleanScopeProject))
+              ? {
+                  incompleteProjectKeys: cleanScopeProject ? [cleanScopeProject] : suite.incompleteProjectKeys,
+                }
+              : {}),
           }
         );
 

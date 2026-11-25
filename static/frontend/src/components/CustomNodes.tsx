@@ -202,7 +202,7 @@ const SpecNodeInner: React.FC<NodeProps<Node<FlowNodePayload<ConfluenceSpec>>>> 
         </div>
       </div>
       <div style={clampTextStyle}>{specTitle}</div>
-      {spec.isSignatureInvalidated && (
+      {!spec.isMissingSentinel && spec.isSignatureInvalidated && (
         <div
           style={{
             marginTop: 6,
@@ -399,18 +399,40 @@ const SignatureNodeInner: React.FC<NodeProps<Node<FlowNodePayload<Part11Signatur
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
           <SharedCountBadge count={data.linkRefs.length} />
-          <span
-            style={{
-              fontSize: 10,
-              fontWeight: 800,
-              padding: '2px 6px',
-              borderRadius: 4,
-              background: sig.isValid ? 'var(--mt-success-bg, #e3fcef)' : 'var(--mt-danger-bg, #ffebe6)',
-              color: sig.isValid ? 'var(--mt-success-text, #006644)' : 'var(--mt-danger-text, #bf2600)',
-            }}
-          >
-            {sig.isValid ? 'CERTIFIED' : 'INVALIDATED'}
-          </span>
+          {(() => {
+            const hasPriorSignOff = Boolean(
+              sig.artifactSha256 || sig.signedBy || sig.signedAt || sig.invalidatedAt
+            );
+            const badgeBg = sig.isValid
+              ? 'var(--mt-success-bg, #e3fcef)'
+              : hasPriorSignOff
+                ? 'var(--mt-danger-bg, #ffebe6)'
+                : 'var(--mt-warning-bg, #fffae6)';
+            const badgeColor = sig.isValid
+              ? 'var(--mt-success-text, #006644)'
+              : hasPriorSignOff
+                ? 'var(--mt-danger-text, #bf2600)'
+                : 'var(--mt-warning-text, #974f0c)';
+            const badgeLabel = sig.isValid
+              ? 'CERTIFIED'
+              : hasPriorSignOff
+                ? 'INVALIDATED'
+                : 'UNSIGNED';
+            return (
+              <span
+                style={{
+                  fontSize: 10,
+                  fontWeight: 800,
+                  padding: '2px 6px',
+                  borderRadius: 4,
+                  background: badgeBg,
+                  color: badgeColor,
+                }}
+              >
+                {badgeLabel}
+              </span>
+            );
+          })()}
         </div>
       </div>
       <div style={{ fontSize: 11, color: 'var(--mt-text-primary, #172b4d)', fontWeight: 600 }}>
@@ -425,7 +447,7 @@ const SignatureNodeInner: React.FC<NodeProps<Node<FlowNodePayload<Part11Signatur
           fontFamily: 'monospace',
         }}
       >
-        SHA: {(sig.artifactSha256 || '').slice(0, 12)}...
+        {sig.artifactSha256 ? `SHA: ${sig.artifactSha256.slice(0, 12)}...` : 'SHA: Pending sign-off'}
       </div>
     </div>
   );

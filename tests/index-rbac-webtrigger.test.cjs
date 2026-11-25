@@ -2786,4 +2786,454 @@ test.describe('SEC-01 & SEC-03: Resolver RBAC, Confused-Deputy, Part 11 & Webtri
       }
     );
   });
+
+  test.it('honors getComplianceSuite skipReconcile=true and reconciles stale Confluence pages on verify-release-gate & keyless workflowValidator', async () => {
+    const secret = 'reconcile-gate-secret-999';
+    process.env.MEDTRACE_MCP_SECRET = secret;
+    process.env.MEDTRACE_PART11_SECRET = 'part11-gate-secret-999';
+    setNonceStore(createInMemoryNonceStore());
+
+    const origBody = '<p>Approved Gate Spec v1</p>';
+    const modifiedBody = '<p>Modified Unsigned Gate Spec v2</p>';
+    const crypto = require('node:crypto');
+    const origHash = crypto.createHash('sha256').update(origBody).digest('hex');
+    const signedAt = '2026-11-20T00:00:00.000Z';
+    const { ComplianceEngine } = require('../dist/compliance-engine');
+    const { LiveIngestionService } = require('../dist/ingestion');
+    const { workflowValidatorHandler } = require('../dist/workflow-validator');
+
+    const seal = ComplianceEngine.computePart11Seal(
+      {
+        hazardKey: 'HAZ-GATE-1',
+        specId: '92001',
+        artifactSha256: origHash,
+        signedByAccountId: 'op-gate',
+        signedBy: 'Gate Approver',
+        role: 'QA',
+        meaning: 'Approved',
+        signedAt,
+        authMethod: 'PART11_ATTESTATION',
+      },
+      process.env.MEDTRACE_PART11_SECRET
+    );
+    const verifiedLink = ComplianceEngine.evaluateTraceLink(
+      { id: 'haz-gate-1', key: 'HAZ-GATE-1', title: 'Gate Hazard', riskClass: 'CLASS_C', mitigationRequirementId: '92001', status: 'MITIGATED' },
+      { id: '92001', pageId: '92001', title: 'SRS-92001', version: 1, sha256Hash: origHash, lastSignedHash: origHash, isSignatureInvalidated: false, contentSnippet: 'Approved', lastUpdated: signedAt },
+      { id: 'w-gate-1', key: 'GATE-1', title: 'Gate Work', status: 'Done', assignee: 'Dev' },
+      { id: 't-gate-1', testKey: 'TEST-GATE-1', title: 'Test', testType: 'Unit Test', status: 'PASSED', evidenceUrl: 'https://ci.example/g1', executionDate: signedAt },
+      { id: 'sig-gate-1', signedBy: 'Gate Approver', signedByAccountId: 'op-gate', signedAt, role: 'QA', meaning: 'Approved', artifactSha256: origHash, isValid: true, authMethod: 'PART11_ATTESTATION', signatureAlgorithm: 'HMAC-SHA256-SEAL-V1', signatureSeal: seal },
+      undefined,
+      { linkId: 'link-gate-1', part11Secret: process.env.MEDTRACE_PART11_SECRET, requireCryptographicSeal: true, requireTestEvidence: true }
+    );
+    assert.strictEqual(verifiedLink.complianceState, 'VERIFIED');
+
+    const origReconcile = LiveIngestionService.reconcileConfluenceSpecs;
+    let reconcileCalls = 0;
+    await withForgeMocks(
+      {
+        appContext: { installation: { contexts: [{ cloudId: '11111111-2222-3333-4444-555555555555' }] } },
+        requestJira: async (url) => {
+          if (url === '/rest/api/3/myself') {
+            return makeHttpResponse(200, { accountId: 'op-gate', active: true });
+          }
+          if (url.startsWith('/rest/api/3/mypermissions')) {
+            return makeHttpResponse(200, {
+              permissions: { BROWSE_PROJECTS: { havePermission: true }, EDIT_ISSUES: { havePermission: true } },
+            });
+          }
+          return makeHttpResponse(200, {});
+        },
+        requestConfluence: async (routeObj) => {
+          const r = String(routeObj?.value_ || routeObj?.value || routeObj);
+          if (r.includes('/wiki/api/v2/pages/92001')) {
+            return makeHttpResponse(200, {
+              id: '92001',
+              title: 'SRS-92001',
+              version: { number: 2, createdAt: '2026-11-24T12:00:00.000Z' },
+              body: { storage: { value: modifiedBody } },
+            });
+          }
+          return makeHttpResponse(404, {});
+        },
+      },
+      async () => {
+        await SeederService.saveComplianceSuite(
+          ComplianceEngine.generateComplianceReport([verifiedLink], 'LIVE', 'Gate Suite', { initialized: true }),
+          0
+        );
+
+        LiveIngestionService.reconcileConfluenceSpecs = async (suite, opts) => {
+          reconcileCalls += 1;
+          return origReconcile.call(LiveIngestionService, suite, opts);
+        };
+        try {
+          // Polling skipReconcile=true must not invoke reconcileConfluenceSpecs
+          await resolverHandler(
+            {
+              call: { functionKey: 'getComplianceSuite', payload: { skipReconcile: true } },
+              context: { extension: { type: 'jira:projectPage', project: { key: 'GATE' } } },
+            },
+            { principal: { accountId: 'op-gate' } }
+          );
+          assert.strictEqual(reconcileCalls, 0);
+
+          // verify-release-gate webtrigger must detect modified Confluence page via reconcileConfluenceSpecs
+          const gateBody = JSON.stringify({ action: 'verify-release-gate' });
+          const gateResp = await mcpWebtriggerHandler({
+            method: 'POST',
+            headers: signWebtriggerHeaders(secret, gateBody, 'n-reconcile-gate-1'),
+            body: gateBody,
+          });
+          assert.strictEqual(gateResp.statusCode, 403);
+          assert.strictEqual(JSON.parse(gateResp.body).result, false);
+          assert.ok(reconcileCalls >= 1);
+
+          // Reset to verified baseline, then verify keyless workflowValidatorHandler also detects drift
+          const { version: postGateVersion } = await SeederService.getSuiteWithVersion();
+          await SeederService.saveComplianceSuite(
+            ComplianceEngine.generateComplianceReport([verifiedLink], 'LIVE', 'Gate Suite', { initialized: true }),
+            postGateVersion
+          );
+          const beforeValCalls = reconcileCalls;
+          const valOutcome = await workflowValidatorHandler({ transition: { name: 'Done' } });
+          assert.strictEqual(valOutcome.result, false);
+          assert.ok(reconcileCalls > beforeValCalls);
+        } finally {
+          LiveIngestionService.reconcileConfluenceSpecs = origReconcile;
+        }
+      }
+    );
+  });
+
+  test.it('recordTestResult blocks ACME operator from updating shared testKey also linked to MED project', async () => {
+    const { ComplianceEngine } = require('../dist/compliance-engine.js');
+    const linkAcme = ComplianceEngine.evaluateTraceLink(
+      { id: 'haz-a1', key: 'HAZ-ACME-1', title: 'ACME Haz', riskClass: 'CLASS_C', mitigationRequirementId: 'srs-1', status: 'UNVERIFIED_RISK' },
+      { id: 'srs-1', pageId: '101', title: 'SRS-1', version: 1, sha256Hash: 'h1', lastSignedHash: 'h1', isSignatureInvalidated: false, contentSnippet: 'Spec', lastUpdated: '2026-11-24T00:00:00Z' },
+      { id: 'w-a1', key: 'ACME-1', title: 'ACME Work', status: 'Done', assignee: 'Alice' },
+      { id: 't-shared', testKey: 'TEST-SHARED-1', title: 'Shared Test', testType: 'Unit Test', status: 'UNTESTED' },
+      { id: 'sig-1', signedBy: '', signedAt: '', role: 'QA', meaning: '', artifactSha256: '', isValid: false },
+      undefined,
+      { linkId: 'link-acme-shared', requireTestEvidence: true }
+    );
+    const linkMed = ComplianceEngine.evaluateTraceLink(
+      { id: 'haz-m1', key: 'HAZ-MED-1', title: 'MED Haz', riskClass: 'CLASS_C', mitigationRequirementId: 'srs-1', status: 'UNVERIFIED_RISK' },
+      { id: 'srs-1', pageId: '101', title: 'SRS-1', version: 1, sha256Hash: 'h1', lastSignedHash: 'h1', isSignatureInvalidated: false, contentSnippet: 'Spec', lastUpdated: '2026-11-24T00:00:00Z' },
+      { id: 'w-m1', key: 'MED-1', title: 'MED Work', status: 'Done', assignee: 'Bob' },
+      { id: 't-shared', testKey: 'TEST-SHARED-1', title: 'Shared Test', testType: 'Unit Test', status: 'UNTESTED' },
+      { id: 'sig-1', signedBy: '', signedAt: '', role: 'QA', meaning: '', artifactSha256: '', isValid: false },
+      undefined,
+      { linkId: 'link-med-shared', requireTestEvidence: true }
+    );
+
+    await withForgeMocks(
+      {
+        requestJira: async (routeObj) => {
+          const r = routeToString(routeObj);
+          if (r.includes('/rest/api/3/myself')) {
+            return makeHttpResponse(200, { accountId: 'op-acme-only', active: true });
+          }
+          if (r.includes('/rest/api/3/mypermissions')) {
+            const hasMedAccess = r.includes('MED-1') || r.includes('projectKey=MED');
+            return makeHttpResponse(200, {
+              permissions: {
+                BROWSE_PROJECTS: { havePermission: !hasMedAccess },
+                EDIT_ISSUES: { havePermission: !hasMedAccess },
+              },
+            });
+          }
+          return makeHttpResponse(200, {});
+        },
+        requestConfluence: async () => makeHttpResponse(200, { accountId: 'op-acme-only' }),
+      },
+      async () => {
+        await SeederService.saveComplianceSuite(
+          ComplianceEngine.generateComplianceReport([linkAcme, linkMed], 'LIVE', 'Cross Proj Test', { initialized: true }),
+          0
+        );
+        await assert.rejects(
+          () =>
+            resolverHandler(
+              {
+                call: {
+                  functionKey: 'recordTestResult',
+                  payload: {
+                    hazardKey: 'HAZ-ACME-1',
+                    linkId: 'link-acme-shared',
+                    testKey: 'TEST-SHARED-1',
+                    status: 'PASSED',
+                    evidenceUrl: 'https://ci.example/1',
+                  },
+                },
+                context: { extension: { type: 'jira:projectPage', project: { key: 'ACME' } } },
+              },
+              { principal: { accountId: 'op-acme-only' } }
+            ),
+          /Forbidden/i
+        );
+      }
+    );
+  });
+
+  test.it('assertOperatorAuthorizedForTarget enforces fallback Jira permissions for non-Confluence callers on unlinked targets', async () => {
+    const { ComplianceEngine } = require('../dist/compliance-engine.js');
+    const { assertOperatorAuthorizedForTarget } = require('../dist/index.js');
+    assert.strictEqual(typeof assertOperatorAuthorizedForTarget, 'function');
+
+    const linkMed = ComplianceEngine.evaluateTraceLink(
+      { id: 'haz-m1', key: 'HAZ-MED-1', title: 'MED Haz', riskClass: 'CLASS_C', mitigationRequirementId: 'srs-1', status: 'UNVERIFIED_RISK' },
+      { id: 'srs-1', pageId: '101', title: 'SRS-1', version: 1, sha256Hash: 'h1', lastSignedHash: 'h1', isSignatureInvalidated: false, contentSnippet: 'Spec', lastUpdated: '2026-11-24T00:00:00Z' },
+      { id: 'w-m1', key: 'MED-1', title: 'MED Work', status: 'Done', assignee: 'Bob' },
+      { id: 't-1', testKey: 'TEST-1', title: 'Test 1', testType: 'Unit Test', status: 'UNTESTED' },
+      { id: 'sig-1', signedBy: '', signedAt: '', role: 'QA', meaning: '', artifactSha256: '', isValid: false },
+      undefined,
+      { linkId: 'link-med-only' }
+    );
+
+    await withForgeMocks(
+      {
+        requestJira: async (routeObj) => {
+          const r = routeToString(routeObj);
+          if (r.includes('/rest/api/3/myself')) {
+            return makeHttpResponse(200, { accountId: 'readonly-jira', active: true });
+          }
+          if (r.includes('/rest/api/3/mypermissions')) {
+            return makeHttpResponse(200, {
+              permissions: {
+                BROWSE_PROJECTS: { havePermission: true },
+                EDIT_ISSUES: { havePermission: false },
+              },
+            });
+          }
+          return makeHttpResponse(200, {});
+        },
+        requestConfluence: async () => makeHttpResponse(200, { accountId: 'readonly-jira' }),
+      },
+      async () => {
+        await SeederService.saveComplianceSuite(
+          ComplianceEngine.generateComplianceReport([linkMed], 'LIVE', 'Fallback RBAC Suite', { initialized: true }),
+          0
+        );
+        await assert.rejects(
+          () =>
+            assertOperatorAuthorizedForTarget(
+              {
+                context: {
+                  accountId: 'readonly-jira',
+                  extension: { type: 'jira:projectPage', project: { key: 'MED' } },
+                },
+              },
+              { hazardKey: 'HAZ-UNLINKED-999' }
+            ),
+          /Forbidden/i
+        );
+        await assert.rejects(
+          () =>
+            assertOperatorAuthorizedForTarget(
+              {
+                context: {
+                  accountId: 'readonly-jira',
+                  extension: { type: 'jira:globalPage' },
+                },
+              },
+              { hazardKey: 'HAZ-UNLINKED-999' }
+            ),
+          /Forbidden/i
+        );
+      }
+    );
+  });
+
+  test.it('getAuditLog omits CONFLUENCE_PAGE_DRIFT and pageId entries for restricted Confluence pages while preserving hash integrity', async () => {
+    const { ComplianceEngine } = require('../dist/compliance-engine.js');
+    const { AuditLogService, computeAuditEntryHash } = require('../dist/audit-log.js');
+
+    const linkAcme = ComplianceEngine.evaluateTraceLink(
+      { id: 'haz-a1', key: 'HAZ-ACME-1', title: 'ACME Haz', riskClass: 'CLASS_C', mitigationRequirementId: 'srs-9199', status: 'ACTION_REQUIRED' },
+      { id: 'srs-9199', pageId: '9199', title: 'Secret Confluence Spec 9199', version: 2, sha256Hash: 'a'.repeat(64), lastSignedHash: 'a'.repeat(64), isSignatureInvalidated: false, contentSnippet: 'TOP SECRET', lastUpdated: '2026-11-24T00:00:00Z' },
+      { id: 'w-a1', key: 'ACME-1', title: 'ACME Work', status: 'Done', assignee: 'Alice' },
+      { id: 't-a1', testKey: 'TEST-ACME-1', title: 'Test 1', testType: 'Unit Test', status: 'PASSED', evidenceUrl: 'https://ci.example/1', executionDate: '2026-11-24T00:00:00Z' },
+      { id: 'sig-1', signedBy: 'Alice', signedAt: '2026-11-24T00:00:00Z', role: 'QA', meaning: 'OK', artifactSha256: 'a'.repeat(64), isValid: true },
+      undefined,
+      { linkId: 'link-acme-conf' }
+    );
+
+    await withForgeMocks(
+      {
+        requestJira: async (url) => {
+          if (url.startsWith('/rest/api/3/myself')) {
+            return makeHttpResponse(200, { accountId: 'op-acme', active: true });
+          }
+          if (url.startsWith('/rest/api/3/mypermissions')) {
+            return makeHttpResponse(200, {
+              permissions: {
+                BROWSE_PROJECTS: { havePermission: true },
+                EDIT_ISSUES: { havePermission: true },
+              },
+            });
+          }
+          return makeHttpResponse(404, {});
+        },
+        requestConfluence: async (url) => {
+          if (url === '/wiki/rest/api/user/current') {
+            return makeHttpResponse(200, { accountId: 'op-acme', type: 'known' });
+          }
+          if (url.includes('/wiki/api/v2/pages/9101')) {
+            return makeHttpResponse(200, { id: '9101', title: 'Allowed Page' });
+          }
+          if (url.includes('/wiki/api/v2/pages/9199')) {
+            return makeHttpResponse(403, { message: 'Restricted' });
+          }
+          return makeHttpResponse(404, {});
+        },
+      },
+      async () => {
+        await SeederService.saveComplianceSuite(
+          ComplianceEngine.generateComplianceReport([linkAcme], 'LIVE', 'Conf Audit Redaction Suite', { initialized: true }),
+          0
+        );
+        await AuditLogService.append({
+          actorAccountId: 'op-acme',
+          action: 'RECORD_TEST_RESULT',
+          targetKey: 'TEST-ACME-1',
+          details: { projectKey: 'ACME', hazardKey: 'HAZ-ACME-1' },
+          authMethod: 'FORGE_USER_SESSION',
+        });
+        await AuditLogService.append({
+          actorAccountId: 'confluence-event-trigger',
+          action: 'CONFLUENCE_PAGE_DRIFT',
+          targetKey: 'page:9199',
+          details: {
+            pageId: '9199',
+            newSha256: 'f'.repeat(64),
+            affectedHazards: ['HAZ-ACME-1'],
+            affectedWorkKeys: ['ACME-1'],
+            projectKeys: ['ACME'],
+          },
+          authMethod: 'CONFLUENCE_EVENT_TRIGGER',
+        });
+        await AuditLogService.append({
+          actorAccountId: 'confluence-event-trigger',
+          action: 'CONFLUENCE_PAGE_DRIFT',
+          targetKey: 'page:9101',
+          details: {
+            pageId: '9101',
+            newSha256: 'b'.repeat(64),
+            affectedHazards: ['HAZ-ACME-1'],
+            affectedWorkKeys: ['ACME-1'],
+            projectKeys: ['ACME'],
+          },
+          authMethod: 'CONFLUENCE_EVENT_TRIGGER',
+        });
+
+        const logs = await resolverHandler(
+          {
+            call: { functionKey: 'getAuditLog', payload: { limit: 20 } },
+            context: { extension: { type: 'jira:projectPage', project: { key: 'ACME' } } },
+          },
+          { principal: { accountId: 'op-acme' } }
+        );
+        assert.strictEqual(logs.length, 2, 'Restricted page:9199 CONFLUENCE_PAGE_DRIFT must be omitted');
+        assert.ok(!logs.some((e) => e.details?.pageId === '9199' || e.targetKey === 'page:9199'));
+        assert.ok(logs.some((e) => e.details?.pageId === '9101'));
+        for (const entry of logs) {
+          assert.strictEqual(
+            computeAuditEntryHash({
+              seq: entry.seq,
+              timestamp: entry.timestamp,
+              actorAccountId: entry.actorAccountId,
+              action: entry.action,
+              targetKey: entry.targetKey,
+              details: entry.details,
+              prevHash: entry.prevHash,
+              authMethod: entry.authMethod,
+            }),
+            entry.entryHash
+          );
+        }
+      }
+    );
+  });
+
+  test.it('assertOperatorAuthorizedForTarget blocks ACME editor when linked native JIRA_ISSUE Test belongs to forbidden MED project', async () => {
+    const { ComplianceEngine } = require('../dist/compliance-engine.js');
+    const { assertOperatorAuthorizedForTarget } = require('../dist/index.js');
+
+    const crossLink = ComplianceEngine.evaluateTraceLink(
+      {
+        id: 'haz-cross-1',
+        key: 'HAZ-ACME-9',
+        title: 'ACME Hazard',
+        riskClass: 'CLASS_C',
+        mitigationRequirementId: 'srs-cross',
+        status: 'ACTION_REQUIRED',
+      },
+      {
+        id: 'srs-cross',
+        pageId: '501',
+        title: 'SRS Cross',
+        version: 1,
+        sha256Hash: 'a'.repeat(64),
+        lastSignedHash: 'a'.repeat(64),
+        isSignatureInvalidated: false,
+        contentSnippet: 'Spec',
+        lastUpdated: '2026-11-24T00:00:00Z',
+      },
+      { id: 'w-a9', key: 'ACME-9', title: 'ACME Work', status: 'Done', assignee: 'Alice' },
+      {
+        id: 't-m9',
+        testKey: 'MED-9',
+        title: 'Native MED Test',
+        testType: 'Automated HIL',
+        status: 'UNTESTED',
+        source: 'JIRA_ISSUE',
+      },
+      { id: 'sig-c', signedBy: '', signedAt: '', role: 'QA', meaning: '', artifactSha256: '', isValid: false },
+      undefined,
+      { linkId: 'link-cross-acme-med-test' }
+    );
+
+    await withForgeMocks(
+      {
+        requestJira: async (routeObj) => {
+          const r = routeToString(routeObj);
+          if (r.includes('/rest/api/3/myself')) {
+            return makeHttpResponse(200, { accountId: 'acme-editor', active: true });
+          }
+          if (r.includes('/rest/api/3/mypermissions')) {
+            const isMed = r.includes('MED-9') || r.includes('projectKey=MED');
+            return makeHttpResponse(200, {
+              permissions: {
+                BROWSE_PROJECTS: { havePermission: true },
+                EDIT_ISSUES: { havePermission: !isMed },
+              },
+            });
+          }
+          return makeHttpResponse(200, {});
+        },
+        requestConfluence: async () => makeHttpResponse(200, { accountId: 'acme-editor' }),
+      },
+      async () => {
+        await SeederService.saveComplianceSuite(
+          ComplianceEngine.generateComplianceReport([crossLink], 'LIVE', 'Cross Project Test Key RBAC', {
+            initialized: true,
+          }),
+          0
+        );
+        await assert.rejects(
+          () =>
+            assertOperatorAuthorizedForTarget(
+              {
+                context: {
+                  accountId: 'acme-editor',
+                  extension: { type: 'jira:globalPage' },
+                },
+              },
+              { hazardKey: 'HAZ-ACME-9', linkId: 'link-cross-acme-med-test' }
+            ),
+          /Forbidden/i
+        );
+      }
+    );
+  });
 });

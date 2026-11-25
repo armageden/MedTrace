@@ -1717,7 +1717,8 @@ test.describe('LiveIngestionService & TeamworkGraphService - Mocked Atlassian Cl
     const approvedHash = crypto.createHash('sha256').update(approvedBody).digest('hex');
 
     const kvsMock = createMockForgeKvs({
-      'medtrace:compliance:signed_spec:55001': {
+      'medtrace:compliance:signed_spec:HAZ-PUMP-10--55001': {
+        hazardKey: 'HAZ-PUMP-10',
         specId: 'srs-55001',
         pageId: '55001',
         sha256Hash: approvedHash,
@@ -2729,140 +2730,115 @@ test.describe('ComplianceEngine - Part 11 Key-Ring Rotation & Fast-Path Gate Com
     assert.strictEqual(uninitOutcome.result, false);
   });
 
-  test.it('supports hybrid ECDSA P-256 asymmetric + HMAC-SHA256 non-repudiation signatures and blocks server-only forgery', () => {
-    const serverSecret = 'hybrid-server-secret';
-    const kp1 = ComplianceEngine.generateEcdsaP256KeyPair();
-    const kp2 = ComplianceEngine.generateEcdsaP256KeyPair();
-    assert.match(kp1.keyFingerprint, /^ecdsa-p256:[a-f0-9]{16}$/);
-
-    const challenge = ComplianceEngine.computePart11ClientChallenge({
-      hazardKey: sampleHazard.key,
-      specId: sampleSpec.id,
-      artifactSha256: sampleSpec.sha256Hash,
-      meaning: 'Approved for clinical safety release',
-    });
-    const clientSigIeee = ComplianceEngine.signPart11ClientChallenge(challenge, kp1.privateKeyPkcs8Base64);
-    assert.strictEqual(Buffer.from(clientSigIeee, 'base64').length, 64, 'Expected 64-byte IEEE P1363 ECDSA signature');
-    assert.strictEqual(
-      ComplianceEngine.verifyPart11ClientSignature(challenge, clientSigIeee, kp1.publicKeySpkiBase64),
-      true
-    );
-
-    // Also verify ASN.1 DER encoded ECDSA P-256 signatures work identically
-    const privObj = crypto.createPrivateKey({
-      key: Buffer.from(kp1.privateKeyPkcs8Base64, 'base64'),
-      format: 'der',
-      type: 'pkcs8',
-    });
-    const clientSigDer = crypto.sign('sha256', Buffer.from(challenge, 'utf8'), privObj).toString('base64');
-    assert.strictEqual(
-      ComplianceEngine.verifyPart11ClientSignature(challenge, clientSigDer, kp1.publicKeySpkiBase64),
-      true
-    );
-
-    const hybridPayload = {
-      hazardKey: sampleHazard.key,
-      specId: sampleSpec.id,
-      artifactSha256: sampleSpec.sha256Hash,
-      signedByAccountId: 'acc-ecdsa-1',
-      signedBy: 'Dr. Asymmetric',
-      role: 'Authorized Atlassian User',
-      meaning: 'Approved for clinical safety release',
-      signedAt: '2026-11-15T01:00:00Z',
-      authMethod: 'PART11_ATTESTATION',
-      signatureAlgorithm: 'ECDSA-P256-SHA256+HMAC-SEAL-V1',
-      clientPublicKeySpki: kp1.publicKeySpkiBase64,
-      clientSignatureBase64: clientSigIeee,
+  test.it('does not fabricate Cryptographic Signature Drift or inflate signatureDriftCount on unsigned or unlinked specs, and uses generic Blast Radius wording', () => {
+    const unsignedSig = {
+      id: 'sig-unsigned-1',
+      signedBy: '',
+      signedAt: '',
+      role: 'Regulatory Authority',
+      meaning: 'Pending 21 CFR Part 11 Sign-off',
+      artifactSha256: '',
+      isValid: false,
     };
-    const hybridSeal = ComplianceEngine.computePart11Seal(hybridPayload, serverSecret);
-    const hybridSig = {
-      id: 'sig-hybrid-1',
-      signerName: 'Dr. Asymmetric',
-      signedBy: 'Dr. Asymmetric',
-      signedByAccountId: 'acc-ecdsa-1',
-      role: 'Authorized Atlassian User',
-      signedAt: '2026-11-15T01:00:00Z',
-      signatureHash: sampleSpec.sha256Hash,
-      artifactSha256: sampleSpec.sha256Hash,
-      authMethod: 'PART11_ATTESTATION',
-      isValid: true,
-      meaning: 'Approved for clinical safety release',
-      signatureAlgorithm: 'ECDSA-P256-SHA256+HMAC-SEAL-V1',
-      signatureSeal: hybridSeal,
-      clientPublicKeySpki: kp1.publicKeySpkiBase64,
-      clientSignatureBase64: clientSigIeee,
-      clientKeyFingerprint: kp1.keyFingerprint,
+    const unlinkedSpec = {
+      id: 'unlinked-med-1',
+      title: '',
+      version: 0,
+      sha256Hash: '',
+      lastSignedHash: '',
+      isSignatureInvalidated: false,
+      isMissingSentinel: true,
+      contentSnippet: 'No linked Confluence SRS specification found on Jira issue remote links.',
+      lastUpdated: '2026-11-24T00:00:00Z',
     };
 
-    assert.strictEqual(
-      ComplianceEngine.verifyPart11Seal(sampleHazard.key, sampleSpec.id, hybridSig, serverSecret),
-      true
+    const unlinkedEvaluated = ComplianceEngine.evaluateTraceLink(
+      sampleHazard,
+      unlinkedSpec,
+      sampleWork,
+      sampleTest,
+      unsignedSig
+    );
+    assert.ok(
+      !unlinkedEvaluated.violations.some((v) => v.includes('Cryptographic Signature Drift')),
+      'Unlinked spec must not emit false Cryptographic Signature Drift violation'
+    );
+    assert.ok(
+      unlinkedEvaluated.violations.some((v) => v.includes('ISO 14971 Violation')),
+      'Unlinked spec must still report missing SRS violation'
     );
 
-    // Server-only compromise test: recomputing HMAC with real serverSecret after changing meaning MUST FAIL
-    const forgedMeaning = 'Tampered server meaning without private key';
-    const serverForgedSeal = ComplianceEngine.computePart11Seal(
-      { ...hybridPayload, meaning: forgedMeaning },
-      serverSecret
-    );
-    assert.strictEqual(
-      ComplianceEngine.verifyPart11Seal(
-        sampleHazard.key,
-        sampleSpec.id,
-        { ...hybridSig, meaning: forgedMeaning, signatureSeal: serverForgedSeal },
-        serverSecret
-      ),
-      false
-    );
-
-    // Swapping client public key or corrupting fingerprint or stripping clientSignatureBase64 MUST FAIL
-    const wrongPubSeal = ComplianceEngine.computePart11Seal(
-      { ...hybridPayload, clientPublicKeySpki: kp2.publicKeySpkiBase64 },
-      serverSecret
-    );
-    assert.strictEqual(
-      ComplianceEngine.verifyPart11Seal(
-        sampleHazard.key,
-        sampleSpec.id,
-        {
-          ...hybridSig,
-          clientPublicKeySpki: kp2.publicKeySpkiBase64,
-          clientKeyFingerprint: kp2.keyFingerprint,
-          signatureSeal: wrongPubSeal,
-        },
-        serverSecret
-      ),
-      false
-    );
-    assert.strictEqual(
-      ComplianceEngine.verifyPart11Seal(
-        sampleHazard.key,
-        sampleSpec.id,
-        { ...hybridSig, clientKeyFingerprint: kp2.keyFingerprint },
-        serverSecret
-      ),
-      false
-    );
-    assert.strictEqual(
-      ComplianceEngine.verifyPart11Seal(
-        sampleHazard.key,
-        sampleSpec.id,
-        { ...hybridSig, clientSignatureBase64: undefined },
-        serverSecret
-      ),
-      false
-    );
-
-    // evaluateTraceLink must fail closed when hybrid client fields are forged even without explicit requireCryptographicSeal
-    const forgedEvaluated = ComplianceEngine.evaluateTraceLink(
+    const unsignedLink = ComplianceEngine.evaluateTraceLink(
       sampleHazard,
       sampleSpec,
       sampleWork,
       sampleTest,
-      { ...hybridSig, meaning: forgedMeaning, signatureSeal: serverForgedSeal },
-      undefined,
-      { part11Secret: serverSecret }
+      unsignedSig
     );
-    assert.strictEqual(forgedEvaluated.complianceState, 'SIGNATURE_DRIFT');
+    assert.strictEqual(unsignedLink.complianceState, 'SIGNATURE_DRIFT');
+    assert.ok(
+      !unsignedLink.violations.some((v) => v.includes('Cryptographic Signature Drift')),
+      'Never-signed spec must emit missing attestation violation instead of Cryptographic Signature Drift'
+    );
+
+    const report = ComplianceEngine.generateComplianceReport([unlinkedEvaluated, unsignedLink], 'LIVE', 'Clean Drift Suite', {
+      initialized: true,
+    });
+    assert.strictEqual(report.signatureDriftCount, 0, 'Unsigned/unlinked specs must not inflate signatureDriftCount');
+
+    const blast = ComplianceEngine.computeBlastRadius(sampleWork.key, report);
+    assert.ok(blast);
+    assert.ok(
+      blast.traversalPath.some((h) => h.edge === 'SIGNS' && h.to === 'Signature [Unsigned]'),
+      'Expected clean Signature [Unsigned] hop on unsigned SIGNS edge'
+    );
+    assert.ok(
+      !JSON.stringify(blast).includes('Firmware task') && !JSON.stringify(blast).includes('(open PR)'),
+      'Blast radius output must not hardcode Firmware task or (open PR)'
+    );
+  });
+
+  test.it('crypto-utils exports shared JIRA regexes, cloneJsonValue, and isSignatureTimestampInvalidated', () => {
+    const {
+      JIRA_PROJECT_KEY_RE,
+      JIRA_ISSUE_KEY_RE,
+      cloneJsonValue,
+      isSignatureTimestampInvalidated,
+    } = require('../dist/crypto-utils');
+
+    assert.strictEqual(JIRA_PROJECT_KEY_RE.test('MED_1'), true);
+    assert.strictEqual(JIRA_PROJECT_KEY_RE.test('med'), false);
+    assert.strictEqual(JIRA_ISSUE_KEY_RE.test('MED-42'), true);
+    assert.strictEqual(JIRA_ISSUE_KEY_RE.test('MED'), false);
+
+    assert.strictEqual(cloneJsonValue(undefined), undefined);
+    const original = { nested: { arr: [1, 2] } };
+    const cloned = cloneJsonValue(original);
+    cloned.nested.arr.push(3);
+    assert.deepStrictEqual(original.nested.arr, [1, 2]);
+
+    assert.strictEqual(isSignatureTimestampInvalidated(undefined), false);
+    assert.strictEqual(isSignatureTimestampInvalidated({ signedAt: '2026-11-20T00:00:00Z' }), false);
+    assert.strictEqual(
+      isSignatureTimestampInvalidated({
+        signedAt: '2026-11-20T00:00:00Z',
+        invalidatedAt: '2026-11-20T00:00:00Z',
+      }),
+      true
+    );
+    assert.strictEqual(
+      isSignatureTimestampInvalidated({
+        signedAt: '2026-11-20T00:00:01Z',
+        invalidatedAt: '2026-11-20T00:00:00Z',
+      }),
+      false
+    );
+    assert.strictEqual(
+      isSignatureTimestampInvalidated({
+        signedAt: 'not-a-date',
+        invalidatedAt: '2026-11-20T00:00:00Z',
+      }),
+      true
+    );
   });
 });

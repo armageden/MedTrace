@@ -1,13 +1,23 @@
 import React, { useState } from 'react';
 import { ComplianceSummary } from '../types';
+import { LiveOnboardingCard } from './LiveOnboardingCard';
 import { Search, AlertTriangle, CheckCircle2, AlertOctagon, X } from 'lucide-react';
 
 interface TraceMatrixTableProps {
   summary: ComplianceSummary;
   onSelectTraceLink: (linkId: string) => void;
+  onSyncLive?: () => void;
+  onSeedDemo?: () => void;
+  isBusy?: boolean;
 }
 
-export const TraceMatrixTable: React.FC<TraceMatrixTableProps> = ({ summary, onSelectTraceLink }) => {
+export const TraceMatrixTable: React.FC<TraceMatrixTableProps> = ({
+  summary,
+  onSelectTraceLink,
+  onSyncLive,
+  onSeedDemo,
+  isBusy = false,
+}) => {
   const [searchTerm, setSearchTerm] = useState('');
   const [onlyOpenGaps, setOnlyOpenGaps] = useState(false);
   const normalizedQuery = searchTerm.trim().toLowerCase();
@@ -128,6 +138,13 @@ export const TraceMatrixTable: React.FC<TraceMatrixTableProps> = ({ summary, onS
             {filteredLinks.length === 0 ? (
               <tr>
                 <td colSpan={7} style={{ padding: '48px 24px', textAlign: 'center' }}>
+                  {hasNoLinksAtAll && !isDemoMode && summary.initialized === false ? (
+                    <LiveOnboardingCard
+                      onSyncLive={onSyncLive}
+                      onSeedDemo={onSeedDemo}
+                      isBusy={isBusy}
+                    />
+                  ) : (
                   <div style={{ display: 'inline-flex', flexDirection: 'column', alignItems: 'center', gap: 12 }}>
                     <div
                       style={{
@@ -194,6 +211,7 @@ export const TraceMatrixTable: React.FC<TraceMatrixTableProps> = ({ summary, onS
                       </button>
                     )}
                   </div>
+                  )}
                 </td>
               </tr>
             ) : (
@@ -284,7 +302,7 @@ export const TraceMatrixTable: React.FC<TraceMatrixTableProps> = ({ summary, onS
                           {hasSpecTitle ? link.spec.title : 'Unlinked (No SRS)'}
                         </span>
                       </div>
-                      {link.spec.isSignatureInvalidated ? (
+                      {!link.spec.isMissingSentinel && link.spec.isSignatureInvalidated ? (
                         <div
                           style={{
                             fontSize: 10,
@@ -353,20 +371,38 @@ export const TraceMatrixTable: React.FC<TraceMatrixTableProps> = ({ summary, onS
 
                     {/* 21 CFR Part 11 */}
                     <td style={{ padding: '12px 14px' }}>
-                      <div
-                        style={{
-                          fontSize: 11,
-                          fontWeight: 700,
-                          color: link.signature.isValid
-                            ? 'var(--mt-success-text, #006644)'
-                            : 'var(--mt-danger-text, #bf2600)',
-                        }}
-                      >
-                        {link.signature.isValid ? '✓ Validated' : '✗ Invalidated Drift'}
-                      </div>
-                      <div style={{ fontSize: 10, color: 'var(--mt-text-muted, #505f79)' }}>
-                        {(link.signature.signedBy || 'Unsigned').split('(')[0]}
-                      </div>
+                      {(() => {
+                        const hasPriorSig = Boolean(
+                          link.signature.artifactSha256 ||
+                            link.signature.signedBy ||
+                            link.signature.signedAt ||
+                            link.signature.invalidatedAt
+                        );
+                        return (
+                          <>
+                            <div
+                              style={{
+                                fontSize: 11,
+                                fontWeight: 700,
+                                color: link.signature.isValid
+                                  ? 'var(--mt-success-text, #006644)'
+                                  : hasPriorSig
+                                    ? 'var(--mt-danger-text, #bf2600)'
+                                    : 'var(--mt-warning-text, #974f0c)',
+                              }}
+                            >
+                              {link.signature.isValid
+                                ? '✓ Validated'
+                                : hasPriorSig
+                                  ? '✗ Invalidated Drift'
+                                  : '○ Pending Sign-off'}
+                            </div>
+                            <div style={{ fontSize: 10, color: 'var(--mt-text-muted, #505f79)' }}>
+                              {(link.signature.signedBy || 'Unsigned').split('(')[0]}
+                            </div>
+                          </>
+                        );
+                      })()}
                     </td>
 
                     {/* Audit State */}

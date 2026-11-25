@@ -1,5 +1,5 @@
 import { kvs } from '@forge/kvs';
-import { measureJsonBytes, sanitizeKvsKeySegment } from './crypto-utils';
+import { cloneJsonValue, measureJsonBytes, sanitizeKvsKeySegment } from './crypto-utils';
 import { ComplianceSummary, TraceLink } from './types';
 
 export const SUITE_META_KEY = 'medtrace:compliance:suite_meta';
@@ -9,7 +9,6 @@ export const VLOCK_PREFIX = 'medtrace:compliance:vlock:';
 const META_REASONS_SHARD_PREFIX = 'medtrace:compliance:meta_reasons:';
 const META_LINKS_SHARD_PREFIX = 'medtrace:compliance:meta_links:';
 const META_INDEX_SHARD_PREFIX = 'medtrace:compliance:meta_index:';
-export const LEGACY_STORAGE_KEY = 'medtrace:compliance:active_suite';
 
 export const BATCH_CHUNK_SIZE = 25;
 export const MAX_TRANSACT_BYTES = Math.floor(3.5 * 1024 * 1024);
@@ -33,12 +32,9 @@ export interface SignedSpecBaseline {
   role: string;
   meaning: string;
   authMethod?: string;
-  signatureAlgorithm?: 'HMAC-SHA256-SEAL-V1' | 'ECDSA-P256-SHA256+HMAC-SEAL-V1';
+  signatureAlgorithm?: 'HMAC-SHA256-SEAL-V1';
   signatureSeal?: string;
   sealKeyId?: string;
-  clientPublicKeySpki?: string;
-  clientSignatureBase64?: string;
-  clientKeyFingerprint?: string;
   invalidatedAt?: string;
   invalidatedByHash?: string;
   invalidationReason?: string;
@@ -61,6 +57,7 @@ export interface ShardedSuiteMetaV2 {
   lastAuditTimestamp: string;
   lastSyncedAt?: string;
   syncIncomplete?: boolean;
+  incompleteProjectKeys?: string[];
   linkKeys: string[];
   linkKeyShardKeys?: string[];
   issueKeyIndex?: Record<string, string[]>;
@@ -69,9 +66,7 @@ export interface ShardedSuiteMetaV2 {
   version: number;
 }
 
-export function cloneJsonValue<T>(val: T): T {
-  return JSON.parse(JSON.stringify(val)) as T;
-}
+export { cloneJsonValue };
 
 export function buildSafeKvsKey(prefix: string, rawSegment: string): string {
   const remaining = MAX_KVS_KEY_LENGTH - prefix.length;
@@ -188,6 +183,9 @@ export function buildMetaAndShardItems(
     lastAuditTimestamp: summary.lastAuditTimestamp,
     ...(summary.lastSyncedAt ? { lastSyncedAt: summary.lastSyncedAt } : {}),
     ...(summary.syncIncomplete === true ? { syncIncomplete: true } : {}),
+    ...(summary.incompleteProjectKeys && summary.incompleteProjectKeys.length > 0
+      ? { incompleteProjectKeys: summary.incompleteProjectKeys }
+      : {}),
     linkKeys: [...linkKeys],
     ...(Object.keys(issueKeyIndex).length > 0 ? { issueKeyIndex } : {}),
     storageFormat: 'SHARDED_V2',
@@ -290,12 +288,14 @@ export async function batchDeleteBestEffort(keys: string[]): Promise<void> {
   }
 }
 
-export function getBaselineKeyCandidates(specId: string, pageId?: string, hazardKey?: string): {
+export function getBaselineKeyCandidates(
+  specId: string,
+  pageId?: string,
+  hazardKey?: string
+): {
   compositeKeys: string[];
-  unscopedKeys: string[];
 } {
   const compositeKeys: string[] = [];
-  const unscopedKeys: string[] = [];
 
   const cleanSpec = specId.trim();
   const cleanPage = pageId?.trim() || '';
@@ -309,14 +309,8 @@ export function getBaselineKeyCandidates(specId: string, pageId?: string, hazard
       compositeKeys.push(sanitizeKvsKeySegment(`${cleanHaz}--${cleanPage}`, 180));
     }
   }
-  if (cleanSpec) {
-    unscopedKeys.push(sanitizeKvsKeySegment(cleanSpec, 180));
-  }
-  if (cleanPage && cleanPage !== cleanSpec) {
-    unscopedKeys.push(sanitizeKvsKeySegment(cleanPage, 180));
-  }
 
-  return { compositeKeys, unscopedKeys };
+  return { compositeKeys };
 }
 
 export function buildSignedBaselineRecord(
@@ -327,13 +321,7 @@ export function buildSignedBaselineRecord(
   role: string,
   meaning: string,
   authMethod: string,
-  signatureSeal: string,
-  hybrid?: {
-    signatureAlgorithm?: 'HMAC-SHA256-SEAL-V1' | 'ECDSA-P256-SHA256+HMAC-SEAL-V1';
-    clientPublicKeySpki?: string;
-    clientSignatureBase64?: string;
-    clientKeyFingerprint?: string;
-  }
+  signatureSeal: string
 ): SignedSpecBaseline {
   return {
     hazardKey: link.hazard.key,
@@ -346,16 +334,9 @@ export function buildSignedBaselineRecord(
     role,
     meaning,
     authMethod,
-    signatureAlgorithm: hybrid?.signatureAlgorithm ?? 'HMAC-SHA256-SEAL-V1',
+    signatureAlgorithm: 'HMAC-SHA256-SEAL-V1',
     signatureSeal,
     sealKeyId: 'env:MEDTRACE_PART11_SECRET',
-    ...(hybrid?.clientPublicKeySpki ? { clientPublicKeySpki: hybrid.clientPublicKeySpki } : {}),
-    ...(hybrid?.clientSignatureBase64
-      ? { clientSignatureBase64: hybrid.clientSignatureBase64 }
-      : {}),
-    ...(hybrid?.clientKeyFingerprint
-      ? { clientKeyFingerprint: hybrid.clientKeyFingerprint }
-      : {}),
   };
 }
 
