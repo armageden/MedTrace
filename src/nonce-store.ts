@@ -90,7 +90,7 @@ export const kvsNonceStore: NonceStore = {
  * normalizing keys via `toKvsNonceKey` and lazily pruning expired entries on access.
  */
 export function createInMemoryNonceStore(): NonceStore {
-  const store = new Map<string, NonceRecord>();
+  const store = new Map<string, { consumedAt: number; storedAt: number }>();
 
   const claimDetailed = async (
     key: string,
@@ -99,15 +99,22 @@ export function createInMemoryNonceStore(): NonceStore {
   ): Promise<NonceClaimResult> => {
     assertValidTtlMs(ttlMs);
     const storageKey = toKvsNonceKey(key);
-    const existing = store.get(storageKey);
     const now = Date.now();
-    if (existing && now - existing.consumedAt < ttlMs) {
+    if (store.size > 1000) {
+      for (const [k, rec] of store.entries()) {
+        if (now - rec.storedAt >= ttlMs) {
+          store.delete(k);
+        }
+      }
+    }
+    const existing = store.get(storageKey);
+    if (existing && now - existing.storedAt < ttlMs) {
       return 'REPLAY';
     }
     if (existing) {
       store.delete(storageKey);
     }
-    store.set(storageKey, { consumedAt: val.consumedAt });
+    store.set(storageKey, { consumedAt: val.consumedAt, storedAt: now });
     return 'CLAIMED';
   };
 
@@ -117,7 +124,7 @@ export function createInMemoryNonceStore(): NonceStore {
       return existing ? { consumedAt: existing.consumedAt } : undefined;
     },
     set: async (key: string, val: NonceRecord): Promise<void> => {
-      store.set(toKvsNonceKey(key), { consumedAt: val.consumedAt });
+      store.set(toKvsNonceKey(key), { consumedAt: val.consumedAt, storedAt: val.consumedAt });
     },
     delete: async (key: string): Promise<void> => {
       store.delete(toKvsNonceKey(key));

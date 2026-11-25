@@ -290,4 +290,120 @@ describe('FE-06: FdaExportModal CSV injection neutralization, audit evidence, an
       anchorClickSpy.mockRestore();
     }
   });
+
+  it('distinguishes project-scoped audit counts from global hash-chain truncation warnings', async () => {
+    const verification: AuditChainVerification = {
+      valid: true,
+      totalEntries: 500,
+      headHash: 'headhash9999999999aabbcc',
+    };
+    const makeEntry = (seq: number): AuditLogEntry => ({
+      seq,
+      timestamp: '2026-01-01T00:00:00.000Z',
+      actorAccountId: 'acc-1',
+      action: 'SYNC_LIVE',
+      targetKey: `MED-${seq}`,
+      details: { projectKey: 'MED' },
+      prevHash: 'GENESIS',
+      entryHash: `hash-${seq}`,
+      authMethod: 'FORGE_USER_SESSION',
+    });
+
+    mockedInvokeResolver.mockImplementation(async (key) => {
+      if (key === 'verifyAuditChain') return verification;
+      if (key === 'getAuditLog') return [makeEntry(1), makeEntry(2)];
+      throw new Error(`Unexpected resolver ${key}`);
+    });
+
+    const summary = makeSummary({ datasetMode: 'LIVE', projectName: 'MED' });
+    const { rerender } = render(
+      <FdaExportModal summary={summary} projectKey="MED" onClose={() => {}} />
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText(/HASH CHAIN VERIFIED/i)).toBeInTheDocument();
+    });
+    expect(screen.queryByText(/Export includes the most recent/i)).not.toBeInTheDocument();
+
+    const entries200 = Array.from({ length: 200 }, (_, i) => makeEntry(i + 1));
+    mockedInvokeResolver.mockImplementation(async (key) => {
+      if (key === 'verifyAuditChain') return verification;
+      if (key === 'getAuditLog') return entries200;
+      throw new Error(`Unexpected resolver ${key}`);
+    });
+
+    rerender(<FdaExportModal summary={summary} projectKey="MED" isOpen={false} onClose={() => {}} />);
+    rerender(<FdaExportModal summary={summary} projectKey="MED" isOpen={true} onClose={() => {}} />);
+
+    await waitFor(() => {
+      expect(
+        screen.getByText(/Export includes the most recent 200 project-scoped audit entries/i)
+      ).toBeInTheDocument();
+    });
+    expect(screen.getByText(/global hash chain holds 500 total entries/i)).toBeInTheDocument();
+  });
+
+  it('disables downloads while audit verification loads, retries on error, and exports empty-trace CSV summary', async () => {
+    let resolveVerify!: (val: AuditChainVerification) => void;
+    mockedInvokeResolver.mockImplementation((key) => {
+      if (key === 'verifyAuditChain') {
+        return new Promise<AuditChainVerification>((resolve) => {
+          resolveVerify = resolve;
+        });
+      }
+      if (key === 'getAuditLog') return Promise.resolve([]);
+      throw new Error(`Unexpected resolver ${key}`);
+    });
+
+    const emptySummary = makeSummary({
+      datasetMode: 'LIVE',
+      traceLinks: [],
+      totalHazards: 0,
+      blockingReasons: ['Suite uninitialized'],
+    });
+    render(<FdaExportModal summary={emptySummary} onClose={() => {}} />);
+
+    expect(screen.getByRole('button', { name: /Download JSON/i })).toBeDisabled();
+    expect(screen.getByRole('button', { name: /Download CSV/i })).toBeDisabled();
+
+    resolveVerify({
+      valid: true,
+      totalEntries: 600,
+      headHash: 'head-partial',
+      truncated: true,
+      verifiedToSeq: 200,
+      windowEntryCount: 200,
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText(/HASH CHAIN PARTIALLY VERIFIED \(200 of 600 entries\)/i)).toBeInTheDocument();
+    });
+
+    const downloadedCsv: string[] = [];
+    const createUrlSpy = vi.spyOn(URL, 'createObjectURL').mockImplementation((blob: Blob | MediaSource) => {
+      void (blob as Blob).text().then((t) => downloadedCsv.push(t));
+      return 'blob:mock-empty-csv';
+    });
+    const revokeUrlSpy = vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {});
+    const anchorClickSpy = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
+
+    try {
+      const user = userEvent.setup();
+      await user.click(screen.getByRole('button', { name: /Download CSV/i }));
+      await waitFor(() => expect(downloadedCsv).toHaveLength(1));
+      expect(downloadedCsv[0]).toContain('No trace links synced');
+
+      mockedInvokeResolver.mockRejectedValueOnce(new Error('audit unavailable'));
+      mockedInvokeResolver.mockRejectedValueOnce(new Error('audit unavailable'));
+
+      render(<FdaExportModal summary={emptySummary} onClose={() => {}} />);
+      await waitFor(() => {
+        expect(screen.getByRole('button', { name: /Retry Audit Check/i })).toBeInTheDocument();
+      });
+    } finally {
+      createUrlSpy.mockRestore();
+      revokeUrlSpy.mockRestore();
+      anchorClickSpy.mockRestore();
+    }
+  });
 });

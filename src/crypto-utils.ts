@@ -20,6 +20,24 @@ export function cloneJsonValue<T>(value: T): T {
 }
 
 /**
+ * Returns true when an HTTP response indicates a 2xx success status.
+ */
+export function isHttpOk(res: { ok?: boolean; status: number }): boolean {
+  return typeof res.ok === 'boolean' ? res.ok : res.status >= 200 && res.status < 300;
+}
+
+/**
+ * Safely parses an HTTP JSON response body, returning `null` if parsing fails.
+ */
+export async function safeParseJson<T = unknown>(res: { json(): Promise<unknown> }): Promise<T | null> {
+  try {
+    return (await res.json()) as T;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Returns true if an electronic signature has an invalidation timestamp at or after its signed timestamp
  * (or if either timestamp is invalid/missing when `invalidatedAt` is present).
  */

@@ -1052,6 +1052,9 @@ test.describe('McpToolService & rovoActionHandler Integration Tests', () => {
     const asUserImpl = () => ({
       requestJira: async (routeObj, opts) => {
         const url = String(routeObj?.value_ || routeObj || '');
+        if (url === '/rest/api/3/myself') {
+          return makeJsonResponse(200, { accountId: 'acc-rovo-op', active: true });
+        }
         if (url.startsWith('/rest/api/3/mypermissions')) {
           return makeJsonResponse(200, {
             permissions: {
@@ -1099,7 +1102,7 @@ test.describe('McpToolService & rovoActionHandler Integration Tests', () => {
           actionKey: 'create-reverification-task-action',
           inputs: { hazardKey: 'HAZ-101', issueKey: 'MED-42' },
         },
-        { accountId: 'acc-rovo-no-create', extension: { type: 'jira:projectPage', project: { key: 'MED' } } }
+        { accountId: 'acc-rovo-op', extension: { type: 'jira:projectPage', project: { key: 'MED' } } }
       );
       assert.match(denied.error, /CREATE_ISSUES/);
 
@@ -1574,6 +1577,9 @@ test.describe('McpToolService & rovoActionHandler Integration Tests', () => {
     const asUserImpl = () => ({
       requestJira: async (routeObj, opts) => {
         const url = String(routeObj?.value_ || routeObj || '');
+        if (url === '/rest/api/3/myself') {
+          return makeJsonResponse(200, { accountId: 'acc-honest-op', active: true });
+        }
         if (url.startsWith('/rest/api/3/mypermissions')) {
           return makeJsonResponse(200, {
             permissions: {
@@ -2071,5 +2077,93 @@ test.describe('McpToolService & rovoActionHandler Integration Tests', () => {
     });
     assert.strictEqual(projMatch.traceLinks.length, 1, 'filterSuiteLinksByIssueKey must match test.testKey');
     assert.strictEqual(projMatch.traceLinks[0].test.testKey, 'MED-12');
+  });
+
+  test.it('verifyIecCompliance scopes activeViolations to targeted traversal instead of leaking unrelated suite violations', async () => {
+    const { blockedLink, verifiedLink, sharedVerifiedLink, sharedBlockedSibling } = buildSampleLinks();
+    const liveSuite = ComplianceEngine.generateComplianceReport(
+      [blockedLink, verifiedLink, sharedVerifiedLink, sharedBlockedSibling],
+      'LIVE',
+      'Scoped Violations Suite'
+    );
+    const origGet = SeederService.getActiveComplianceSuite;
+    SeederService.getActiveComplianceSuite = async () => liveSuite;
+    try {
+      const cleanRes = await McpToolService.verifyIecCompliance({ issueKey: 'MED-43' });
+      assert.strictEqual(cleanRes.configuredChecksPassed, true);
+      assert.deepStrictEqual(cleanRes.activeViolations, []);
+
+      const sharedRes = await McpToolService.verifyIecCompliance({ issueKey: 'MED-501' });
+      assert.strictEqual(sharedRes.configuredChecksPassed, false);
+      assert.ok(sharedRes.activeViolations.length > 0);
+      assert.ok(sharedRes.activeViolations.every((v) => !v.includes('MED-42') && !v.includes('HAZ-101')));
+    } finally {
+      SeederService.getActiveComplianceSuite = origGet;
+    }
+  });
+
+  test.it('SeederService.createReverificationTask requires EDIT_ISSUES or ADMINISTER_PROJECTS alongside CREATE_ISSUES', async () => {
+    const kvsMock = createLocalMockKvs();
+    const { blockedLink } = buildSampleLinks();
+    const liveSuite = ComplianceEngine.generateComplianceReport([blockedLink], 'LIVE', 'RBAC Task Suite', {
+      initialized: true,
+    });
+
+    let editPerm = false;
+    let adminPerm = false;
+    await withForgeMocks(
+      {
+        kvsMock,
+        asUserImpl: () => ({
+          requestJira: async (routeObj, opts) => {
+            const url = String(routeObj?.value_ || routeObj || '');
+            if (url.startsWith('/rest/api/3/mypermissions')) {
+              return makeJsonResponse(200, {
+                permissions: {
+                  CREATE_ISSUES: { havePermission: true },
+                  EDIT_ISSUES: { havePermission: editPerm },
+                  ADMINISTER_PROJECTS: { havePermission: adminPerm },
+                },
+              });
+            }
+            if (url === '/rest/api/3/issue/createmeta/MED/issuetypes') {
+              return makeJsonResponse(200, { issueTypes: [{ id: '1', name: 'Task', subtask: false }] });
+            }
+            if (url === '/rest/api/3/issue' && opts?.method === 'POST') {
+              return makeJsonResponse(201, { id: '9001', key: 'MED-901' });
+            }
+            if (url === '/rest/api/3/issueLinkType') {
+              return makeJsonResponse(200, { issueLinkTypes: [{ name: 'Relates' }] });
+            }
+            if (url === '/rest/api/3/issueLink' && opts?.method === 'POST') {
+              return makeJsonResponse(201, {});
+            }
+            return makeJsonResponse(404, {});
+          },
+        }),
+      },
+      async () => {
+        await SeederService.saveComplianceSuite(liveSuite, 0);
+        await assert.rejects(
+          () =>
+            SeederService.createReverificationTask({
+              hazardKey: 'HAZ-101',
+              issueKey: 'MED-42',
+              actorAccountId: 'acc-create-only',
+              callerMode: 'USER',
+            }),
+          /CREATE_ISSUES and EDIT_ISSUES/i
+        );
+
+        adminPerm = true;
+        const okRes = await SeederService.createReverificationTask({
+          hazardKey: 'HAZ-101',
+          issueKey: 'MED-42',
+          actorAccountId: 'acc-admin',
+          callerMode: 'USER',
+        });
+        assert.strictEqual(okRes.createdIssueKey, 'MED-901');
+      }
+    );
   });
 });

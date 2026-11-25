@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { invokeResolver } from '../bridge';
 import { verifyAuditChainBounded } from '../auditVerify';
 import { useDialogA11y } from '../hooks/useDialogA11y';
-import { getSafeHttpsUrl } from '../utils';
+import { getErrorMessage, getSafeHttpsUrl, hasPriorSignature } from '../utils';
 import { AuditChainVerification, AuditLogEntry, ComplianceSummary } from '../types';
 import {
   X,
@@ -61,7 +61,7 @@ function triggerDownload(filename: string, content: string, mimeType: string): v
   document.body.appendChild(link);
   link.click();
   document.body.removeChild(link);
-  URL.revokeObjectURL(url);
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
 export const FdaExportModal: React.FC<FdaExportModalProps> = ({
@@ -75,6 +75,7 @@ export const FdaExportModal: React.FC<FdaExportModalProps> = ({
   const [auditLogEntries, setAuditLogEntries] = useState<AuditLogEntry[]>([]);
   const [isLoadingAudit, setIsLoadingAudit] = useState<boolean>(false);
   const [auditLoadError, setAuditLoadError] = useState<string | null>(null);
+  const [auditRetryNonce, setAuditRetryNonce] = useState(0);
 
   useDialogA11y({ isOpen, onClose, containerRef: dialogRef });
 
@@ -99,9 +100,10 @@ export const FdaExportModal: React.FC<FdaExportModalProps> = ({
         setAuditVerification(null);
         setAuditLogEntries([]);
         setAuditLoadError(
-          err instanceof Error
-            ? err.message
-            : 'Failed to retrieve audit chain verification and ledger entries.'
+          getErrorMessage(
+            err,
+            'Failed to retrieve audit chain verification and ledger entries.'
+          )
         );
       })
       .finally(() => {
@@ -113,7 +115,7 @@ export const FdaExportModal: React.FC<FdaExportModalProps> = ({
     return () => {
       cancelled = true;
     };
-  }, [isOpen]);
+  }, [isOpen, auditRetryNonce]);
 
   if (!isOpen) return null;
 
@@ -206,38 +208,72 @@ export const FdaExportModal: React.FC<FdaExportModalProps> = ({
       'Audit Log Entries',
     ];
 
-    const rows = summary.traceLinks.map((link) =>
-      [
-        summary.datasetMode,
-        summary.releaseBlocked,
-        blockingReasonsText,
-        link.hazard.key,
-        link.hazard.title,
-        link.hazard.riskClass,
-        link.spec.title || 'Unlinked (No SRS)',
-        link.spec.version,
-        link.spec.sha256Hash,
-        link.work.key,
-        link.work.status,
-        link.work.commitSha ?? '',
-        link.test.testKey,
-        link.test.status,
-        link.test.evidenceUrl ?? '',
-        link.signature.isValid,
-        link.signature.signedBy,
-        link.signature.signedAt,
-        link.signature.meaning,
-        link.complianceState,
-        (link.violations || []).join('; '),
-        auditChainStatus,
-        auditTotalEntries,
-        auditLogEntries.length,
-        auditHeadHash,
-        auditLogSummaryText,
-      ]
-        .map(escapeCsvCell)
-        .join(',')
-    );
+    const rows =
+      summary.traceLinks.length > 0
+        ? summary.traceLinks.map((link) =>
+            [
+              summary.datasetMode,
+              summary.releaseBlocked,
+              blockingReasonsText,
+              link.hazard.key,
+              link.hazard.title,
+              link.hazard.riskClass,
+              link.spec.title || 'Unlinked (No SRS)',
+              link.spec.version,
+              link.spec.sha256Hash,
+              link.work.key,
+              link.work.status,
+              link.work.commitSha ?? '',
+              link.test.testKey,
+              link.test.status,
+              link.test.evidenceUrl ?? '',
+              link.signature.isValid,
+              link.signature.signedBy,
+              link.signature.signedAt,
+              link.signature.meaning,
+              link.complianceState,
+              (link.violations || []).join('; '),
+              auditChainStatus,
+              auditTotalEntries,
+              auditLogEntries.length,
+              auditHeadHash,
+              auditLogSummaryText,
+            ]
+              .map(escapeCsvCell)
+              .join(',')
+          )
+        : [
+            [
+              summary.datasetMode,
+              summary.releaseBlocked,
+              blockingReasonsText,
+              '',
+              'No trace links synced',
+              '',
+              '',
+              '',
+              '',
+              '',
+              '',
+              '',
+              '',
+              '',
+              '',
+              false,
+              '',
+              '',
+              '',
+              summary.initialized === false ? 'UNINITIALIZED' : 'EMPTY',
+              blockingReasonsText,
+              auditChainStatus,
+              auditTotalEntries,
+              auditLogEntries.length,
+              auditHeadHash,
+              auditLogSummaryText,
+            ]
+              .map(escapeCsvCell)
+              .join(','),
+          ];
 
     const csv = [headers.map(escapeCsvCell).join(','), ...rows].join('\n');
     const stamp = new Date().toISOString().replace(/[:.]/g, '-');
@@ -292,6 +328,8 @@ export const FdaExportModal: React.FC<FdaExportModalProps> = ({
             <button
               type="button"
               onClick={handleDownloadJson}
+              disabled={isLoadingAudit}
+              title={isLoadingAudit ? 'Waiting for audit hash chain verification...' : undefined}
               className="mt-btn"
               style={{
                 padding: '6px 10px',
@@ -301,11 +339,13 @@ export const FdaExportModal: React.FC<FdaExportModalProps> = ({
                 color: 'var(--mt-text-primary)',
               }}
             >
-              <FileJson size={14} /> Download JSON
+              <FileJson size={14} aria-hidden="true" /> Download JSON
             </button>
             <button
               type="button"
               onClick={handleDownloadCsv}
+              disabled={isLoadingAudit}
+              title={isLoadingAudit ? 'Waiting for audit hash chain verification...' : undefined}
               className="mt-btn"
               style={{
                 padding: '6px 10px',
@@ -315,7 +355,7 @@ export const FdaExportModal: React.FC<FdaExportModalProps> = ({
                 color: 'var(--mt-text-primary)',
               }}
             >
-              <FileSpreadsheet size={14} /> Download CSV
+              <FileSpreadsheet size={14} aria-hidden="true" /> Download CSV
             </button>
             <button
               type="button"
@@ -503,9 +543,29 @@ export const FdaExportModal: React.FC<FdaExportModalProps> = ({
                   color: 'var(--mt-danger-text)',
                   fontSize: 11,
                   fontWeight: 600,
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  gap: 10,
+                  flexWrap: 'wrap',
                 }}
               >
-                Audit verification error: {auditLoadError}
+                <span>Audit verification error: {auditLoadError}</span>
+                <button
+                  type="button"
+                  onClick={() => setAuditRetryNonce((n) => n + 1)}
+                  className="mt-btn"
+                  style={{
+                    padding: '4px 10px',
+                    borderRadius: 4,
+                    border: '1px solid currentColor',
+                    background: 'var(--mt-bg-surface)',
+                    color: 'inherit',
+                    fontSize: 11,
+                  }}
+                >
+                  Retry Audit Check
+                </button>
               </div>
             )}
             {auditVerification && (
@@ -531,10 +591,18 @@ export const FdaExportModal: React.FC<FdaExportModalProps> = ({
                 }}
               >
                 <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontWeight: 700 }}>
-                  {auditVerification.valid ? <ShieldCheck size={15} /> : <ShieldAlert size={15} />}
+                  {auditVerification.valid ? (
+                    <ShieldCheck size={15} aria-hidden="true" />
+                  ) : (
+                    <ShieldAlert size={15} aria-hidden="true" />
+                  )}
                   <span>
                     {auditVerification.valid
-                      ? `HASH CHAIN VERIFIED (${auditVerification.totalEntries} entries)`
+                      ? auditVerification.truncated
+                        ? `HASH CHAIN PARTIALLY VERIFIED (${
+                            auditVerification.verifiedToSeq ?? auditVerification.windowEntryCount ?? 0
+                          } of ${auditVerification.totalEntries} entries)`
+                        : `HASH CHAIN VERIFIED (${auditVerification.totalEntries} entries)`
                       : `CHAIN INTEGRITY FAILURE${
                           auditVerification.brokenAtSeq
                             ? ` AT SEQ #${auditVerification.brokenAtSeq}`
@@ -584,14 +652,15 @@ export const FdaExportModal: React.FC<FdaExportModalProps> = ({
                   fontWeight: 600,
                 }}
               >
-                Export includes the most recent {auditLogEntries.length} of{' '}
-                {auditVerification.totalEntries} audit entries. Hash-chain verification above covers
-                all {auditVerification.totalEntries} entries.
+                {isProjectScoped
+                  ? `Export includes the most recent ${auditLogEntries.length} project-scoped audit entries (global hash chain holds ${auditVerification.totalEntries} total entries). Hash-chain verification above covers all ${auditVerification.totalEntries} entries.`
+                  : `Export includes the most recent ${auditLogEntries.length} of ${auditVerification.totalEntries} audit entries. Hash-chain verification above covers all ${auditVerification.totalEntries} entries.`}
               </div>
             )}
           </div>
 
           <table
+            aria-label="Traceability evidence matrix"
             style={{ width: '100%', borderCollapse: 'collapse', fontSize: 11, marginBottom: 24 }}
           >
             <thead>
@@ -603,12 +672,12 @@ export const FdaExportModal: React.FC<FdaExportModalProps> = ({
                   borderBottom: '2px solid var(--mt-border-input)',
                 }}
               >
-                <th style={{ padding: '8px 10px' }}>ISO 14971 Hazard ID</th>
-                <th style={{ padding: '8px 10px' }}>IEC 62304 Safety Class</th>
-                <th style={{ padding: '8px 10px' }}>SRS Specification</th>
-                <th style={{ padding: '8px 10px' }}>Jira Implementation</th>
-                <th style={{ padding: '8px 10px' }}>Verification Test</th>
-                <th style={{ padding: '8px 10px' }}>Electronic Attestation</th>
+                <th scope="col" style={{ padding: '8px 10px' }}>ISO 14971 Hazard ID</th>
+                <th scope="col" style={{ padding: '8px 10px' }}>IEC 62304 Safety Class</th>
+                <th scope="col" style={{ padding: '8px 10px' }}>SRS Specification</th>
+                <th scope="col" style={{ padding: '8px 10px' }}>Jira Implementation</th>
+                <th scope="col" style={{ padding: '8px 10px' }}>Verification Test</th>
+                <th scope="col" style={{ padding: '8px 10px' }}>Electronic Attestation</th>
               </tr>
             </thead>
             <tbody>
@@ -691,20 +760,14 @@ export const FdaExportModal: React.FC<FdaExportModalProps> = ({
                         padding: '8px 10px',
                         color: link.signature.isValid
                           ? 'var(--mt-success-text)'
-                          : link.signature.artifactSha256 ||
-                              link.signature.signedBy ||
-                              link.signature.signedAt ||
-                              link.signature.invalidatedAt
+                          : hasPriorSignature(link.signature)
                             ? 'var(--mt-danger-text)'
                             : 'var(--mt-warning-text)',
                       }}
                     >
                       {link.signature.isValid
                         ? 'VALID'
-                        : link.signature.artifactSha256 ||
-                            link.signature.signedBy ||
-                            link.signature.signedAt ||
-                            link.signature.invalidatedAt
+                        : hasPriorSignature(link.signature)
                           ? 'INVALIDATED (DRIFT)'
                           : 'UNSIGNED'}
                     </td>
@@ -744,12 +807,27 @@ export const FdaExportModal: React.FC<FdaExportModalProps> = ({
                   borderRadius: 4,
                 }}
               >
-                <b>{link.signature.signedBy || 'Unsigned'}</b> ({link.signature.role}) — Timestamp:{' '}
+                <b>{link.signature.signedBy || 'Unsigned'}</b>
+                {link.signature.role ? ` (${link.signature.role})` : ''} — Timestamp:{' '}
                 {link.signature.signedAt || 'Pending'}
                 {link.signature.authMethod ? ` — Method: ${link.signature.authMethod}` : ''}
-                <br />
-                Meaning: &ldquo;{link.signature.meaning}&rdquo; | Hash:{' '}
-                <span style={{ fontFamily: 'monospace' }}>{link.signature.artifactSha256}</span>
+                {(link.signature.meaning || link.signature.artifactSha256) && (
+                  <>
+                    <br />
+                    {link.signature.meaning ? (
+                      <>Meaning: &ldquo;{link.signature.meaning}&rdquo;</>
+                    ) : null}
+                    {link.signature.meaning && link.signature.artifactSha256 ? ' | ' : null}
+                    {link.signature.artifactSha256 ? (
+                      <>
+                        Hash:{' '}
+                        <span style={{ fontFamily: 'monospace' }}>
+                          {link.signature.artifactSha256}
+                        </span>
+                      </>
+                    ) : null}
+                  </>
+                )}
               </div>
             ))}
           </div>

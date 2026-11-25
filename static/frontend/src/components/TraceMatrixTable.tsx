@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { ComplianceSummary } from '../types';
+import { hasPriorSignature } from '../utils';
 import { LiveOnboardingCard } from './LiveOnboardingCard';
 import { Search, AlertTriangle, CheckCircle2, AlertOctagon, X } from 'lucide-react';
 
@@ -113,7 +114,10 @@ export const TraceMatrixTable: React.FC<TraceMatrixTableProps> = ({
 
       {/* Table */}
       <div style={{ overflowX: 'auto' }}>
-        <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left', fontSize: 13 }}>
+        <table
+          aria-label="Compliance traceability matrix"
+          style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left', fontSize: 13 }}
+        >
           <thead>
             <tr
               style={{
@@ -125,13 +129,13 @@ export const TraceMatrixTable: React.FC<TraceMatrixTableProps> = ({
                 letterSpacing: '0.5px',
               }}
             >
-              <th style={{ padding: '10px 14px' }}>ISO 14971 HAZARD</th>
-              <th style={{ padding: '10px 14px' }}>SAFETY CLASS</th>
-              <th style={{ padding: '10px 14px' }}>CONFLUENCE SRS SPEC</th>
-              <th style={{ padding: '10px 14px' }}>JIRA WORK ITEM</th>
-              <th style={{ padding: '10px 14px' }}>IEC 62304 VERIFICATION</th>
-              <th style={{ padding: '10px 14px' }}>ATTESTATION STATUS</th>
-              <th style={{ padding: '10px 14px' }}>AUDIT STATE</th>
+              <th scope="col" style={{ padding: '10px 14px' }}>ISO 14971 HAZARD</th>
+              <th scope="col" style={{ padding: '10px 14px' }}>SAFETY CLASS</th>
+              <th scope="col" style={{ padding: '10px 14px' }}>CONFLUENCE SRS SPEC</th>
+              <th scope="col" style={{ padding: '10px 14px' }}>JIRA WORK ITEM</th>
+              <th scope="col" style={{ padding: '10px 14px' }}>IEC 62304 VERIFICATION</th>
+              <th scope="col" style={{ padding: '10px 14px' }}>ATTESTATION STATUS</th>
+              <th scope="col" style={{ padding: '10px 14px' }}>AUDIT STATE</th>
             </tr>
           </thead>
           <tbody>
@@ -372,12 +376,7 @@ export const TraceMatrixTable: React.FC<TraceMatrixTableProps> = ({
                     {/* 21 CFR Part 11 */}
                     <td style={{ padding: '12px 14px' }}>
                       {(() => {
-                        const hasPriorSig = Boolean(
-                          link.signature.artifactSha256 ||
-                            link.signature.signedBy ||
-                            link.signature.signedAt ||
-                            link.signature.invalidatedAt
-                        );
+                        const hasPriorSig = hasPriorSignature(link.signature);
                         return (
                           <>
                             <div

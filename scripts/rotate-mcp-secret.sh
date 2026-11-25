@@ -105,8 +105,10 @@ export CI FORGE_DISABLE_ANALYTICS
 
 FORGE_ENV_FILE="${FORGE_ENV_FILE:-$HOME/.forge-env}"
 if [ -f "$FORGE_ENV_FILE" ]; then
+  set -a
   # shellcheck source=/dev/null
   . "$FORGE_ENV_FILE"
+  set +a
 fi
 
 if [ -z "${ENVIRONMENTS:-}" ]; then
@@ -582,7 +584,7 @@ if [ "$SKIP_ROTATE" != "1" ]; then
 
   for ENV in $ENVIRONMENTS; do
     echo "== 3/6 Setting MEDTRACE_MCP_SECRET in environment: $ENV =="
-    "$FORGE_BIN" variables set MEDTRACE_MCP_SECRET "$NEW_SECRET" --environment "$ENV" --encrypt
+    run_forge_with_retry "$FORGE_BIN" variables set MEDTRACE_MCP_SECRET "$NEW_SECRET" --environment "$ENV" --encrypt
 
     if [ "${SKIP_DEPLOY:-0}" != "1" ]; then
       echo "== 4/6 Deploying manifest to $ENV =="
@@ -592,7 +594,7 @@ if [ "$SKIP_ROTATE" != "1" ]; then
         run_forge_with_retry "$FORGE_BIN" deploy --environment "$ENV" --non-interactive
       fi
     else
-      echo "== 4/6 SKIP_DEPLOY=1 — skipping deploy for $ENV =="
+      echo "== 4/6 SKIP_DEPLOY=1 — skipping deploy for $ENV (note: Forge snapshots variables on deploy) =="
     fi
   done
 

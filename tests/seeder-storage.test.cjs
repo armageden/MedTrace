@@ -1711,4 +1711,82 @@ test.describe('Task 1B-Seeder: bindIssueToHazard & recordTestResult Hardening (C
       }
     );
   });
+
+  test.it('batchGetStrict fails closed when kvs.batchGet returns undefined item value', async () => {
+    const kvsMock = createFullMockForgeKvs();
+    const { batchGetStrict } = require('../dist/seeder-storage.js');
+
+    await withForgeMocks({ kvsMock }, async () => {
+      const origBatchGet = forgeKvs.kvs.batchGet;
+      forgeKvs.kvs.batchGet = async () => ({
+        successfulKeys: [{ key: 'medtrace:compliance:link:1', value: undefined }],
+        failedKeys: [],
+      });
+      try {
+        await assert.rejects(
+          () => batchGetStrict(['medtrace:compliance:link:1']),
+          /Missing expected KVS shard key/
+        );
+      } finally {
+        forgeKvs.kvs.batchGet = origBatchGet;
+      }
+    });
+  });
+
+  test.it('keeps DEMO passing rows VERIFIED on bindIssueToHazard/recordTestResult and reuses unchanged KVS link shards in commitSuiteMutation', async () => {
+    await SeederService.seedEnterpriseDemoSuite('acc-demo', 'SYSTEM_INIT');
+    const afterTest = await SeederService.recordTestResult({
+      hazardKey: 'HAZ-102',
+      testKey: 'TEST-89',
+      status: 'PASSED',
+      evidenceUrl: 'https://ci.example/demo-run',
+      actorAccountId: 'acc-demo',
+    });
+    const haz102AfterTest = afterTest.traceLinks.find((l) => l.hazard.key === 'HAZ-102');
+    assert.strictEqual(haz102AfterTest.complianceState, 'VERIFIED');
+
+    const afterBind = await SeederService.bindIssueToHazard('HAZ-102', 'MED-777', 'acc-demo');
+    const haz102AfterBind = afterBind.traceLinks.find((l) => l.hazard.key === 'HAZ-102');
+    assert.strictEqual(haz102AfterBind.complianceState, 'VERIFIED');
+
+    // Delta link reuse on >25 links via commitSuiteMutation
+    const kvsMock = createFullMockForgeKvs();
+    const links30 = makeSyntheticLinks(30);
+    await withForgeMocks({ kvsMock }, async () => {
+      const suiteV1 = ComplianceEngine.generateComplianceReport(links30, 'LIVE', 'Delta Reuse Suite', {
+        initialized: true,
+      });
+      await SeederService.saveComplianceSuite(suiteV1, 0);
+
+      kvsMock.calls.batchSet.length = 0;
+      const nextLinks = links30.map((l, idx) =>
+        idx === 0 ? { ...l, work: { ...l.work, title: 'Updated Only Link 0' } } : l
+      );
+      const suiteV2 = ComplianceEngine.generateComplianceReport(nextLinks, 'LIVE', 'Delta Reuse Suite', {
+        initialized: true,
+      });
+      await SeederService.commitSuiteMutation({
+        summary: suiteV2,
+        expectedVersion: 1,
+        previousSuite: suiteV1,
+        auditEntry: {
+          actorAccountId: 'acc-delta',
+          action: 'SYNC_LIVE',
+          targetKey: 'Delta Reuse Suite',
+          details: { changed: 1 },
+          authMethod: 'FORGE_USER_SESSION',
+        },
+      });
+
+      const writtenLinkKeys = kvsMock.calls.batchSet
+        .flat()
+        .filter((k) => typeof k === 'string' && k.startsWith('medtrace:compliance:link:'));
+      assert.strictEqual(writtenLinkKeys.length, 1, 'Expected only 1 modified link shard written on 30-link delta update');
+
+      const reloaded = await SeederService.getActiveComplianceSuite();
+      assert.strictEqual(reloaded.traceLinks.length, 30);
+      assert.strictEqual(reloaded.traceLinks[0].work.title, 'Updated Only Link 0');
+      assert.strictEqual(reloaded.traceLinks[29].work.key, 'MED-30');
+    });
+  });
 });

@@ -2,9 +2,11 @@ import api, { route } from '@forge/api';
 import { ComplianceEngine } from './compliance-engine';
 import {
   cloneJsonValue,
+  isHttpOk,
   isKvsConflictError,
   isSignatureTimestampInvalidated,
   JIRA_ISSUE_KEY_RE,
+  safeParseJson,
   sha256Hex,
 } from './crypto-utils';
 import { isForgeRuntime } from './runtime';
@@ -276,7 +278,9 @@ export function resolveLinkedHazardAndTest(
 
   for (const item of linkedIssues) {
     const rel = `${item.linkTypeName} ${item.relationshipLabel}`.toLowerCase();
-    const isRev = item.labels.some((l) => l.toLowerCase() === 'medtrace-reverification');
+    const isRev =
+      item.labels.some((l) => l.toLowerCase() === 'medtrace-reverification') ||
+      item.summary.trim().toLowerCase().startsWith('[medtrace re-verification]');
     if (isRev) {
       if (!linkedReverification) {
         linkedReverification = item;
@@ -391,7 +395,10 @@ export async function handleConfluencePageUpdatedTrigger(
         if (resp.status !== 200) {
           throw new Error(`Confluence trigger failed to fetch page ${pageId} (HTTP ${resp.status}).`);
         }
-        const pageData = (await resp.json()) as ConfluencePageData;
+        const pageData = await safeParseJson<ConfluencePageData>(resp);
+        if (!pageData) {
+          throw new Error(`Confluence trigger received malformed JSON for page ${pageId}.`);
+        }
         const bodyValue = typeof pageData?.body?.storage?.value === 'string' ? pageData.body.storage.value : '';
         fetchedPageContent = {
           newHash: sha256Hex(bodyValue),
@@ -415,7 +422,6 @@ export async function handleConfluencePageUpdatedTrigger(
     const updatedLinks = suite.traceLinks.map(cloneJsonValue);
     const affectedHazards: string[] = [];
     const baselineUpdates: BaselineMutationRecord[] = [];
-    const part11Secret = (process.env.MEDTRACE_PART11_SECRET || '').trim();
     const eventNowIso = new Date().toISOString();
 
     for (const idx of matchingIndices) {
@@ -471,7 +477,7 @@ export async function handleConfluencePageUpdatedTrigger(
           link.signature.invalidatedAt = invalidatedAt;
           if (hashMismatch) {
             link.signature.invalidationReason =
-              `AUTOMATIC REVOCATION: Confluence page ${pageId} updated (SHA-256 ${newHash.slice(0, 12)}... != signed ${link.signature.artifactSha256.slice(0, 12)}...).`;
+              `AUTOMATIC REVOCATION: Confluence page ${pageId} updated (SHA-256 ${newHash.slice(0, 12)}... != signed ${(link.signature.artifactSha256 || '').slice(0, 12) || 'none'}...).`;
           } else {
             link.signature.invalidationReason =
               link.signature.invalidationReason ||
@@ -494,22 +500,7 @@ export async function handleConfluencePageUpdatedTrigger(
         }
       }
 
-      const evaluated = ComplianceEngine.evaluateTraceLink(
-        link.hazard,
-        link.spec,
-        link.work,
-        link.test,
-        link.signature,
-        link.graphMetadata,
-        {
-          linkId: link.id,
-          part11Secret,
-          requireCryptographicSeal: true,
-          requireTestEvidence: suite.datasetMode === 'LIVE',
-          reverificationTaskKey: link.reverificationTaskKey,
-        }
-      );
-      evaluated.hazard.status = ComplianceEngine.deriveHazardStatus(evaluated.complianceState);
+      const evaluated = ComplianceEngine.reEvaluateLink(link, suite.datasetMode);
       updatedLinks[idx] = evaluated;
       if (!affectedHazards.includes(evaluated.hazard.key)) {
         affectedHazards.push(evaluated.hazard.key);
@@ -548,6 +539,7 @@ export async function handleConfluencePageUpdatedTrigger(
         summary: updated,
         expectedVersion: version ?? 0,
         baselineUpdates,
+        previousSuite: suite,
         auditEntry: {
           actorAccountId: String(
             event?.atlassianId || event?.context?.accountId || 'confluence-event-trigger'
@@ -589,6 +581,8 @@ export async function reconcileConfluenceSpecsTrigger(
     projectKey?: string;
     issueKeyFilter?: string;
     allowAppFallback?: boolean;
+    failClosedOnBudget?: boolean;
+    userPageAccessCache?: Map<string, boolean>;
     onDriftDetected?: (event: ConfluencePageUpdatedEvent) => Promise<ConfluencePageUpdatedResult>;
   }
 ): Promise<ComplianceSummary> {
@@ -636,28 +630,46 @@ export async function reconcileConfluenceSpecsTrigger(
     return Number(signedB) - Number(signedA);
   });
 
-  const fetchPage = async (pageId: string): Promise<ConfluencePageData | undefined> => {
+  const fetchPage = async (
+    pageId: string
+  ): Promise<{ pageData?: ConfluencePageData; hardError?: boolean }> => {
     const pageRoute = route`/wiki/api/v2/pages/${pageId}?body-format=storage`;
+    let lastNon404Failure = false;
     try {
       const userResp = await api.asUser().requestConfluence(pageRoute);
-      if (userResp?.status === 200) {
-        return (await userResp.json()) as ConfluencePageData;
+      if (userResp && isHttpOk(userResp)) {
+        options?.userPageAccessCache?.set(pageId, true);
+        return { pageData: (await userResp.json()) as ConfluencePageData };
+      }
+      if (
+        userResp &&
+        (userResp.status === 401 || userResp.status === 403 || userResp.status === 404)
+      ) {
+        options?.userPageAccessCache?.set(pageId, false);
+      }
+      if (userResp && userResp.status !== 404) {
+        lastNon404Failure = true;
       }
     } catch {
-      // Fall through to app fallback when permitted
+      lastNon404Failure = true;
     }
 
     if (options?.allowAppFallback) {
       try {
-        const appResp = await api.asApp().requestConfluence(pageRoute);
-        if (appResp?.status === 200) {
-          return (await appResp.json()) as ConfluencePageData;
+        const appClient = api.asApp();
+        if (typeof appClient?.requestConfluence !== 'function') {
+          return { hardError: false };
         }
+        const appResp = await appClient.requestConfluence(pageRoute);
+        if (appResp && isHttpOk(appResp)) {
+          return { pageData: (await appResp.json()) as ConfluencePageData };
+        }
+        return { hardError: Boolean(appResp && appResp.status !== 404) };
       } catch {
-        return undefined;
+        return { hardError: true };
       }
     }
-    return undefined;
+    return { hardError: lastNon404Failure };
   };
 
   const driftedPages: Array<{
@@ -669,8 +681,13 @@ export async function reconcileConfluenceSpecsTrigger(
   }> = [];
 
   const reconcileStartedAt = Date.now();
+  let budgetExhausted = false;
+  let checkedPageCount = prioritizedEntries.length;
+  const unreachablePages: string[] = [];
   for (let i = 0; i < prioritizedEntries.length; i += CONFLUENCE_RECONCILE_BATCH_SIZE) {
     if (i > 0 && Date.now() - reconcileStartedAt >= CONFLUENCE_RECONCILE_BUDGET_MS) {
+      budgetExhausted = true;
+      checkedPageCount = i;
       console.warn(
         `[MedTrace] reconcileConfluenceSpecs paused after ${CONFLUENCE_RECONCILE_BUDGET_MS}ms budget; checked ${i}/${prioritizedEntries.length} unique Confluence page(s).`
       );
@@ -679,8 +696,11 @@ export async function reconcileConfluenceSpecsTrigger(
     const batch = prioritizedEntries.slice(i, i + CONFLUENCE_RECONCILE_BATCH_SIZE);
     await Promise.all(
       batch.map(async ([pageId, links]) => {
-        const pageData = await fetchPage(pageId);
+        const { pageData, hardError } = await fetchPage(pageId);
         if (!pageData || typeof pageData?.body?.storage?.value !== 'string') {
+          if (hardError) {
+            unreachablePages.push(pageId);
+          }
           return;
         }
         const bodyValue = pageData.body.storage.value;
@@ -704,12 +724,30 @@ export async function reconcileConfluenceSpecsTrigger(
     );
   }
 
+  const assertBudgetCompleted = (): void => {
+    if (!options?.failClosedOnBudget) {
+      return;
+    }
+    if (budgetExhausted) {
+      throw new Error(
+        `Confluence drift reconciliation budget (${CONFLUENCE_RECONCILE_BUDGET_MS}ms) exhausted after checking ${checkedPageCount}/${prioritizedEntries.length} unique Confluence page(s); failing release gate closed.`
+      );
+    }
+    if (unreachablePages.length > 0) {
+      throw new Error(
+        `Confluence drift reconciliation failed to verify ${unreachablePages.length} Confluence page(s) (${unreachablePages.slice(0, 5).join(', ')}); failing release gate closed.`
+      );
+    }
+  };
+
   if (driftedPages.length === 0) {
+    assertBudgetCompleted();
     return suite;
   }
 
   const dispatchDrift = options?.onDriftDetected || handleConfluencePageUpdatedTrigger;
   let updatedAny = false;
+  let lastDriftError: unknown;
   for (const item of driftedPages) {
     try {
       const res = await dispatchDrift({
@@ -726,10 +764,17 @@ export async function reconcileConfluenceSpecsTrigger(
       if (res.processed) {
         updatedAny = true;
       }
-    } catch {
-      // Non-fatal per page; remaining pages still checked
+    } catch (err: unknown) {
+      lastDriftError = err;
     }
   }
+
+  // Fail closed if any detected drift could not be persisted so gates never evaluate stale VERIFIED state.
+  if (lastDriftError !== undefined) {
+    throw lastDriftError instanceof Error ? lastDriftError : new Error(String(lastDriftError));
+  }
+
+  assertBudgetCompleted();
 
   if (!updatedAny) {
     return suite;
@@ -782,7 +827,7 @@ export async function handleJiraIssueUpdatedTrigger(
         route`/rest/api/3/issue/${ref}?fields=summary,status,assignee,labels,issuetype,project,issuelinks`
       );
       if (resp.status === 200) {
-        const parsed = (await resp.json()) as JiraApiIssue;
+        const parsed = await safeParseJson<JiraApiIssue>(resp);
         if (typeof parsed?.key === 'string' && parsed.key.trim()) {
           const upperKey = parsed.key.trim().toUpperCase();
           fetchedByKey.set(upperKey, parsed);
@@ -804,6 +849,24 @@ export async function handleJiraIssueUpdatedTrigger(
 
   for (const ref of uniqueRefs) {
     await fetchJiraIssueIntoMap(ref);
+  }
+
+  // Also resolve directly linked Jira issues from `issuelinks` so newly created links carry full `fields.labels`.
+  const discoveredLinkedKeys = new Set<string>();
+  for (const loadedIssue of fetchedByKey.values()) {
+    const rawLinks = Array.isArray(loadedIssue.fields?.issuelinks) ? loadedIssue.fields.issuelinks : [];
+    for (const entry of rawLinks as JiraIssueLinkEntry[]) {
+      for (const side of [entry?.inwardIssue, entry?.outwardIssue]) {
+        const lk = typeof side?.key === 'string' ? side.key.trim().toUpperCase() : '';
+        if (lk && JIRA_ISSUE_KEY_RE.test(lk) && !fetchedByKey.has(lk)) {
+          discoveredLinkedKeys.add(lk);
+        }
+      }
+    }
+  }
+  const linkedToFetch = Array.from(discoveredLinkedKeys);
+  for (let i = 0; i < linkedToFetch.length; i += CONFLUENCE_RECONCILE_BATCH_SIZE) {
+    await Promise.all(linkedToFetch.slice(i, i + CONFLUENCE_RECONCILE_BATCH_SIZE).map((k) => fetchJiraIssueIntoMap(k)));
   }
 
   if (!primaryResolvedKey || fetchedByKey.size === 0) {
@@ -856,17 +919,22 @@ export async function handleJiraIssueUpdatedTrigger(
       return { processed: false, issueKey: primaryResolvedKey, affectedHazards: [] };
     }
 
-    // Ensure every affected link's anchoring Jira work item is fetched so issuelinks reconciliation has current truth.
-    for (const idx of matchingIndices) {
-      const wk = (suite.traceLinks[idx].work?.key || '').trim().toUpperCase();
-      if (wk && JIRA_ISSUE_KEY_RE.test(wk) && !fetchedByKey.has(wk)) {
-        await fetchJiraIssueIntoMap(wk);
-      }
+    // Ensure every affected link's anchoring Jira work item is fetched in batches so issuelinks reconciliation has current truth.
+    const missingWorkKeys = Array.from(
+      new Set(
+        matchingIndices
+          .map((idx) => (suite.traceLinks[idx].work?.key || '').trim().toUpperCase())
+          .filter((wk) => wk && JIRA_ISSUE_KEY_RE.test(wk) && !fetchedByKey.has(wk))
+      )
+    );
+    for (let i = 0; i < missingWorkKeys.length; i += CONFLUENCE_RECONCILE_BATCH_SIZE) {
+      await Promise.all(
+        missingWorkKeys.slice(i, i + CONFLUENCE_RECONCILE_BATCH_SIZE).map((wk) => fetchJiraIssueIntoMap(wk))
+      );
     }
 
     const updatedLinks = suite.traceLinks.map(cloneJsonValue);
     const affectedHazards: string[] = [];
-    const part11Secret = (process.env.MEDTRACE_PART11_SECRET || '').trim();
 
     for (const idx of matchingIndices) {
       const link = updatedLinks[idx];
@@ -950,7 +1018,7 @@ export async function handleJiraIssueUpdatedTrigger(
           delete link.reverificationTaskKey;
         }
 
-        if (workLabels.length > 0 && !linked.linkedHazard) {
+        if (Array.isArray(workFields.labels) && !linked.linkedHazard) {
           const inferred = inferRiskClass(workLabels);
           link.hazard.riskClass = inferred.riskClass;
           delete link.hazard.severity;
@@ -972,13 +1040,27 @@ export async function handleJiraIssueUpdatedTrigger(
         const hazLabels = normalizeStringArray(hazFields.labels);
         link.hazard.title = hazFields.summary || link.hazard.title;
         link.hazard.source = 'JIRA_ISSUE';
-        if (hazLabels.length > 0) {
+        if (Array.isArray(hazFields.labels)) {
           const inferred = inferRiskClass(hazLabels);
           if (inferred.safetyClassAssigned !== false) {
             link.hazard.riskClass = inferred.riskClass;
             delete link.hazard.severity;
             delete link.hazard.probability;
             delete link.hazard.safetyClassAssigned;
+          } else {
+            const workLabels = workIssue ? normalizeStringArray(workIssue.fields?.labels) : [];
+            const workInferred = workIssue ? inferRiskClass(workLabels) : undefined;
+            if (workInferred && workInferred.safetyClassAssigned !== false) {
+              link.hazard.riskClass = workInferred.riskClass;
+              delete link.hazard.severity;
+              delete link.hazard.probability;
+              delete link.hazard.safetyClassAssigned;
+            } else {
+              link.hazard.riskClass = 'CLASS_C';
+              delete link.hazard.severity;
+              delete link.hazard.probability;
+              link.hazard.safetyClassAssigned = false;
+            }
           }
         }
       }
@@ -995,8 +1077,13 @@ export async function handleJiraIssueUpdatedTrigger(
 
       if (isDeletedLinkEvent && link.reverificationTaskKey) {
         const revUpper = link.reverificationTaskKey.trim().toUpperCase();
+        const stillLinkedFromWork = Boolean(
+          workIssue &&
+            Array.isArray(workIssue.fields?.issuelinks) &&
+            collectRawIssueLinkKeys(workIssue.fields.issuelinks).has(revUpper)
+        );
         const revIssue = fetchedByKey.get(revUpper);
-        if (revIssue && Array.isArray(revIssue.fields?.issuelinks)) {
+        if (!stillLinkedFromWork && revIssue && Array.isArray(revIssue.fields?.issuelinks)) {
           const revLinkedKeys = collectRawIssueLinkKeys(revIssue.fields.issuelinks);
           if (workKeyUpper && !revLinkedKeys.has(workKeyUpper)) {
             delete link.reverificationTaskKey;
@@ -1008,31 +1095,25 @@ export async function handleJiraIssueUpdatedTrigger(
       const resolvedLinkId = hazardKeyChanged
         ? ComplianceEngine.buildTraceLinkId(link.hazard.key, link.spec.id, link.work?.key)
         : link.id;
-      const evaluated = ComplianceEngine.evaluateTraceLink(
-        link.hazard,
-        link.spec,
-        link.work,
-        link.test,
-        link.signature,
-        link.graphMetadata,
-        {
-          linkId: resolvedLinkId,
-          part11Secret,
-          requireCryptographicSeal: true,
-          requireTestEvidence: true,
-          reverificationTaskKey: link.reverificationTaskKey,
-        }
-      );
-      evaluated.hazard.status = ComplianceEngine.deriveHazardStatus(evaluated.complianceState);
+      const evaluated = ComplianceEngine.reEvaluateLink(link, suite.datasetMode, {
+        linkId: resolvedLinkId,
+      });
       updatedLinks[idx] = evaluated;
       if (!affectedHazards.includes(evaluated.hazard.key)) {
         affectedHazards.push(evaluated.hazard.key);
       }
     }
 
+    // Deduplicate by TraceLink id so two rows collapsing onto the same Jira hazard cannot fail kvs.transact().
+    const dedupedById = new Map<string, TraceLink>();
+    for (const link of updatedLinks) {
+      dedupedById.set(link.id, link);
+    }
+    const finalLinks = Array.from(dedupedById.values());
+
     const eventNowIso = new Date().toISOString();
     const updated = ComplianceEngine.generateComplianceReport(
-      updatedLinks,
+      finalLinks,
       suite.datasetMode,
       suite.projectName,
       {
@@ -1050,6 +1131,7 @@ export async function handleJiraIssueUpdatedTrigger(
       await commitSuiteMutation({
         summary: updated,
         expectedVersion: version ?? 0,
+        previousSuite: suite,
         auditEntry: {
           actorAccountId: String(
             event?.atlassianId || event?.context?.accountId || 'jira-event-trigger'

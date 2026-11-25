@@ -54,6 +54,15 @@ const ALLOWED_WEBTRIGGER_POST_ACTIONS: ReadonlySet<string> = new Set([
   'simulate_transition',
 ]);
 
+const MAX_WEBTRIGGER_PR_DIFF_CHARS = 100_000;
+
+function stripTraceLinksResponse(
+  suite: Awaited<ReturnType<typeof SeederService.getActiveComplianceSuite>>
+): WebtriggerResponse {
+  const { traceLinks: _traceLinks, ...statusSummary } = suite;
+  return jsonResponse(200, statusSummary);
+}
+
 /**
  * Verifies an HMAC-SHA256 request signature over `timestamp.nonce.payload` using timing-safe comparison.
  * Fails closed (`false`) when `secret` is missing/empty or any header/input is malformed.
@@ -119,12 +128,17 @@ export async function claimNonceDetailed(
     }
   }
 
-  const existing = await store.get(storageKey);
-  if (existing && now - existing.consumedAt < ttlMs) {
-    return 'REPLAY';
+  try {
+    const existing = await store.get(storageKey);
+    if (existing && now - existing.consumedAt < ttlMs) {
+      return 'REPLAY';
+    }
+    await store.set(storageKey, { consumedAt: now });
+    return 'CLAIMED';
+  } catch (err: unknown) {
+    console.error('[MedTrace NonceStore] storage fallback failed:', err instanceof Error ? err.message : 'Unknown error');
+    return 'STORAGE_ERROR';
   }
-  await store.set(storageKey, { consumedAt: now });
-  return 'CLAIMED';
 }
 
 /**
@@ -223,9 +237,10 @@ export async function mcpWebtriggerHandler(request: WebtriggerRequest): Promise<
     getHeader(request.headers, 'x-medtrace-nonce') ??
     getHeader(request.headers, 'x-medtrace-event-id');
   const nonceHeader = typeof rawNonce === 'string' ? rawNonce.trim() : '';
-  if (!nonceHeader || nonceHeader.length > 256) {
+  // Disallow `.` and whitespace/control characters so `${timestamp}.${nonce}.${body}` has unambiguous boundaries.
+  if (!nonceHeader || nonceHeader.length > 256 || /[.\s\u0000-\u001f\u007f]/.test(nonceHeader)) {
     return jsonResponse(401, {
-      error: 'Unauthorized: Missing or invalid x-medtrace-nonce header (1-256 characters required).',
+      error: 'Unauthorized: Missing or invalid x-medtrace-nonce header (1-256 characters, no dots or whitespace).',
     });
   }
 
@@ -301,8 +316,7 @@ export async function mcpWebtriggerHandler(request: WebtriggerRequest): Promise<
       }
 
       const suite = await SeederService.getActiveComplianceSuite();
-      const { traceLinks: _traceLinks, ...statusSummary } = suite;
-      return jsonResponse(200, statusSummary);
+      return stripTraceLinksResponse(suite);
     }
 
     if (rawBody.trim() === '') {
@@ -332,8 +346,7 @@ export async function mcpWebtriggerHandler(request: WebtriggerRequest): Promise<
     switch (action) {
       case 'status': {
         const suite = await SeederService.getActiveComplianceSuite();
-        const { traceLinks: _traceLinks, ...statusSummary } = suite;
-        return jsonResponse(200, statusSummary);
+        return stripTraceLinksResponse(suite);
       }
 
       case 'get-hazard-lineage': {
@@ -346,13 +359,15 @@ export async function mcpWebtriggerHandler(request: WebtriggerRequest): Promise<
               allowAppFallback: true,
             });
           }
-          const { traceLinks: _traceLinks, ...statusSummary } = suite;
-          return jsonResponse(200, statusSummary);
+          return stripTraceLinksResponse(suite);
         }
-        const result = await McpToolService.getHazardLineage({
-          hazardKey: hazardKey || undefined,
-          issueKey: issueKey || undefined,
-        });
+        const result = await McpToolService.getHazardLineage(
+          {
+            hazardKey: hazardKey || undefined,
+            issueKey: issueKey || undefined,
+          },
+          { includeAvailableKeys: false }
+        );
         return jsonResponse(200, result);
       }
 
@@ -402,12 +417,19 @@ export async function mcpWebtriggerHandler(request: WebtriggerRequest): Promise<
       }
 
       case 'verify': {
+        const rawPrDiff = typeof body.prDiff === 'string' ? body.prDiff : '';
         const result = await McpToolService.verifyIecCompliance({
-          prDiff: typeof body.prDiff === 'string' ? body.prDiff : '',
-          componentName: typeof body.componentName === 'string' ? body.componentName : undefined,
+          prDiff:
+            rawPrDiff.length > MAX_WEBTRIGGER_PR_DIFF_CHARS
+              ? rawPrDiff.slice(0, MAX_WEBTRIGGER_PR_DIFF_CHARS)
+              : rawPrDiff,
+          componentName:
+            typeof body.componentName === 'string'
+              ? body.componentName.slice(0, 1000)
+              : undefined,
           issueKey:
             typeof body.issueKey === 'string' && body.issueKey.trim() !== ''
-              ? body.issueKey.trim()
+              ? body.issueKey.trim().slice(0, 64)
               : undefined,
         });
         return jsonResponse(200, result);
@@ -440,6 +462,7 @@ export async function mcpWebtriggerHandler(request: WebtriggerRequest): Promise<
             suite = await LiveIngestionService.reconcileConfluenceSpecs(suite, {
               ...(cleanUpperKey ? { issueKeyFilter: issueKey, targetPageIds } : {}),
               allowAppFallback: true,
+              failClosedOnBudget: true,
             });
           }
         }
@@ -465,7 +488,7 @@ export async function mcpWebtriggerHandler(request: WebtriggerRequest): Promise<
         const matchedInSuite = issueKey ? isMatchedInSuite(issueKey, suite) : false;
         const safetyProbe =
           issueKey && isInitialized && !matchedInSuite
-            ? await probeUnsyncedSafetyIssue(issueKey)
+            ? await probeUnsyncedSafetyIssue(issueKey, undefined, { failClosedOnMissingIssue: true })
             : undefined;
         const transitionToDone = body.transitionToDone === true;
 
@@ -506,10 +529,8 @@ export async function mcpWebtriggerHandler(request: WebtriggerRequest): Promise<
           evaluatedIssueKey: issueKey,
         });
       }
-
-      default:
-        throw new WebtriggerHttpError(400, `Bad Request: Unsupported action "${action}".`);
     }
+    throw new WebtriggerHttpError(400, `Bad Request: Unsupported action "${action}".`);
   } catch (err: unknown) {
     if (err instanceof WebtriggerHttpError) {
       return jsonResponse(err.statusCode, { error: err.publicMessage });

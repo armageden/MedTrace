@@ -54,6 +54,7 @@ modules:
         2. Summarize missing links, pending test evidence, or specification hash mismatches found in the workspace.
         3. Share clear next steps so engineers can resolve open traceability gaps before release review.
         Re-verification Jira tasks are never automatically created by MedTrace — when recommending re-verification, instruct the user to create a linked re-verification task from the MedTrace UI (or explicitly invoke create-reverification-task-action).
+        When electronic attestation is needed, direct users to sign off inside the MedTrace UI (never in Confluence), and never claim MedTrace alone makes a team "21 CFR Part 11 compliant" or replaces formal QMS or QA review.
         Always base findings strictly on tool output and remind users that independent quality review is still required.
       actions:
         - get-hazard-lineage-action
@@ -71,6 +72,11 @@ modules:
       actionVerb: GET
       function: rovo-action-fn
       inputs:
+        hazardKey:
+          title: Hazard Key
+          type: string
+          required: false
+          description: Optional ISO 14971 hazard key to inspect (e.g. HAZ-101, MED-10).
         issueKey:
           title: Issue or Hazard Key
           type: string

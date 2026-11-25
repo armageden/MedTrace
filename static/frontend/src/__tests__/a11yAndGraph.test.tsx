@@ -11,6 +11,7 @@ import { TraceMatrixTable } from '../components/TraceMatrixTable';
 import { LineageGraph } from '../components/LineageGraph';
 import { AuditHeader } from '../components/AuditHeader';
 import { BlastRadiusCard } from '../components/BlastRadiusCard';
+import { AppErrorBoundary } from '../main';
 import type { FlowNodePayload } from '../components/CustomNodes';
 import * as bridgeModule from '../bridge';
 import { ComplianceSummary, TraceLink } from '../types';
@@ -31,11 +32,15 @@ vi.mock('@xyflow/react', () => ({
     nodes = [],
     edges = [],
     nodeTypes = {},
+    onNodeClick,
+    onEdgeClick,
     children,
   }: {
     nodes?: Node[];
     edges?: Edge[];
     nodeTypes?: NodeTypes;
+    onNodeClick?: (event: React.MouseEvent, node: Node) => void;
+    onEdgeClick?: (event: React.MouseEvent, edge: Edge) => void;
     children?: React.ReactNode;
   }) => {
     lastRenderedNodes = nodes;
@@ -49,7 +54,11 @@ vi.mock('@xyflow/react', () => ({
           ];
           if (!Comp) return null;
           return (
-            <div key={node.id} data-testid={node.id}>
+            <div
+              key={node.id}
+              data-testid={node.id}
+              onClick={(e) => onNodeClick?.(e, node)}
+            >
               <Comp
                 id={node.id}
                 type={node.type || 'default'}
@@ -67,6 +76,16 @@ vi.mock('@xyflow/react', () => ({
             </div>
           );
         })}
+        {edges.map((edge) => (
+          <button
+            key={edge.id}
+            type="button"
+            data-testid={`edge-${edge.id}`}
+            onClick={(e) => onEdgeClick?.(e, edge)}
+          >
+            {edge.id}
+          </button>
+        ))}
       </div>
     );
   },
@@ -588,5 +607,87 @@ describe('FE-08..FE-10: Dialog a11y stack/focus trap/restore, table semantics, a
     await user.click(trigger);
     await user.click(screen.getByRole('menuitem', { name: /Sync Live Atlassian/i }));
     expect(onSyncLive).toHaveBeenCalledTimes(1);
+
+    await user.click(trigger);
+    expect(screen.getByRole('menu', { name: 'Compliance actions' })).toBeInTheDocument();
+    fireEvent.keyDown(window, { key: 'Tab' });
+    expect(screen.queryByRole('menu', { name: 'Compliance actions' })).not.toBeInTheDocument();
+  });
+
+  it('shows COMPLIANCE RELEASE GATE in Confluence and disables Test Human Gate while testing', () => {
+    render(
+      <AuditHeader
+        summary={makeSummary([])}
+        panelContext={{
+          extensionType: 'confluence:globalPage',
+          isCompactPanel: false,
+          isConfluence: true,
+        }}
+        activeView="table"
+        onToggleView={() => {}}
+        onSeed={() => {}}
+        onSyncLive={() => {}}
+        onOpenAuditLog={() => {}}
+        onOpenExport={() => {}}
+        onTestTransition={() => {}}
+        onAnalyzeBlastRadius={() => {}}
+        isSeeding={false}
+        isSyncingLive={false}
+        isAnalyzingBlastRadius={false}
+        isTestingTransition={true}
+      />
+    );
+
+    expect(screen.getByText('COMPLIANCE RELEASE GATE')).toBeInTheDocument();
+    const testingBtn = screen.getByRole('button', { name: /Testing Gate/i });
+    expect(testingBtn).toBeDisabled();
+  });
+
+  it('handles ReactFlow node/edge clicks, shared-node popover selection, and AppErrorBoundary fallback', async () => {
+    const onSelect = vi.fn();
+    const sharedA = makeLink({ id: 's1' });
+    const sharedB = makeLink({
+      id: 's2',
+      hazard: { ...sharedA.hazard, id: 'haz-shared', key: 'HAZ-SHARED' },
+      work: { ...sharedA.work, key: 'PUMP-2' },
+    });
+    sharedA.hazard = sharedB.hazard;
+    const singleLink = makeLink({ id: 'single-1' });
+    const summary = makeSummary([sharedA, sharedB, singleLink], 'LIVE');
+
+    render(<LineageGraph summary={summary} onSelectTraceLink={onSelect} />);
+
+    // Single-link node click
+    fireEvent.click(screen.getByTestId('node-haz-haz-single-1'));
+    expect(onSelect).toHaveBeenCalledWith('single-1');
+
+    // Edge click
+    fireEvent.click(screen.getByTestId('edge-e-haz-spec-s1'));
+    expect(onSelect).toHaveBeenCalledWith('s1');
+
+    // Shared node click opens popover, clicking choice selects link and closes popover
+    fireEvent.click(screen.getByTestId('node-haz-haz-shared'));
+    const choiceBtn = await screen.findByRole('button', { name: 'HAZ-SHARED (PUMP-2)' });
+    fireEvent.click(choiceBtn);
+    expect(onSelect).toHaveBeenCalledWith('s2');
+    expect(screen.queryByRole('dialog', { name: 'Select trace link for shared node' })).not.toBeInTheDocument();
+
+    // AppErrorBoundary renders fallback alert on child render error
+    const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const Boom: React.FC = () => {
+      throw new Error('Simulated UI crash');
+    };
+    try {
+      render(
+        <AppErrorBoundary>
+          <Boom />
+        </AppErrorBoundary>
+      );
+      const alert = screen.getByRole('alert');
+      expect(alert).toHaveTextContent('MedTrace UI encountered an unexpected rendering error');
+      expect(alert).toHaveTextContent('Simulated UI crash');
+    } finally {
+      consoleErrorSpy.mockRestore();
+    }
   });
 });

@@ -6,7 +6,7 @@
   --mt-bg-neutral: var(--ds-background-neutral, #ebecf0);
   --mt-text-primary: var(--ds-text, #172b4d);
   --mt-text-secondary: var(--ds-text-subtle, #42526e);
-  --mt-text-muted: var(--ds-text-subtlest, #6b778c);
+  --mt-text-muted: var(--ds-text-subtlest, #44546f);
   --mt-border: var(--ds-border, #dfe1e6);
   --mt-border-subtle: var(--ds-border, #ebecf0);
   --mt-border-input: var(--ds-border-input, #c1c7d0);
@@ -52,6 +52,7 @@ textarea {
 }
 
 button:focus-visible,
+a[href]:focus-visible,
 input:focus-visible,
 select:focus-visible,
 textarea:focus-visible,

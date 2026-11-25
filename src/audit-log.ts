@@ -308,7 +308,7 @@ export class AuditLogService {
         actorAccountId: params.actorAccountId || 'unknown',
         action: params.action,
         targetKey: params.targetKey,
-        details: params.details || {},
+        details: params.details ? cloneJsonValue(params.details) : {},
         prevHash,
         authMethod: params.authMethod,
       };
@@ -423,6 +423,23 @@ export class AuditLogService {
         : this.resolveDefaultVerifyMaxEntries();
 
     if (tail.lastSeq === 0) {
+      if (options?.expectedPrevHash && options.expectedPrevHash !== AUDIT_GENESIS_HASH) {
+        return {
+          valid: false,
+          totalEntries: 0,
+          headHash: AUDIT_GENESIS_HASH,
+          brokenAtSeq: 0,
+          reason: `Anchor expectedPrevHash mismatch on empty ledger.`,
+          ...(isBounded
+            ? {
+                verifiedFromSeq: startSeq,
+                verifiedToSeq: 0,
+                truncated: false,
+                windowEntryCount: 0,
+              }
+            : {}),
+        };
+      }
       return {
         valid: true,
         totalEntries: 0,
@@ -439,6 +456,23 @@ export class AuditLogService {
     }
 
     if (startSeq > tail.lastSeq) {
+      if (options?.expectedPrevHash && options.expectedPrevHash !== tail.headHash) {
+        return {
+          valid: false,
+          totalEntries: tail.lastSeq,
+          headHash: tail.headHash,
+          brokenAtSeq: tail.lastSeq,
+          reason: `Anchor expectedPrevHash mismatch past ledger tail (${tail.lastSeq}).`,
+          ...(isBounded
+            ? {
+                verifiedFromSeq: startSeq,
+                verifiedToSeq: tail.lastSeq,
+                truncated: false,
+                windowEntryCount: 0,
+              }
+            : {}),
+        };
+      }
       return {
         valid: true,
         totalEntries: tail.lastSeq,
@@ -581,6 +615,17 @@ export class AuditLogService {
         }
         expectedPrevHash = entry.entryHash;
       }
+    }
+
+    if (!truncated && tail.headHash && expectedPrevHash !== tail.headHash) {
+      return {
+        valid: false,
+        totalEntries: tail.lastSeq,
+        headHash: tail.headHash,
+        brokenAtSeq: endSeq,
+        reason: `Audit headHash mismatch at seq ${endSeq}: stored head differs from verified tail hash.`,
+        ...windowMeta,
+      };
     }
 
     return {

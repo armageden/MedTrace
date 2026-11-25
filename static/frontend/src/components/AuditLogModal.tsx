@@ -3,6 +3,7 @@ import { invokeResolver } from '../bridge';
 import { verifyAuditChainBounded } from '../auditVerify';
 import { useDialogA11y } from '../hooks/useDialogA11y';
 import { AuditChainVerification, AuditLogEntry } from '../types';
+import { getErrorMessage } from '../utils';
 import { X, ShieldCheck, ShieldAlert, RefreshCw, ScrollText } from 'lucide-react';
 
 interface AuditLogModalProps {
@@ -37,6 +38,7 @@ export const AuditLogModal: React.FC<AuditLogModalProps> = ({
   const loadLedger = useCallback(async () => {
     const reqId = ++requestSeqRef.current;
     setIsLoading(true);
+    setIsLoadingMore(false);
     setError(null);
     setHasExhaustedOlder(false);
     try {
@@ -56,18 +58,16 @@ export const AuditLogModal: React.FC<AuditLogModalProps> = ({
       }
     } catch (err) {
       if (reqId !== requestSeqRef.current) return;
-      setError(
-        err instanceof Error ? err.message : 'Failed to load audit ledger from Forge backend.'
-      );
+      setError(getErrorMessage(err, 'Failed to load audit ledger from Forge backend.'));
     } finally {
       if (reqId === requestSeqRef.current) {
         setIsLoading(false);
       }
     }
-  }, []);
+  }, [isProjectScoped]);
 
   const loadOlderEntries = useCallback(async () => {
-    if (entries.length === 0 || isLoading || isLoadingMore) return;
+    if (entries.length === 0 || isLoading || isLoadingMore || hasExhaustedOlder) return;
     const oldestLoadedSeq = entries.reduce(
       (min, item) => Math.min(min, item.seq),
       entries[0].seq
@@ -94,6 +94,10 @@ export const AuditLogModal: React.FC<AuditLogModalProps> = ({
         return;
       }
 
+      if (olderNewestFirst.length < AUDIT_PAGE_SIZE && !isProjectScoped) {
+        setHasExhaustedOlder(true);
+      }
+
       setEntries((prev) => {
         const seen = new Set(prev.map((item) => item.seq));
         const uniqueOlder = olderNewestFirst.filter((item) => !seen.has(item.seq));
@@ -101,15 +105,13 @@ export const AuditLogModal: React.FC<AuditLogModalProps> = ({
       });
     } catch (err) {
       if (reqId !== requestSeqRef.current) return;
-      setError(
-        err instanceof Error ? err.message : 'Failed to load older audit ledger entries.'
-      );
+      setError(getErrorMessage(err, 'Failed to load older audit ledger entries.'));
     } finally {
       if (reqId === requestSeqRef.current) {
         setIsLoadingMore(false);
       }
     }
-  }, [entries, isLoading, isLoadingMore]);
+  }, [entries, isLoading, isLoadingMore, hasExhaustedOlder, isProjectScoped]);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -117,6 +119,8 @@ export const AuditLogModal: React.FC<AuditLogModalProps> = ({
     return () => {
       // Invalidate any in-flight fetch if modal closes before completion.
       requestSeqRef.current += 1;
+      setIsLoading(false);
+      setIsLoadingMore(false);
     };
   }, [isOpen, loadLedger]);
 
@@ -232,9 +236,9 @@ export const AuditLogModal: React.FC<AuditLogModalProps> = ({
             >
               <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                 {verification.valid ? (
-                  <ShieldCheck size={18} color="var(--mt-success-text)" />
+                  <ShieldCheck size={18} color="var(--mt-success-text)" aria-hidden="true" />
                 ) : (
-                  <ShieldAlert size={18} color="var(--mt-danger-text)" />
+                  <ShieldAlert size={18} color="var(--mt-danger-text)" aria-hidden="true" />
                 )}
                 <div>
                   <div
@@ -327,6 +331,7 @@ export const AuditLogModal: React.FC<AuditLogModalProps> = ({
           ) : (
             <div style={{ overflowX: 'auto' }}>
               <table
+                aria-label="Tamper-evident audit ledger"
                 style={{ width: '100%', borderCollapse: 'collapse', fontSize: 11, textAlign: 'left' }}
               >
                 <thead>
@@ -337,13 +342,13 @@ export const AuditLogModal: React.FC<AuditLogModalProps> = ({
                       borderBottom: '1px solid var(--mt-border)',
                     }}
                   >
-                    <th style={{ padding: '8px 10px' }}>Seq</th>
-                    <th style={{ padding: '8px 10px' }}>Timestamp</th>
-                    <th style={{ padding: '8px 10px' }}>Action</th>
-                    <th style={{ padding: '8px 10px' }}>Target</th>
-                    <th style={{ padding: '8px 10px' }}>Actor</th>
-                    <th style={{ padding: '8px 10px' }}>Auth Method</th>
-                    <th style={{ padding: '8px 10px' }}>Entry Hash</th>
+                    <th scope="col" style={{ padding: '8px 10px' }}>Seq</th>
+                    <th scope="col" style={{ padding: '8px 10px' }}>Timestamp</th>
+                    <th scope="col" style={{ padding: '8px 10px' }}>Action</th>
+                    <th scope="col" style={{ padding: '8px 10px' }}>Target</th>
+                    <th scope="col" style={{ padding: '8px 10px' }}>Actor</th>
+                    <th scope="col" style={{ padding: '8px 10px' }}>Auth Method</th>
+                    <th scope="col" style={{ padding: '8px 10px' }}>Entry Hash</th>
                   </tr>
                 </thead>
                 <tbody>

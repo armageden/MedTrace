@@ -483,6 +483,7 @@ function checkSyncConsistency(ctx, checkedDocs, texts) {
       const content = readText(f);
       texts.set(f, content);
       checkLinks(f, content, ctx);
+      checkPaths(f, content, ctx);
     }
   }
 
@@ -524,7 +525,7 @@ function checkSyncConsistency(ctx, checkedDocs, texts) {
         if (re.test(line)) ctx.fail("sync-consistency", filePath, msg, i + 1);
       }
       const draftMatch = line.match(
-        /\b(\d+)\s+automated tests\s*\(\s*(\d+)\s+backend[^)]*\+\s*(\d+)\s+React\/Vitest/i,
+        /\*{0,2}(\d+)\s+automated tests(?:\s+pass)?\s*(?:\(\s*`?0`?\s+failures\)\s*:\*{0,2}|\()\s*\*{0,2}(\d+)\*{0,2}\s+backend[^)]*\+\s*\*{0,2}(\d+)\*{0,2}\s+React\/Vitest/i,
       );
       if (draftMatch) {
         const [, total, back, front] = draftMatch.map(Number);

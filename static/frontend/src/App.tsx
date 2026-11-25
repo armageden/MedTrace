@@ -1,13 +1,13 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import type { FullContext } from '@forge/bridge';
 import { enableForgeTheme, getForgeContext, invokeResolver } from './bridge';
-import { isPlainRecord } from './utils';
+import { getErrorMessage, isPlainRecord } from './utils';
 import {
   BlastRadiusReport,
-  ClientTransitionResult,
   ComplianceSummary,
   ForgePanelContext,
   LiveSyncOptions,
+  TransitionResult,
   UiNotice,
   VerificationTest,
 } from './types';
@@ -97,8 +97,11 @@ function parseForgeContext(raw: FullContext | null): ForgePanelContext {
   const issueObj = isPlainRecord(ext?.issue) ? ext.issue : undefined;
   const projectObj = isPlainRecord(ext?.project) ? ext.project : undefined;
   const contentObj = isPlainRecord(ext?.content) ? ext.content : undefined;
+  const spaceObj = isPlainRecord(ext?.space) ? ext.space : undefined;
   const issueKey = typeof issueObj?.key === 'string' ? issueObj.key : undefined;
   const projectKey = typeof projectObj?.key === 'string' ? projectObj.key : undefined;
+  const spaceId =
+    spaceObj?.id !== undefined && spaceObj?.id !== null ? String(spaceObj.id) : undefined;
   const contentId =
     contentObj?.id !== undefined && contentObj?.id !== null ? String(contentObj.id) : undefined;
 
@@ -108,6 +111,7 @@ function parseForgeContext(raw: FullContext | null): ForgePanelContext {
     isConfluence,
     issueKey,
     projectKey,
+    spaceId,
     contentId,
   };
 }
@@ -158,13 +162,15 @@ export const App: React.FC = () => {
   const [isSeeding, setIsSeeding] = useState(false);
   const [isSyncingLive, setIsSyncingLive] = useState(false);
   const [isMutating, setIsMutating] = useState(false);
-  const [transitionResult, setTransitionResult] = useState<ClientTransitionResult | null>(null);
+  const [isTestingTransition, setIsTestingTransition] = useState(false);
+  const [transitionResult, setTransitionResult] = useState<TransitionResult | null>(null);
   const [isTransitionModalOpen, setIsTransitionModalOpen] = useState(false);
   const [blastRadius, setBlastRadius] = useState<BlastRadiusReport | null>(null);
   const [isAnalyzingBlastRadius, setIsAnalyzingBlastRadius] = useState(false);
 
   const summaryRef = useRef<ComplianceSummary | null>(null);
   const activeMutationRef = useRef(false);
+  const initialInFlightRef = useRef(false);
   const mutationEpochRef = useRef(0);
   const suiteRequestSeqRef = useRef(0);
   const activeTransitionRef = useRef(false);
@@ -190,20 +196,21 @@ export const App: React.FC = () => {
 
   const fetchAndApplySuite = useCallback(
     async (mode: 'initial' | 'poll' | 'focus') => {
-      if (mode !== 'initial' && activeMutationRef.current) {
+      if (mode !== 'initial' && (activeMutationRef.current || initialInFlightRef.current)) {
         return;
       }
 
       const reqSeq = ++suiteRequestSeqRef.current;
       const mutEpoch = mutationEpochRef.current;
       if (mode === 'initial') {
+        initialInFlightRef.current = true;
         pollPausedRef.current = false;
         setIsInitialLoading(true);
       }
 
       try {
         const result: unknown =
-          (await (mode === 'poll'
+          (await (mode === 'poll' || mode === 'focus'
             ? invokeResolver('getComplianceSuite', { skipReconcile: true })
             : invokeResolver('getComplianceSuite'))) ?? null;
         if (
@@ -257,7 +264,7 @@ export const App: React.FC = () => {
         ) {
           return;
         }
-        const detail = err instanceof Error ? err.message : 'Forge bridge invoke failed';
+        const detail = getErrorMessage(err, 'Forge bridge invoke failed');
         if (
           summaryRef.current === null ||
           /auth|consent|401|403|token|session|expired|unauthor/i.test(detail)
@@ -284,7 +291,10 @@ export const App: React.FC = () => {
         }
       } finally {
         if (mode === 'initial') {
-          setIsInitialLoading(false);
+          initialInFlightRef.current = false;
+          if (reqSeq === suiteRequestSeqRef.current) {
+            setIsInitialLoading(false);
+          }
         }
       }
     },
@@ -301,7 +311,7 @@ export const App: React.FC = () => {
         if (cancelled || !ctx) return;
         const parsed = parseForgeContext(ctx);
         setPanelContext(parsed);
-        if (parsed.isCompactPanel) {
+        if (parsed.isCompactPanel && !userToggledViewRef.current) {
           setActiveView('table');
         }
       })
@@ -409,7 +419,7 @@ export const App: React.FC = () => {
       });
       return false;
     } catch (err) {
-      const msg = err instanceof Error ? err.message : `${opts.actionLabel} failed`;
+      const msg = getErrorMessage(err, `${opts.actionLabel} failed`);
       setNotice({
         kind: 'error',
         source: opts.noticeSource ?? 'mutation',
@@ -458,6 +468,7 @@ export const App: React.FC = () => {
       invoke: () => {
         const payload: Omit<LiveSyncOptions, 'callerMode'> = {
           projectKey: panelContext.projectKey,
+          ...(panelContext.spaceId ? { spaceId: panelContext.spaceId } : {}),
           ...(typeof options?.includeUntaggedIssues === 'boolean'
             ? { includeUntaggedIssues: options.includeUntaggedIssues }
             : {}),
@@ -517,6 +528,7 @@ export const App: React.FC = () => {
     }
 
     activeBlastRef.current = true;
+    const mutEpoch = mutationEpochRef.current;
     setIsAnalyzingBlastRadius(true);
     try {
       const currentSelected =
@@ -524,6 +536,9 @@ export const App: React.FC = () => {
         currentSummary.traceLinks[0];
       const triggerKey = currentSelected?.spec?.id || currentSelected?.hazard?.key || '';
       const report: unknown = await invokeResolver('analyzeBlastRadius', { triggerKey });
+      if (mutEpoch !== mutationEpochRef.current || activeMutationRef.current) {
+        return;
+      }
       if (isPlainRecord(report) && Array.isArray(report.affectedHazardKeys)) {
         const typedReport = report as unknown as BlastRadiusReport;
         setBlastRadius(typedReport);
@@ -548,7 +563,10 @@ export const App: React.FC = () => {
         });
       }
     } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Blast radius analysis failed';
+      if (mutEpoch !== mutationEpochRef.current || activeMutationRef.current) {
+        return;
+      }
+      const msg = getErrorMessage(err, 'Blast radius analysis failed');
       setBlastRadius(null);
       setNotice({
         kind: 'error',
@@ -564,6 +582,8 @@ export const App: React.FC = () => {
   const handleTestTransition = async () => {
     if (activeMutationRef.current || activeTransitionRef.current) return;
     activeTransitionRef.current = true;
+    const mutEpoch = mutationEpochRef.current;
+    setIsTestingTransition(true);
     const currentSummary = summaryRef.current;
     const selected = currentSummary?.traceLinks.find((l) => l.id === selectedLinkId) ?? null;
     const issueKey = selected
@@ -575,6 +595,9 @@ export const App: React.FC = () => {
         'simulateTransition',
         issueKey ? { issueKey, scope: 'issue' } : { scope: 'global' }
       );
+      if (mutEpoch !== mutationEpochRef.current || activeMutationRef.current) {
+        return;
+      }
       if (isPlainRecord(res) && typeof res.result === 'boolean') {
         const evaluatedIssueKey =
           typeof res.evaluatedIssueKey === 'string' && res.evaluatedIssueKey.trim().length > 0
@@ -596,16 +619,21 @@ export const App: React.FC = () => {
             'Forge backend returned an unexpected safety gate payload — no transition decision was made.',
         });
       }
+      setIsTransitionModalOpen(true);
     } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Forge backend unreachable';
+      if (mutEpoch !== mutationEpochRef.current || activeMutationRef.current) {
+        return;
+      }
+      const msg = getErrorMessage(err, 'Forge backend unreachable');
       setTransitionResult({
         result: false,
         evaluatedIssueKey: issueKey,
         evalError: `Forge backend could not evaluate the safety gate (${msg}) — no transition decision was made.`,
       });
+      setIsTransitionModalOpen(true);
     } finally {
       activeTransitionRef.current = false;
-      setIsTransitionModalOpen(true);
+      setIsTestingTransition(false);
     }
   };
 
@@ -742,6 +770,8 @@ export const App: React.FC = () => {
   if (!summary) {
     return (
       <div
+        role="status"
+        aria-busy={isInitialLoading || undefined}
         style={{
           minHeight: '100vh',
           background: 'var(--mt-bg-page, #f4f5f7)',
@@ -761,7 +791,7 @@ export const App: React.FC = () => {
             display: 'flex',
           }}
         >
-          <ShieldCheck size={30} color="var(--ds-text-inverse, #ffffff)" />
+          <ShieldCheck size={30} color="var(--ds-text-inverse, #ffffff)" aria-hidden="true" />
         </div>
         <div
           style={{
@@ -835,6 +865,7 @@ export const App: React.FC = () => {
         isSeeding={isSeeding}
         isSyncingLive={isSyncingLive}
         isAnalyzingBlastRadius={isAnalyzingBlastRadius}
+        isTestingTransition={isTestingTransition}
         isMutating={isMutating}
         isBusy={isBusy}
       />
@@ -844,7 +875,7 @@ export const App: React.FC = () => {
           className="no-print"
           role={notice.kind === 'error' ? 'alert' : 'status'}
           style={{
-            margin: '12px 24px 0',
+            margin: panelContext.isCompactPanel ? '10px 14px 0' : '12px 24px 0',
             padding: '10px 14px',
             borderRadius: 6,
             background: noticeStyle.background,

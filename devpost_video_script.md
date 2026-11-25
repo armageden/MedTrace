@@ -77,7 +77,7 @@ and Export Dossier. Repeat the winning thesis.
    `Under Review`) use `Record Test Result` (`PASSED` + an `https://` evidence URL) →
    `Sign Off Spec (Attestation)` → link flips to `VERIFIED` (and any sibling work sharing the
    same `(hazardKey, specId)` baseline updates too), then transition MEDTRACE-1 to `Done` in Jira
-   with `MedTrace Safety Gate` (`medtrace-safety-validator`) attached.
+   with `MedTrace IEC 62304 Safety Gate` (`medtrace-safety-validator`) attached.
 3. **Confluence drift trigger (10 min):** edit SRS-201 (`5.0` → `5.5` mL/hr) and publish →
    reload MedTrace (cross-partition `reconcileConfluenceSpecs`, complementing `avi:confluence:updated:page`) and confirm the signature is revoked → run `Blast Radius`.
    Check `forge logs -e production` for the trigger/reconciliation event if nothing changes.

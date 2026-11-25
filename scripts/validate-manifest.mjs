@@ -270,6 +270,37 @@ export async function validateManifest(options = {}) {
   // Verify no https:// / http:// remote icon URLs remain in UI modules (and validate local resource icons).
   errors.push(...collectIconIssues(typedContent.modules, typedContent.resources, rootDir));
 
+  // Verify declared resource paths (e.g. main Custom UI dist & icons) exist inside rootDir.
+  if (Array.isArray(typedContent.resources)) {
+    for (const resEntry of typedContent.resources) {
+      const resKey = typeof resEntry?.key === 'string' ? resEntry.key : '(unknown)';
+      const resRel = typeof resEntry?.path === 'string' ? resEntry.path.trim() : '';
+      if (!resRel) {
+        errors.push(`[resource] Resource "${resKey}" is missing a valid path.`);
+        continue;
+      }
+      const resFullPath = path.resolve(rootDir, resRel);
+      if (resFullPath !== rootDir && !resFullPath.startsWith(rootDir + path.sep)) {
+        errors.push(`[resource] Resource "${resKey}" path escapes repository root: "${resRel}".`);
+        continue;
+      }
+      if (!fs.existsSync(resFullPath)) {
+        errors.push(
+          `[resource] Resource "${resKey}" path does not exist: ${path.relative(rootDir, resFullPath)}. Run "npm run build:all".`
+        );
+        continue;
+      }
+      if (resKey === 'main' && fs.statSync(resFullPath).isDirectory()) {
+        const indexHtml = path.join(resFullPath, 'index.html');
+        if (!fs.existsSync(indexHtml)) {
+          errors.push(
+            `[resource] Resource "main" is missing built entry file "${path.relative(rootDir, indexHtml)}". Run "npm run build:frontend".`
+          );
+        }
+      }
+    }
+  }
+
   return {
     ok: errors.length === 0,
     errors,

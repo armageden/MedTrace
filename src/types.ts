@@ -239,6 +239,7 @@ export interface LiveSyncOptions {
   jql?: string;
   includeUntaggedIssues?: boolean;
   callerMode?: 'USER' | 'APP';
+  preserveReadOnlyProjects?: boolean;
   resumeFromCursor?: boolean;
   pageToken?: string;
 }

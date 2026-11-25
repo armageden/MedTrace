@@ -2235,7 +2235,7 @@ test.describe('Task 1C-Ingestion: Confluence Revert Non-Resurrection & 3-Attempt
         Date.now = origDateNow;
       }
 
-      // Non-resumed truncation without nextPageToken (maxIssues: 1 when Jira returns 2 issues in one page) clears stale cursor
+      // Non-resumed truncation without nextPageToken (maxIssues: 1 when Jira returns 2 issues in one page) overwrites stale token and tracks overflow key
       const freshTrunc = await LiveIngestionService.syncFromAtlassian(
         { projectKey: 'JQL', maxIssues: 1, callerMode: 'USER' },
         'acc-jql'
@@ -2243,9 +2243,14 @@ test.describe('Task 1C-Ingestion: Confluence Revert Non-Resurrection & 3-Attempt
       assert.strictEqual(freshTrunc.truncated, true);
       assert.strictEqual(freshTrunc.nextPageToken, undefined);
       assert.strictEqual(
-        kvsMock.store.has(cursorKey),
-        false,
-        'Stale cursor must be cleared when a fresh sync truncates without a nextPageToken'
+        kvsMock.store.get(cursorKey)?.nextPageToken,
+        undefined,
+        'Stale nextPageToken must be cleared when a fresh sync truncates without a nextPageToken'
+      );
+      assert.deepStrictEqual(
+        kvsMock.store.get(cursorKey)?.pendingIssueKeys,
+        ['JQL-2'],
+        'Overflowed issues from a non-50-aligned maxIssues slice must be queued in pendingIssueKeys'
       );
     });
   });
@@ -3162,5 +3167,434 @@ test.describe('Task 1C-Ingestion: Confluence Revert Non-Resurrection & 3-Attempt
       assert.strictEqual(resumed.summary.traceLinks.length, 1, 'Linked Hazard on page 2 must not be duplicated and page 1 link must be preserved');
       assert.strictEqual(resumed.summary.traceLinks[0].work.key, 'TRL-1');
     });
+  });
+
+  test.it('reconcileConfluenceSpecs fails closed when drift persistence throws instead of returning stale VERIFIED state', async () => {
+    const kvsMock = createFullMockForgeKvs();
+    const specOrig = '<p>signed spec</p>';
+    const shaOrig = sha256Hex(specOrig);
+    const signedLink = ComplianceEngine.evaluateTraceLink(
+      { id: 'haz-fc', key: 'HAZ-FC-1', title: 'Fail Closed Haz', riskClass: 'CLASS_C', mitigationRequirementId: 'srs-8001', status: 'MITIGATED' },
+      { id: 'srs-8001', pageId: '8001', title: 'SRS-8001', version: 1, sha256Hash: shaOrig, lastSignedHash: shaOrig, isSignatureInvalidated: false, contentSnippet: 'signed spec', lastUpdated: '2026-11-24T00:00:00Z' },
+      { id: 'w-fc', key: 'FC-1', title: 'Work FC-1', status: 'Done', assignee: 'Alice' },
+      { id: 't-fc', testKey: 'TST-FC-1', title: 'Test FC-1', testType: 'Unit Test', status: 'PASSED', evidenceUrl: 'https://ci.example/1', executionDate: '2026-11-24T00:00:00Z' },
+      { id: 'sig-fc', signedBy: 'Alice', signedByAccountId: 'acc-1', signedAt: '2026-11-24T00:00:00Z', role: 'QA', meaning: 'Approved', artifactSha256: shaOrig, isValid: true }
+    );
+    const suite = ComplianceEngine.generateComplianceReport([signedLink], 'LIVE', 'Fail Closed Suite', { initialized: true });
+    const { reconcileConfluenceSpecsTrigger } = require('../dist/triggers.js');
+
+    await withForgeMocks(
+      {
+        kvsMock,
+        asAppImpl: () => ({
+          requestJira: async () => makeJsonResponse(404, {}),
+          requestConfluence: async () =>
+            makeJsonResponse(200, {
+              id: '8001',
+              title: 'SRS-8001',
+              version: { number: 2 },
+              body: { storage: { value: '<p>drifted body</p>' } },
+            }),
+        }),
+      },
+      async () => {
+        await assert.rejects(
+          () =>
+            reconcileConfluenceSpecsTrigger(suite, {
+              allowAppFallback: true,
+              onDriftDetected: async () => {
+                throw new Error('CAS conflict persisting drift');
+              },
+            }),
+          /CAS conflict persisting drift/
+        );
+      }
+    );
+  });
+
+  test.it('syncFromAtlassian sets syncIncomplete: true when truncated with 0 safety matches on uninitialized workspace', async () => {
+    const kvsMock = createFullMockForgeKvs();
+    const plainTask = {
+      id: '9101',
+      key: 'EMP-1',
+      fields: {
+        summary: 'Plain task without safety labels',
+        status: { name: 'To Do' },
+        issuetype: { name: 'Task' },
+        labels: [],
+        project: { key: 'EMP', name: 'EMP' },
+        issuelinks: [],
+      },
+    };
+
+    await withForgeMocks(
+      {
+        kvsMock,
+        asAppImpl: () => ({
+          requestJira: async () =>
+            makeJsonResponse(200, { issues: [plainTask], nextPageToken: 'emp-page-2', isLast: false }),
+          requestConfluence: async () => makeJsonResponse(200, { results: [] }),
+        }),
+      },
+      async () => {
+        const res = await LiveIngestionService.syncFromAtlassian(
+          { projectKey: 'EMP', maxIssues: 1, callerMode: 'APP' },
+          'acc-emp'
+        );
+        assert.strictEqual(res.success, false);
+        assert.strictEqual(res.truncated, true);
+        assert.strictEqual(res.summary.syncIncomplete, true);
+        assert.deepStrictEqual(res.summary.incompleteProjectKeys, ['EMP']);
+      }
+    );
+  });
+
+  test.it('unscoped USER sync preserves unbrowsable project links and scopes shared-spec signature IDs per hazard', async () => {
+    const kvsMock = createFullMockForgeKvs();
+    const { ComplianceEngine: CE } = require('../dist/compliance-engine.js');
+    const sharedBody = '<p>Shared clinical alarm limit 5.0 mL/hr</p>';
+    const sharedHash = sha256Hex(sharedBody);
+
+    const hiddenBetaLink = CE.evaluateTraceLink(
+      { id: 'haz-beta-1', key: 'HAZ-BETA-1', title: 'Hidden Beta Hazard', riskClass: 'CLASS_C', mitigationRequirementId: '9100', status: 'ACTION_REQUIRED' },
+      { id: '9100', pageId: '9100', title: 'SRS-9100', version: 1, sha256Hash: sharedHash, lastSignedHash: '', isSignatureInvalidated: false, contentSnippet: 'Shared spec', lastUpdated: '2026-11-24T00:00:00Z' },
+      { id: '2001', key: 'BETA-1', title: 'Hidden Beta Work', status: 'In Progress', assignee: 'Bob' },
+      { id: 'test-beta-1', testKey: 'TEST-BETA-1', title: 'Beta Test', testType: 'Unit Test', status: 'UNTESTED' },
+      { id: 'sig-HAZ-BETA-1--9100', signedBy: '', signedAt: '', role: 'QA', meaning: 'Pending', artifactSha256: '', isValid: false },
+      undefined,
+      { linkId: 'live-beta-1-9100' }
+    );
+    const seedSuite = CE.generateComplianceReport([hiddenBetaLink], 'LIVE', 'Multi-Project Workspace', {
+      initialized: true,
+    });
+
+    const alfaIssue = {
+      id: '1001',
+      key: 'ALFA-1',
+      self: 'https://api.atlassian.com/ex/jira/11111111-2222-3333-4444-555555555555/rest/api/3/issue/1001',
+      fields: {
+        summary: 'Alfa Pump Task',
+        status: { name: 'In Progress', statusCategory: { key: 'indeterminate', name: 'In Progress' } },
+        labels: ['class-c'],
+        issuetype: { name: 'Task' },
+        project: { key: 'ALFA', name: 'Alfa Project' },
+        issuelinks: [],
+      },
+    };
+    const gammaIssue = {
+      id: '3001',
+      key: 'GAMMA-1',
+      self: 'https://api.atlassian.com/ex/jira/11111111-2222-3333-4444-555555555555/rest/api/3/issue/3001',
+      fields: {
+        summary: 'Gamma Valve Task',
+        status: { name: 'In Progress', statusCategory: { key: 'indeterminate', name: 'In Progress' } },
+        labels: ['class-b'],
+        issuetype: { name: 'Task' },
+        project: { key: 'GAMMA', name: 'Gamma Project' },
+        issuelinks: [],
+      },
+    };
+
+    const userClient = () => ({
+      requestJira: async (routeObj) => {
+        const r = String(routeObj?.value_ || routeObj?.value || routeObj);
+        if (r.startsWith('/rest/api/3/mypermissions')) {
+          const isBeta = r.includes('projectKey=BETA');
+          return makeJsonResponse(200, {
+            permissions: { BROWSE_PROJECTS: { havePermission: !isBeta } },
+          });
+        }
+        if (r.startsWith('/rest/api/3/search/jql')) {
+          return makeJsonResponse(200, { issues: [alfaIssue, gammaIssue], isLast: true });
+        }
+        if (r.includes('/rest/api/3/issue/ALFA-1/remotelink') || r.includes('/rest/api/3/issue/GAMMA-1/remotelink')) {
+          return makeJsonResponse(200, [
+            { object: { url: 'https://site.atlassian.net/wiki/spaces/MED/pages/9100', title: 'SRS-9100' } },
+          ]);
+        }
+        return makeJsonResponse(404, {});
+      },
+      requestConfluence: async (routeObj) => {
+        const r = String(routeObj?.value_ || routeObj?.value || routeObj);
+        if (r.includes('/wiki/api/v2/pages/9100')) {
+          return makeJsonResponse(200, {
+            id: '9100',
+            title: 'SRS-9100',
+            version: { number: 1, createdAt: '2026-11-24T00:00:00Z' },
+            body: { storage: { value: sharedBody } },
+          });
+        }
+        return makeJsonResponse(404, {});
+      },
+    });
+
+    await withForgeMocks({ kvsMock, asUserImpl: userClient, asAppImpl: userClient }, async () => {
+      await SeederService.saveComplianceSuite(seedSuite, 0);
+      const syncRes = await LiveIngestionService.syncFromAtlassian({ callerMode: 'USER' }, 'acc-alfa');
+      assert.strictEqual(syncRes.success, true);
+
+      const keys = syncRes.summary.traceLinks.map((l) => l.work.key).sort();
+      assert.deepStrictEqual(keys, ['ALFA-1', 'BETA-1', 'GAMMA-1']);
+      assert.strictEqual(syncRes.summary.projectName, 'Multi-Project Workspace');
+
+      const alfaSig = syncRes.summary.traceLinks.find((l) => l.work.key === 'ALFA-1').signature.id;
+      const gammaSig = syncRes.summary.traceLinks.find((l) => l.work.key === 'GAMMA-1').signature.id;
+      assert.notStrictEqual(alfaSig, gammaSig);
+      assert.match(alfaSig, /^sig-HAZ-ALFA-1--srs-9100$/);
+      assert.match(gammaSig, /^sig-HAZ-GAMMA-1--srs-9100$/);
+    });
+  });
+
+  test.it('handleJiraIssueUpdated fails closed (CLASS_C, safetyClassAssigned: false) when safety labels are removed from native Jira Hazard', async () => {
+    const kvsMock = createFullMockForgeKvs();
+    const { ComplianceEngine: CE } = require('../dist/compliance-engine.js');
+    const seedLink = CE.evaluateTraceLink(
+      {
+        id: '10010',
+        key: 'MED-10',
+        title: 'Over-infusion Hazard',
+        riskClass: 'CLASS_B',
+        mitigationRequirementId: '7701',
+        status: 'ACTION_REQUIRED',
+        source: 'JIRA_ISSUE',
+      },
+      {
+        id: '7701',
+        pageId: '7701',
+        title: 'SRS-7701',
+        version: 1,
+        sha256Hash: 'a'.repeat(64),
+        lastSignedHash: '',
+        isSignatureInvalidated: false,
+        contentSnippet: 'Spec',
+        lastUpdated: '2026-11-24T00:00:00Z',
+      },
+      { id: '10001', key: 'MED-1', title: 'Pump Driver', status: 'Done', assignee: 'Alice' },
+      { id: 'test-med-1', testKey: 'TEST-MED-1', title: 'HIL Test', testType: 'Unit Test', status: 'PASSED', evidenceUrl: 'https://ci.example/1', executionDate: '2026-11-24T00:00:00Z' },
+      { id: 'sig-1', signedBy: '', signedAt: '', role: 'QA', meaning: 'Pending', artifactSha256: '', isValid: false },
+      undefined,
+      { linkId: 'link-native-label-removal' }
+    );
+    const seedSuite = CE.generateComplianceReport([seedLink], 'LIVE', 'Native Label Suite', { initialized: true });
+
+    const appClient = () => ({
+      requestJira: async (routeObj) => {
+        const r = String(routeObj?.value_ || routeObj?.value || routeObj);
+        if (r.includes('/rest/api/3/issue/MED-10')) {
+          return makeJsonResponse(200, {
+            id: '10010',
+            key: 'MED-10',
+            fields: {
+              summary: 'Over-infusion Hazard',
+              status: { name: 'Open' },
+              labels: [],
+              issuetype: { name: 'Hazard' },
+              issuelinks: [{ outwardIssue: { key: 'MED-1' } }],
+            },
+          });
+        }
+        if (r.includes('/rest/api/3/issue/MED-1')) {
+          return makeJsonResponse(200, {
+            id: '10001',
+            key: 'MED-1',
+            fields: {
+              summary: 'Pump Driver',
+              status: { name: 'Done', statusCategory: { key: 'done', name: 'Done' } },
+              labels: [],
+              issuetype: { name: 'Task' },
+              issuelinks: [],
+            },
+          });
+        }
+        return makeJsonResponse(404, {});
+      },
+    });
+
+    await withForgeMocks({ kvsMock, asAppImpl: appClient }, async () => {
+      await SeederService.saveComplianceSuite(seedSuite, 0);
+      const triggerRes = await LiveIngestionService.handleJiraIssueUpdated({
+        eventType: 'avi:jira:updated:issue',
+        issue: { key: 'MED-10' },
+        atlassianId: 'acc-haz-editor',
+      });
+      assert.strictEqual(triggerRes.processed, true);
+      const updated = await SeederService.getActiveComplianceSuite();
+      const link = updated.traceLinks[0];
+      assert.strictEqual(link.hazard.riskClass, 'CLASS_C');
+      assert.strictEqual(link.hazard.safetyClassAssigned, false);
+      assert.notStrictEqual(link.complianceState, 'VERIFIED');
+      assert.ok(link.violations.some((v) => /no software safety class label/i.test(v)));
+    });
+  });
+
+  test.it('reconcileConfluenceSpecsTrigger throws fail-closed when failClosedOnBudget is true and time budget is exceeded', async () => {
+    const kvsMock = createFullMockForgeKvs();
+    const { ComplianceEngine: CE } = require('../dist/compliance-engine.js');
+    const { reconcileConfluenceSpecsTrigger } = require('../dist/triggers.js');
+    const links = Array.from({ length: 6 }, (_, idx) => {
+      const pageId = String(8100 + idx);
+      return CE.evaluateTraceLink(
+        { id: `haz-${idx}`, key: `HAZ-${idx}`, title: `Hazard ${idx}`, riskClass: 'CLASS_C', mitigationRequirementId: pageId, status: 'MITIGATED' },
+        { id: pageId, pageId, title: `SRS-${pageId}`, version: 1, sha256Hash: sha256Hex(`<p>body ${idx}</p>`), lastSignedHash: sha256Hex(`<p>body ${idx}</p>`), isSignatureInvalidated: false, contentSnippet: 'Spec', lastUpdated: '2026-11-24T00:00:00Z' },
+        { id: `w-${idx}`, key: `MED-${idx}`, title: `Work ${idx}`, status: 'Done', assignee: 'Alice' },
+        { id: `t-${idx}`, testKey: `TST-${idx}`, title: `Test ${idx}`, testType: 'Unit Test', status: 'PASSED', evidenceUrl: 'https://ci.example/1', executionDate: '2026-11-24T00:00:00Z' },
+        { id: `sig-${idx}`, signedBy: 'Alice', signedAt: '2026-11-24T00:00:00Z', role: 'QA', meaning: 'Approved', artifactSha256: sha256Hex(`<p>body ${idx}</p>`), isValid: true },
+        undefined,
+        { linkId: `link-budget-${idx}` }
+      );
+    });
+    const suite = CE.generateComplianceReport(links, 'LIVE', 'Budget Gate Suite', { initialized: true });
+
+    const origDateNow = Date.now;
+    let fakeClock = 1_000_000;
+    let batchReads = 0;
+    Date.now = () => {
+      fakeClock += batchReads > 0 ? 10_000 : 1;
+      return fakeClock;
+    };
+
+    try {
+      await withForgeMocks(
+        {
+          kvsMock,
+          asAppImpl: () => ({
+            requestJira: async () => makeJsonResponse(404, {}),
+            requestConfluence: async (routeObj) => {
+              batchReads += 1;
+              const m = String(routeObj?.value_ || routeObj).match(/pages\/(\d+)/);
+              const idx = Number(m?.[1] || 8100) - 8100;
+              return makeJsonResponse(200, {
+                id: String(8100 + idx),
+                title: `SRS-${8100 + idx}`,
+                version: { number: 1 },
+                body: { storage: { value: `<p>body ${idx}</p>` } },
+              });
+            },
+          }),
+        },
+        async () => {
+          await assert.rejects(
+            () =>
+              reconcileConfluenceSpecsTrigger(suite, {
+                allowAppFallback: true,
+                failClosedOnBudget: true,
+              }),
+            /budget.*exhausted/i
+          );
+        }
+      );
+    } finally {
+      Date.now = origDateNow;
+    }
+  });
+
+  test.it('prunes deleted scoped projects, classifies unlabeled [MedTrace Re-Verification] stubs as reverificationTaskKey, and skips redundant /issue calls', async () => {
+    const kvsMock = createFullMockForgeKvs();
+    const issueDetailCalls = [];
+    let alfaDeleted = false;
+    let betaDeleted = false;
+
+    await withForgeMocks(
+      {
+        kvsMock,
+        asAppImpl: () => ({
+          requestJira: async (routeObj) => {
+            const r = String(routeObj?.value_ || routeObj);
+            if (r.includes('/rest/api/3/search/jql')) {
+              if (r.includes('ALFA')) {
+                if (alfaDeleted) {
+                  return makeJsonResponse(200, { issues: [], isLast: true });
+                }
+                return makeJsonResponse(200, {
+                  issues: [
+                    {
+                      id: '101',
+                      key: 'ALFA-1',
+                      self: 'https://api.atlassian.com/ex/jira/11111111-2222-3333-4444-555555555555/rest/api/3/issue/101',
+                      fields: {
+                        summary: 'Infusion Valve Control',
+                        status: { name: 'In Progress', statusCategory: { name: 'In Progress' } },
+                        labels: ['class-c'],
+                        issuetype: { name: 'Task' },
+                        project: { key: 'ALFA', name: 'Alfa Project' },
+                        issuelinks: [
+                          {
+                            type: { name: 'Tests', inward: 'tested by', outward: 'tests' },
+                            outwardIssue: {
+                              id: '909',
+                              key: 'ALFA-9',
+                              fields: {
+                                summary: '[MedTrace Re-Verification] HAZ-ALFA-1: Valve Control',
+                                issuetype: { name: 'Task' },
+                              },
+                            },
+                          },
+                        ],
+                      },
+                    },
+                  ],
+                  isLast: true,
+                });
+              }
+              if (r.includes('BETA')) {
+                if (betaDeleted) {
+                  return makeJsonResponse(200, { issues: [], isLast: true });
+                }
+                return makeJsonResponse(200, {
+                  issues: [
+                    {
+                      id: '201',
+                      key: 'BETA-1',
+                      self: 'https://api.atlassian.com/ex/jira/11111111-2222-3333-4444-555555555555/rest/api/3/issue/201',
+                      fields: {
+                        summary: 'Battery Monitor',
+                        status: { name: 'In Progress', statusCategory: { name: 'In Progress' } },
+                        labels: ['class-b'],
+                        issuetype: { name: 'Task' },
+                        project: { key: 'BETA', name: 'Beta Project' },
+                        issuelinks: [],
+                      },
+                    },
+                  ],
+                  isLast: true,
+                });
+              }
+            }
+            if (r.includes('/remotelink')) {
+              return makeJsonResponse(200, []);
+            }
+            if (r.includes('/rest/api/3/issue/')) {
+              issueDetailCalls.push(r);
+              return makeJsonResponse(200, {});
+            }
+            return makeJsonResponse(404, {});
+          },
+          requestConfluence: async () => makeJsonResponse(200, { results: [] }),
+        }),
+      },
+      async () => {
+        const resA = await LiveIngestionService.syncFromAtlassian({ projectKey: 'ALFA', callerMode: 'APP' }, 'acc-1');
+        assert.strictEqual(resA.success, true);
+        assert.strictEqual(issueDetailCalls.length, 0, 'syncFromAtlassian should skip redundant /rest/api/3/issue/{key} calls');
+        assert.strictEqual(resA.summary.traceLinks[0].reverificationTaskKey, 'ALFA-9');
+        assert.strictEqual(resA.summary.traceLinks[0].test.testKey, 'TEST-ALFA-1');
+
+        const resB = await LiveIngestionService.syncFromAtlassian({ projectKey: 'BETA', callerMode: 'APP' }, 'acc-1');
+        assert.deepStrictEqual(resB.summary.traceLinks.map((l) => l.work.key).sort(), ['ALFA-1', 'BETA-1']);
+
+        // Delete ALFA-1 -> scoped sync ALFA prunes ALFA-1 while preserving BETA-1
+        alfaDeleted = true;
+        const prunedA = await LiveIngestionService.syncFromAtlassian({ projectKey: 'ALFA', callerMode: 'APP' }, 'acc-1');
+        assert.strictEqual(prunedA.success, true);
+        assert.deepStrictEqual(prunedA.summary.traceLinks.map((l) => l.work.key), ['BETA-1']);
+
+        // Delete BETA-1 -> scoped sync BETA prunes last link and resets to uninitialized LIVE
+        betaDeleted = true;
+        const prunedB = await LiveIngestionService.syncFromAtlassian({ projectKey: 'BETA', callerMode: 'APP' }, 'acc-1');
+        assert.strictEqual(prunedB.success, true);
+        assert.strictEqual(prunedB.summary.initialized, false);
+        assert.strictEqual(prunedB.summary.traceLinks.length, 0);
+      }
+    );
   });
 });

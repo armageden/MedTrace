@@ -89,20 +89,24 @@ export function parseEnvContent(content, env = {}) {
  * Loads `.env` from `cwd` first, then the repository root relative to this module.
  */
 export function loadLocalEnv(targetEnv = process.env, cwd = process.cwd()) {
-  try {
-    const moduleDir = path.dirname(fileURLToPath(import.meta.url));
-    const candidateEnvPaths = [
-      path.resolve(cwd, '.env'),
-      path.resolve(moduleDir, '..', '.env'),
-    ];
-    for (const envPath of candidateEnvPaths) {
+  const moduleDir = path.dirname(fileURLToPath(import.meta.url));
+  const candidateEnvPaths = [
+    path.resolve(cwd, '.env'),
+    path.resolve(moduleDir, '..', '.env'),
+  ];
+  for (const envPath of candidateEnvPaths) {
+    try {
       if (fs.existsSync(envPath)) {
         const content = fs.readFileSync(envPath, 'utf8');
         parseEnvContent(content, targetEnv);
         return envPath;
       }
+    } catch (err) {
+      process.stderr.write(
+        `[medtrace-mcp] Warning: failed to read ${envPath}: ${err?.message || String(err)}\n`
+      );
     }
-  } catch {}
+  }
   return null;
 }
 
@@ -256,9 +260,11 @@ export async function signedCloudRequest(method, payloadObj, configOverride = un
 
     const rawText = await resp.text();
     let parsed = null;
+    let jsonParseFailed = false;
     try {
       parsed = rawText ? JSON.parse(rawText) : null;
     } catch {
+      jsonParseFailed = true;
       parsed = { raw: rawText };
     }
 
@@ -267,6 +273,16 @@ export async function signedCloudRequest(method, payloadObj, configOverride = un
         ok: false,
         status: resp.status,
         error: parsed?.error || `HTTP ${resp.status} ${resp.statusText || ''}`.trim(),
+        data: parsed,
+      };
+    }
+
+    if (jsonParseFailed) {
+      return {
+        ok: false,
+        status: resp.status,
+        errorType: 'INVALID_RESPONSE',
+        error: `Forge webtrigger returned non-JSON response (HTTP ${resp.status}).`,
         data: parsed,
       };
     }
@@ -301,7 +317,7 @@ export const TOOLS = [
         hazardKey: {
           type: 'string',
           description:
-            'Optional hazard, Jira issue, spec, test, or signature key (e.g. HAZ-101, MED-42, TEST-88). Omit to retrieve full project lineage.',
+            'Optional hazard, Jira issue, spec, test, or signature key (e.g. HAZ-101, MED-42, TEST-88). Supply a key for full trace lineage; omitting returns only the suite status summary without traceLinks over the shared HMAC webtrigger.',
         },
         issueKey: {
           type: 'string',
@@ -399,9 +415,10 @@ export function cloudErrorResult(id, cloudResp) {
   } else {
     payload = {
       source: 'BACKEND_ERROR',
-      errorType: 'UPSTREAM_ERROR',
+      errorType: cloudResp?.errorType || 'UPSTREAM_ERROR',
       httpStatus: status,
       error: cloudResp?.error || `HTTP ${status}`,
+      ...(cloudResp?.data?.errorId ? { errorId: cloudResp.data.errorId } : {}),
       hint: 'Forge backend returned an internal error; inspect Forge logs.',
     };
   }

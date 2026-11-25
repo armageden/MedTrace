@@ -52,3 +52,37 @@ export function getSafeHttpsUrl(rawUrl?: string): string | null {
   }
   return trimmed;
 }
+
+/**
+ * Extracts a human-readable message from an unknown rejection (`Error` or plain Forge bridge `{ message }`).
+ */
+export function getErrorMessage(err: unknown, fallback: string): string {
+  if (err instanceof Error && err.message.trim()) {
+    return err.message;
+  }
+  if (typeof err === 'string' && err.trim()) {
+    return err.trim();
+  }
+  if (
+    typeof err === 'object' &&
+    err !== null &&
+    'message' in err &&
+    typeof (err as { message?: unknown }).message === 'string'
+  ) {
+    const msg = (err as { message: string }).message.trim();
+    if (msg) return msg;
+  }
+  return fallback;
+}
+
+/**
+ * Returns true when an attestation signature holds prior signing/invalidation metadata (distinguishing REVOKED vs UNSIGNED).
+ */
+export function hasPriorSignature(sig?: {
+  artifactSha256?: string;
+  signedBy?: string;
+  signedAt?: string;
+  invalidatedAt?: string;
+}): boolean {
+  return Boolean(sig && (sig.artifactSha256 || sig.signedBy || sig.signedAt || sig.invalidatedAt));
+}

@@ -241,14 +241,18 @@ export async function batchGetStrict<T>(keys: string[]): Promise<Map<string, T>>
   for (const chunk of chunkArray(keys, BATCH_CHUNK_SIZE)) {
     const firstPass = await kvs.batchGet<T>(chunk.map((key) => ({ key })));
     for (const item of firstPass.successfulKeys || []) {
-      result.set(item.key, item.value);
+      if (item.value !== undefined) {
+        result.set(item.key, item.value);
+      }
     }
 
     const failedOnce = firstPass.failedKeys || [];
     if (failedOnce.length > 0) {
       const retryPass = await kvs.batchGet<T>(failedOnce.map((f) => ({ key: f.key })));
       for (const item of retryPass.successfulKeys || []) {
-        result.set(item.key, item.value);
+        if (item.value !== undefined) {
+          result.set(item.key, item.value);
+        }
       }
       if (retryPass.failedKeys && retryPass.failedKeys.length > 0) {
         const details = retryPass.failedKeys.map((f) => `${f.key}:${f.error?.code || 'ERR'}`).join(', ');
@@ -265,8 +269,11 @@ export async function batchGetStrict<T>(keys: string[]): Promise<Map<string, T>>
   return result;
 }
 
-export async function batchSetStrict(items: Array<{ key: string; value: unknown }>): Promise<string[]> {
-  const writtenKeys: string[] = [];
+export async function batchSetStrict(
+  items: Array<{ key: string; value: unknown }>,
+  writtenKeysOut?: string[]
+): Promise<string[]> {
+  const writtenKeys: string[] = writtenKeysOut ?? [];
   for (const chunk of chunkArray(items, BATCH_CHUNK_SIZE)) {
     const res = await kvs.batchSet(chunk);
     for (const item of chunk) {
@@ -355,16 +362,16 @@ export function resolveTraceLinkByHazard(
     return traceLinks.findIndex(
       (l) =>
         l.id === cleanLinkId &&
-        (!cleanHaz || l.hazard.key.toLowerCase() === cleanHaz) &&
-        (!cleanSpec || l.spec.id.toLowerCase() === cleanSpec) &&
-        (!cleanWork || l.work.key.toLowerCase() === cleanWork)
+        (!cleanHaz || (l.hazard?.key || '').toLowerCase() === cleanHaz) &&
+        (!cleanSpec || (l.spec?.id || '').toLowerCase() === cleanSpec) &&
+        (!cleanWork || (l.work?.key || '').toLowerCase() === cleanWork)
     );
   }
   return traceLinks.findIndex(
     (l) =>
-      l.hazard.key.toLowerCase() === cleanHaz &&
-      (!cleanSpec || l.spec.id.toLowerCase() === cleanSpec) &&
-      (!cleanWork || l.work.key.toLowerCase() === cleanWork)
+      (l.hazard?.key || '').toLowerCase() === cleanHaz &&
+      (!cleanSpec || (l.spec?.id || '').toLowerCase() === cleanSpec) &&
+      (!cleanWork || (l.work?.key || '').toLowerCase() === cleanWork)
   );
 }
 

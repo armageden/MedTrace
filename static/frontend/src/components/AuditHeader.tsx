@@ -27,6 +27,7 @@ export interface AuditHeaderProps {
   isSeeding: boolean;
   isSyncingLive: boolean;
   isAnalyzingBlastRadius: boolean;
+  isTestingTransition?: boolean;
   isMutating?: boolean;
   isBusy?: boolean;
   isCompactPanel?: boolean;
@@ -47,6 +48,7 @@ export const AuditHeader: React.FC<AuditHeaderProps> = ({
   isSeeding,
   isSyncingLive,
   isAnalyzingBlastRadius,
+  isTestingTransition = false,
   isMutating = false,
   isBusy = false,
   isCompactPanel,
@@ -136,6 +138,8 @@ export const AuditHeader: React.FC<AuditHeaderProps> = ({
       } else if (event.key === 'End') {
         event.preventDefault();
         items[items.length - 1].focus();
+      } else if (event.key === 'Tab') {
+        setIsActionsMenuOpen(false);
       }
     };
 
@@ -170,6 +174,7 @@ export const AuditHeader: React.FC<AuditHeaderProps> = ({
 
   const runMenuAction = (handler: () => void) => {
     setIsActionsMenuOpen(false);
+    actionsTriggerRef.current?.focus();
     handler();
   };
 
@@ -396,7 +401,7 @@ export const AuditHeader: React.FC<AuditHeaderProps> = ({
           <button
             type="button"
             onClick={onTestTransition}
-            disabled={mutationBusy}
+            disabled={mutationBusy || isTestingTransition}
             className="mt-btn"
             style={{
               border: '1.5px solid var(--mt-danger-bold)',
@@ -404,8 +409,8 @@ export const AuditHeader: React.FC<AuditHeaderProps> = ({
               color: 'var(--mt-danger-text)',
             }}
           >
-            <ShieldAlert size={14} />
-            Test Human Gate
+            <ShieldAlert size={14} aria-hidden="true" />
+            {isTestingTransition ? 'Testing Gate...' : 'Test Human Gate'}
           </button>
 
           {compact ? (
@@ -591,7 +596,7 @@ export const AuditHeader: React.FC<AuditHeaderProps> = ({
               {summary.classCCount}
             </span>
             <span style={{ fontSize: 11, color: 'var(--mt-text-secondary)', fontWeight: 600 }}>
-              Class C • C: {summary.classCCount} • B: {summary.classBCount} • A: {summary.classACount}
+              C: {summary.classCCount} • B: {summary.classBCount} • A: {summary.classACount}
             </span>
           </div>
         </div>
@@ -602,7 +607,9 @@ export const AuditHeader: React.FC<AuditHeaderProps> = ({
             borderLeft: `4px solid ${gateBlocked ? 'var(--mt-danger-bold)' : 'var(--mt-success-bold)'}`,
           }}
         >
-          <div style={cardLabel}>JIRA HUMAN RELEASE GATE</div>
+          <div style={cardLabel}>
+            {panelContext.isConfluence ? 'COMPLIANCE RELEASE GATE' : 'JIRA HUMAN RELEASE GATE'}
+          </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 6 }}>
             {isUninitialized ? (
               <>

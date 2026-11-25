@@ -11,7 +11,7 @@ import {
 } from './seeder-identity';
 import { resolveTraceLinkByHazard } from './seeder-storage';
 import { isForgeRuntime } from './runtime';
-import { JIRA_ISSUE_KEY_RE, JIRA_PROJECT_KEY_RE } from './crypto-utils';
+import { isHttpOk, JIRA_ISSUE_KEY_RE, JIRA_PROJECT_KEY_RE } from './crypto-utils';
 import { AuditLogEntry, ComplianceSummary, TraceLink } from './types';
 
 export interface ForgeExtensionPayload {
@@ -196,10 +196,6 @@ interface JiraPermissionsResponse {
   permissions?: Record<string, JiraPermissionEntry | undefined>;
 }
 
-function isHttpOk(res: { ok?: boolean; status: number }): boolean {
-  return typeof res.ok === 'boolean' ? res.ok : res.status >= 200 && res.status < 300;
-}
-
 export async function verifyJiraIdentity(expectedAccountId: string): Promise<void> {
   const res = await api.asUser().requestJira(route`/rest/api/3/myself`);
   if (!isHttpOk(res)) {
@@ -236,7 +232,7 @@ export async function assertJiraOperatorPermissions(projectKey?: string, issueKe
     ? route`/rest/api/3/mypermissions?issueKey=${issueKey}&permissions=BROWSE_PROJECTS,EDIT_ISSUES,ADMINISTER_PROJECTS`
     : projectKey
     ? route`/rest/api/3/mypermissions?projectKey=${projectKey}&permissions=BROWSE_PROJECTS,EDIT_ISSUES,ADMINISTER_PROJECTS`
-    : route`/rest/api/3/mypermissions?permissions=EDIT_ISSUES,ADMINISTER_PROJECTS`;
+    : route`/rest/api/3/mypermissions?permissions=BROWSE_PROJECTS,EDIT_ISSUES,ADMINISTER_PROJECTS`;
 
   const res = await api.asUser().requestJira(permRoute);
   if (!isHttpOk(res)) {
@@ -491,7 +487,8 @@ export async function assertAuthorizedOperator(
  */
 export async function filterLiveSuiteForCaller(
   caller: AuthorizedCaller,
-  suite: ComplianceSummary
+  suite: ComplianceSummary,
+  options?: { precheckedConfluencePages?: ReadonlyMap<string, boolean> }
 ): Promise<ComplianceSummary> {
   if (
     suite.datasetMode !== 'LIVE' ||
@@ -514,6 +511,9 @@ export async function filterLiveSuiteForCaller(
     extensionType: caller.extensionType,
     projectKey: caller.projectKey,
     checkConfluencePages: true,
+    ...(options?.precheckedConfluencePages
+      ? { precheckedConfluencePages: options.precheckedConfluencePages }
+      : {}),
   });
 }
 
@@ -798,6 +798,7 @@ export async function assertOperatorAuthorizedForTarget(
     workKey?: string;
     linkId?: string;
     testKey?: string;
+    includeSharedSpecSiblings?: boolean;
   }
 ): Promise<void> {
   const suite = await SeederService.getActiveComplianceSuite();
@@ -827,35 +828,37 @@ export async function assertOperatorAuthorizedForTarget(
     await assertJiraOperatorPermissions();
   };
 
-  let idx = -1;
-  if (target.testKey !== undefined || !target.hazardKey) {
-    const cleanLinkId = target.linkId?.trim();
-    const cleanHazard = target.hazardKey?.trim().toLowerCase();
-    const cleanTest = target.testKey?.trim().toLowerCase();
-    idx = cleanLinkId
-      ? suite.traceLinks.findIndex(
-          (l) =>
-            l.id === cleanLinkId &&
-            (!cleanHazard || l.hazard.key.toLowerCase() === cleanHazard) &&
-            (!cleanTest || l.test.testKey.toLowerCase() === cleanTest)
-        )
-      : suite.traceLinks.findIndex(
-          (l) =>
-            (cleanHazard && l.hazard.key.toLowerCase() === cleanHazard) ||
-            (cleanTest && l.test.testKey.toLowerCase() === cleanTest)
-        );
-  } else {
-    idx = resolveTraceLinkByHazard(
-      suite.traceLinks,
-      target.hazardKey,
-      target.specId,
-      target.workKey,
-      target.linkId
-    );
-  }
+  const cleanLinkId = target.linkId?.trim();
+  const cleanHazard = target.hazardKey?.trim().toLowerCase();
+  const cleanSpec = target.specId?.trim().toLowerCase();
+  const cleanTest = target.testKey?.trim().toLowerCase();
+  const cleanWork = target.workKey?.trim().toLowerCase();
+  const matchesWork = (l: TraceLink): boolean =>
+    !cleanWork ||
+    (l.work?.key || '').toLowerCase() === cleanWork ||
+    (l.hazard?.key || '').toLowerCase() === cleanWork ||
+    (l.test?.testKey || '').toLowerCase() === cleanWork;
+
+  const idx = cleanLinkId
+    ? suite.traceLinks.findIndex(
+        (l) =>
+          l.id === cleanLinkId &&
+          (!cleanHazard || (l.hazard?.key || '').toLowerCase() === cleanHazard) &&
+          (!cleanSpec || (l.spec?.id || '').toLowerCase() === cleanSpec) &&
+          (!cleanTest || (l.test?.testKey || '').toLowerCase() === cleanTest) &&
+          matchesWork(l)
+      )
+    : suite.traceLinks.findIndex(
+        (l) =>
+          (!cleanHazard || (l.hazard?.key || '').toLowerCase() === cleanHazard) &&
+          (!cleanSpec || (l.spec?.id || '').toLowerCase() === cleanSpec) &&
+          (!cleanTest || (l.test?.testKey || '').toLowerCase() === cleanTest) &&
+          matchesWork(l) &&
+          Boolean(cleanHazard || cleanTest || cleanWork)
+      );
 
   if (idx < 0) {
-    await assertFallbackJiraOperator();
+    await assertFallbackJiraOperator(target.workKey);
     return;
   }
 
@@ -874,8 +877,29 @@ export async function assertOperatorAuthorizedForTarget(
       }
     }
   }
+  if (target.includeSharedSpecSiblings === true) {
+    const hazLower = targetLink.hazard.key.trim().toLowerCase();
+    const specLower = targetLink.spec.id.trim().toLowerCase();
+    const pageLower = (targetLink.spec.pageId || '').trim().toLowerCase();
+    const targetHash = targetLink.spec.sha256Hash;
+    for (const candidate of suite.traceLinks) {
+      if (candidate === targetLink) continue;
+      const matchesSpec =
+        candidate.spec.id.trim().toLowerCase() === specLower ||
+        (pageLower !== '' && (candidate.spec.pageId || '').trim().toLowerCase() === pageLower);
+      if (
+        candidate.hazard.key.trim().toLowerCase() === hazLower &&
+        matchesSpec &&
+        candidate.spec.isMissingSentinel !== true &&
+        candidate.spec.sha256Hash === targetHash
+      ) {
+        linksToAuthorize.push(candidate);
+      }
+    }
+  }
 
   const verifiedIssueKeys = new Set<string>();
+  const checkedConfluencePages = new Map<string, boolean>();
   for (const link of linksToAuthorize) {
     const linkIssueKeys = extractAllJiraIssueKeysFromLink(link);
     if (linkIssueKeys.length > 0) {
@@ -884,12 +908,27 @@ export async function assertOperatorAuthorizedForTarget(
         await assertAuthorizedOperator(req, { issueKey });
         verifiedIssueKeys.add(issueKey);
       }
-      continue;
+    } else {
+      await assertFallbackJiraOperator();
     }
 
-    const hazardDerivedKey = link.hazard?.key?.trim().toUpperCase().replace(/^HAZ-/i, '');
-    await assertFallbackJiraOperator(
-      hazardDerivedKey && JIRA_ISSUE_KEY_RE.test(hazardDerivedKey) ? hazardDerivedKey : undefined
-    );
+    const specPageId = typeof link.spec?.pageId === 'string' ? link.spec.pageId.trim() : '';
+    if (
+      isForgeRuntime() &&
+      suite.datasetMode === 'LIVE' &&
+      link.spec?.isMissingSentinel !== true &&
+      /^\d+$/.test(specPageId)
+    ) {
+      let readable = checkedConfluencePages.get(specPageId);
+      if (readable === undefined) {
+        readable = await canReadConfluencePageForCaller(specPageId);
+        checkedConfluencePages.set(specPageId, readable);
+      }
+      if (!readable) {
+        throw new Error(
+          `Forbidden: Caller lacks Confluence read permission for linked specification page ${specPageId}.`
+        );
+      }
+    }
   }
 }

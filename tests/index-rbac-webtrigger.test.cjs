@@ -3284,4 +3284,364 @@ test.describe('SEC-01 & SEC-03: Resolver RBAC, Confused-Deputy, Part 11 & Webtri
       }
     );
   });
+
+  test.it('assertOperatorAuthorizedForTarget blocks signOffPart11 when a shared-spec sibling belongs to an unauthorized Jira project', async () => {
+    const { assertOperatorAuthorizedForTarget } = require('../dist/index.js');
+    const { ComplianceEngine } = require('../dist/compliance-engine.js');
+    const { SeederService } = require('../dist/seeder.js');
+
+    const linkA = ComplianceEngine.evaluateTraceLink(
+      { id: 'haz-shared', key: 'HAZ-SHARED-1', title: 'Shared Hazard', riskClass: 'CLASS_C', mitigationRequirementId: 'srs-50', status: 'UNVERIFIED_RISK' },
+      { id: 'srs-50', pageId: '50', title: 'SRS-50', version: 1, sha256Hash: 'abc12345'.repeat(8), lastSignedHash: '', isSignatureInvalidated: false, contentSnippet: 'Spec', lastUpdated: '2026-11-24T00:00:00Z' },
+      { id: 'w-a', key: 'PROJA-1', title: 'Work A', status: 'Done', assignee: 'Alice' },
+      { id: 't-a', testKey: 'TEST-A', title: 'Test A', testType: 'Unit Test', status: 'PASSED', evidenceUrl: 'https://ci.example/a', executionDate: '2026-11-24T00:00:00Z' },
+      { id: 'sig-50', signedBy: '', signedAt: '', role: 'QA', meaning: 'Pending', artifactSha256: '', isValid: false }
+    );
+    const linkB = ComplianceEngine.evaluateTraceLink(
+      { id: 'haz-shared', key: 'HAZ-SHARED-1', title: 'Shared Hazard', riskClass: 'CLASS_C', mitigationRequirementId: 'srs-50', status: 'UNVERIFIED_RISK' },
+      { id: 'srs-50', pageId: '50', title: 'SRS-50', version: 1, sha256Hash: 'abc12345'.repeat(8), lastSignedHash: '', isSignatureInvalidated: false, contentSnippet: 'Spec', lastUpdated: '2026-11-24T00:00:00Z' },
+      { id: 'w-b', key: 'PROJB-1', title: 'Work B', status: 'Done', assignee: 'Bob' },
+      { id: 't-b', testKey: 'TEST-B', title: 'Test B', testType: 'Unit Test', status: 'PASSED', evidenceUrl: 'https://ci.example/b', executionDate: '2026-11-24T00:00:00Z' },
+      { id: 'sig-50', signedBy: '', signedAt: '', role: 'QA', meaning: 'Pending', artifactSha256: '', isValid: false }
+    );
+
+    await withForgeMocks(
+      {
+        requestJira: async (routeObj) => {
+          const r = routeToString(routeObj);
+          if (r.includes('/rest/api/3/myself')) {
+            return makeHttpResponse(200, { accountId: 'proja-editor', active: true });
+          }
+          if (r.includes('/rest/api/3/mypermissions')) {
+            const isProjB = r.includes('PROJB-1') || r.includes('projectKey=PROJB');
+            return makeHttpResponse(200, {
+              permissions: {
+                BROWSE_PROJECTS: { havePermission: !isProjB },
+                EDIT_ISSUES: { havePermission: !isProjB },
+              },
+            });
+          }
+          return makeHttpResponse(200, {});
+        },
+        requestConfluence: async () => makeHttpResponse(200, { accountId: 'proja-editor' }),
+      },
+      async () => {
+        await SeederService.saveComplianceSuite(
+          ComplianceEngine.generateComplianceReport([linkA, linkB], 'LIVE', 'Shared Spec RBAC', { initialized: true }),
+          0
+        );
+        await assert.rejects(
+          () =>
+            assertOperatorAuthorizedForTarget(
+              { context: { accountId: 'proja-editor', extension: { type: 'jira:globalPage' } } },
+              { hazardKey: 'HAZ-SHARED-1', specId: 'srs-50', linkId: linkA.id, includeSharedSpecSiblings: true }
+            ),
+          /Forbidden/i
+        );
+      }
+    );
+  });
+
+  test.it('syncLiveSuite rejects unbalanced parentheses in custom JQL', async () => {
+    await assert.rejects(
+      () =>
+        resolverHandler(
+          {
+            call: { functionKey: 'syncLiveSuite', payload: { jql: 'status = Done) OR (key != EMPTY' } },
+            context: { extension: { type: 'jira:projectPage', project: { key: 'MED' } } },
+          },
+          { principal: { accountId: 'acc-jql' } }
+        ),
+      /unbalanced/i
+    );
+  });
+
+  test.it('getComplianceSuite reuses Confluence page permissions checked during reconcileConfluenceSpecs without duplicate page fetches', async () => {
+    const { ComplianceEngine } = require('../dist/compliance-engine.js');
+    const { sha256Hex } = require('../dist/crypto-utils.js');
+    const { SeederService } = require('../dist/seeder.js');
+    const origSpec = '<p>Single fetch spec</p>';
+    const shaOrig = sha256Hex(origSpec);
+    const link = ComplianceEngine.evaluateTraceLink(
+      { id: 'haz-df', key: 'HAZ-DF-1', title: 'Double Fetch Haz', riskClass: 'CLASS_C', mitigationRequirementId: '93001', status: 'MITIGATED' },
+      { id: '93001', pageId: '93001', title: 'SRS-93001', version: 1, sha256Hash: shaOrig, lastSignedHash: shaOrig, isSignatureInvalidated: false, contentSnippet: 'Single fetch spec', lastUpdated: '2026-11-24T00:00:00Z' },
+      { id: 'w-df', key: 'DF-1', title: 'Work DF-1', status: 'Done', assignee: 'Alice' },
+      { id: 't-df', testKey: 'TST-DF-1', title: 'Test DF-1', testType: 'Unit Test', status: 'PASSED', evidenceUrl: 'https://ci.example/1', executionDate: '2026-11-24T00:00:00Z' },
+      { id: 'sig-df', signedBy: 'Alice', signedAt: '2026-11-24T00:00:00Z', role: 'QA', meaning: 'Approved', artifactSha256: shaOrig, isValid: true }
+    );
+    let confluencePageFetches = 0;
+
+    await withForgeMocks(
+      {
+        requestJira: async (routeObj) => {
+          const r = routeToString(routeObj);
+          if (r.includes('/rest/api/3/mypermissions')) {
+            return makeHttpResponse(200, { permissions: { BROWSE_PROJECTS: { havePermission: true } } });
+          }
+          return makeHttpResponse(200, {});
+        },
+        requestConfluence: async (routeObj) => {
+          const r = routeToString(routeObj);
+          if (r.includes('/wiki/api/v2/pages/93001')) {
+            confluencePageFetches += 1;
+            return makeHttpResponse(200, {
+              id: '93001',
+              title: 'SRS-93001',
+              version: { number: 1 },
+              body: { storage: { value: origSpec } },
+            });
+          }
+          return makeHttpResponse(404, {});
+        },
+      },
+      async () => {
+        await SeederService.saveComplianceSuite(
+          ComplianceEngine.generateComplianceReport([link], 'LIVE', 'Double Fetch Suite', { initialized: true }),
+          0
+        );
+        const res = await resolverHandler(
+          {
+            call: { functionKey: 'getComplianceSuite', payload: {} },
+            context: { extension: { type: 'jira:projectPage', project: { key: 'DF' } } },
+          },
+          { principal: { accountId: 'reader-df' } }
+        );
+        assert.strictEqual(res.traceLinks.length, 1);
+        assert.strictEqual(res.traceLinks[0].spec.specRestricted, undefined);
+        assert.strictEqual(confluencePageFetches, 1, 'Expected single Confluence fetch reused across reconcile + RBAC filter');
+      }
+    );
+  });
+
+  test.it('syncLiveSuite scopes JQL ORDER BY safely, blocks project is empty, and webtrigger rejects dotted or whitespace nonces', async () => {
+    const { setNonceStore, createInMemoryNonceStore } = require('../dist/nonce-store.js');
+    const { mcpWebtriggerHandler } = require('../dist/index.js');
+    const secret = 'wt-nonce-chars-secret';
+    process.env.MEDTRACE_MCP_SECRET = secret;
+    setNonceStore(createInMemoryNonceStore());
+    const observedJqls = [];
+
+    await withForgeMocks(
+      {
+        requestJira: async (routeObj, opts) => {
+          const r = routeToString(routeObj);
+          if (r.includes('/rest/api/3/myself')) {
+            return makeHttpResponse(200, { accountId: 'acc-jql-guard', active: true });
+          }
+          if (r.includes('/rest/api/3/mypermissions')) {
+            return makeHttpResponse(200, {
+              permissions: {
+                BROWSE_PROJECTS: { havePermission: true },
+                EDIT_ISSUES: { havePermission: true },
+              },
+            });
+          }
+          if (r.includes('/rest/api/3/search/jql')) {
+            const jqlParam = new URL(r, 'https://jira.example').searchParams.get('jql');
+            if (jqlParam) observedJqls.push(jqlParam);
+            return makeHttpResponse(200, { issues: [] });
+          }
+          return makeHttpResponse(200, {});
+        },
+      },
+      async () => {
+        await resolverHandler(
+          {
+            call: { functionKey: 'syncLiveSuite', payload: { jql: 'status = Done ORDER BY key DESC' } },
+            context: { extension: { type: 'jira:projectPage', project: { key: 'MED' } } },
+          },
+          { principal: { accountId: 'acc-jql-guard' } }
+        );
+        assert.strictEqual(
+          observedJqls[0],
+          'project = "MED" AND (status = Done) ORDER BY key DESC'
+        );
+
+        await assert.rejects(
+          () =>
+            resolverHandler(
+              {
+                call: { functionKey: 'syncLiveSuite', payload: { jql: 'project is empty AND status = Done' } },
+                context: { extension: { type: 'jira:projectPage', project: { key: 'MED' } } },
+              },
+              { principal: { accountId: 'acc-jql-guard' } }
+            ),
+          /Forbidden: Custom JQL/i
+        );
+      }
+    );
+
+    const body = JSON.stringify({ action: 'status' });
+    for (const badNonce of ['nonce.with.dots', 'nonce with space']) {
+      const res = await mcpWebtriggerHandler({
+        method: 'POST',
+        headers: signWebtriggerHeaders(secret, body, badNonce),
+        body,
+      });
+      assert.strictEqual(res.statusCode, 401);
+    }
+
+    // Throwing custom fallback NonceStore (get/set only) returns STORAGE_ERROR -> 500 cleanly
+    const throwingStore = {
+      get: async () => {
+        throw new Error('kvs timeout');
+      },
+      set: async () => {},
+      delete: async () => {},
+    };
+    const { claimNonceDetailed } = require('../dist/webtrigger.js');
+    assert.strictEqual(await claimNonceDetailed('valid-fallback-nonce', throwingStore), 'STORAGE_ERROR');
+  });
+
+  test.it('workflowValidatorHandler & safeParseJson fail closed on HTTP 200 malformed JSON responses', async () => {
+    const { safeParseJson } = require('../dist/crypto-utils.js');
+    assert.strictEqual(
+      await safeParseJson({ json: async () => { throw new SyntaxError('Unexpected token <'); } }),
+      null
+    );
+
+    const { SeederService } = require('../dist/seeder.js');
+    const { ComplianceEngine } = require('../dist/compliance-engine.js');
+    const { workflowValidatorHandler } = require('../dist/index.js');
+
+    const dummyLink = ComplianceEngine.evaluateTraceLink(
+      { id: 'h-j1', key: 'HAZ-J1', title: 'Other Haz', riskClass: 'CLASS_C', mitigationRequirementId: 'srs-j1', status: 'ACTION_REQUIRED' },
+      { id: 'srs-j1', pageId: '71001', title: 'SRS', version: 1, sha256Hash: 'a'.repeat(64), isSignatureInvalidated: false, contentSnippet: 'Spec', lastUpdated: '2026-11-20T00:00:00Z' },
+      { id: 'w-j1', key: 'MED-999', title: 'Work', status: 'Done', assignee: 'Alice' },
+      { id: 't-j1', testKey: 'TST-999', title: 'Test', testType: 'Unit Test', status: 'PASSED', evidenceUrl: 'https://ci.example/1', executionDate: '2026-11-20T00:00:00Z' },
+      { id: 'sig-j1', signedBy: 'Alice', signedAt: '2026-11-20T00:00:00Z', role: 'QA', meaning: 'OK', artifactSha256: 'a'.repeat(64), isValid: true }
+    );
+
+    await withForgeMocks(
+      {
+        requestJira: async () => ({
+          status: 200,
+          ok: true,
+          json: async () => {
+            throw new SyntaxError('Unexpected token <');
+          },
+          text: async () => '<html>gateway</html>',
+        }),
+      },
+      async () => {
+        await SeederService.saveComplianceSuite(
+          ComplianceEngine.generateComplianceReport([dummyLink], 'LIVE', 'Malformed JSON Suite', { initialized: true }),
+          0
+        );
+        const gateRes = await workflowValidatorHandler({
+          issue: { key: 'MED-UNSYNCED-JSON' },
+          transition: { name: 'Done', to: { name: 'Done', statusCategory: { key: 'done' } } },
+        });
+        assert.strictEqual(gateRes.result, false);
+        assert.match(gateRes.errorMessage || '', /malformed Jira response/i);
+      }
+    );
+  });
+
+  test.it('enforces && matching in recordTestResult RBAC, link-scope checks in createReverificationTask by issueKey only, and omits availableKeys on webtrigger misses', async () => {
+    const { ComplianceEngine } = require('../dist/compliance-engine.js');
+    const { SeederService } = require('../dist/seeder.js');
+    const { resolverHandler, mcpWebtriggerHandler } = require('../dist/index.js');
+
+    const linkA = ComplianceEngine.evaluateTraceLink(
+      { id: 'haz-shared', key: 'HAZ-SHARED', title: 'Shared Haz', riskClass: 'CLASS_C', mitigationRequirementId: 'srs-a', status: 'ACTION_REQUIRED' },
+      { id: 'srs-a', pageId: '5101', title: 'SRS-A', version: 1, sha256Hash: 'a'.repeat(64), isSignatureInvalidated: false, contentSnippet: 'Spec A', lastUpdated: '2026-11-24T00:00:00Z' },
+      { id: 'w-a', key: 'ACME-1', title: 'ACME Work', status: 'In Progress', assignee: 'Alice' },
+      { id: 't-a', testKey: 'TEST-A', title: 'Test A', testType: 'Unit Test', status: 'UNTESTED' },
+      { id: 'sig-a', signedBy: '', signedAt: '', role: 'QA', meaning: '', artifactSha256: '', isValid: false },
+      undefined,
+      { linkId: 'link-shared-acme' }
+    );
+    const linkB = ComplianceEngine.evaluateTraceLink(
+      { id: 'haz-shared', key: 'HAZ-SHARED', title: 'Shared Haz', riskClass: 'CLASS_C', mitigationRequirementId: 'srs-b', status: 'ACTION_REQUIRED' },
+      { id: 'srs-b', pageId: '5102', title: 'SRS-B', version: 1, sha256Hash: 'b'.repeat(64), isSignatureInvalidated: false, contentSnippet: 'Spec B', lastUpdated: '2026-11-24T00:00:00Z' },
+      { id: 'w-b', key: 'MED-1', title: 'MED Work', status: 'In Progress', assignee: 'Bob' },
+      { id: 't-b', testKey: 'TEST-B', title: 'Test B', testType: 'Unit Test', status: 'UNTESTED' },
+      { id: 'sig-b', signedBy: '', signedAt: '', role: 'QA', meaning: '', artifactSha256: '', isValid: false },
+      undefined,
+      { linkId: 'link-shared-med' }
+    );
+
+    const secret = 'rbac-and-webtrigger-secret-32-bytes-ok';
+    process.env.MEDTRACE_MCP_SECRET = secret;
+
+    await withForgeMocks(
+      {
+        requestJira: async (routeObj) => {
+          const r = routeToString(routeObj);
+          if (r.includes('/rest/api/3/myself')) {
+            return makeHttpResponse(200, { accountId: 'acc-acme-editor', active: true });
+          }
+          if (r.includes('/rest/api/3/mypermissions')) {
+            const isMed = r.includes('MED-1') || r.includes('projectKey=MED');
+            return makeHttpResponse(200, {
+              permissions: {
+                BROWSE_PROJECTS: { havePermission: !isMed },
+                EDIT_ISSUES: { havePermission: !isMed },
+                CREATE_ISSUES: { havePermission: !isMed },
+              },
+            });
+          }
+          return makeHttpResponse(200, {});
+        },
+        requestConfluence: async (routeObj) => {
+          const r = routeToString(routeObj);
+          if (r.includes('/wiki/rest/api/user/current')) {
+            return makeHttpResponse(200, { accountId: 'acc-acme-editor' });
+          }
+          return makeHttpResponse(200, { id: '5101', title: 'SRS' });
+        },
+      },
+      async () => {
+        await SeederService.saveComplianceSuite(
+          ComplianceEngine.generateComplianceReport([linkA, linkB], 'LIVE', 'Cross Project RBAC', { initialized: true }),
+          0
+        );
+
+        // 1. Cross-project recordTestResult bypass via OR must fail on linkB (TEST-B belongs to MED-1)
+        await assert.rejects(
+          () =>
+            resolverHandler(
+              {
+                call: {
+                  functionKey: 'recordTestResult',
+                  payload: { hazardKey: 'HAZ-SHARED', testKey: 'TEST-B', status: 'PASSED', evidenceUrl: 'https://ci.example/1' },
+                },
+                context: { extension: { type: 'jira:globalPage' } },
+              },
+              { principal: { accountId: 'acc-acme-editor' } }
+            ),
+          /Forbidden/i
+        );
+
+        // 2. createReverificationTask with only issueKey='MED-1' (no hazardKey) must check linkB scope and reject
+        await assert.rejects(
+          () =>
+            resolverHandler(
+              {
+                call: {
+                  functionKey: 'createReverificationTask',
+                  payload: { issueKey: 'MED-1' },
+                },
+                context: { extension: { type: 'jira:globalPage' } },
+              },
+              { principal: { accountId: 'acc-acme-editor' } }
+            ),
+          /Forbidden/i
+        );
+
+        // 3. Webtrigger get-hazard-lineage miss must NOT leak availableKeys
+        const missBody = JSON.stringify({ action: 'get-hazard-lineage', hazardKey: 'NO-SUCH-HAZARD' });
+        const missResp = await mcpWebtriggerHandler({
+          method: 'POST',
+          headers: signWebtriggerHeaders(secret, missBody, 'n-miss-no-enum'),
+          body: missBody,
+        });
+        assert.strictEqual(missResp.statusCode, 200);
+        const missJson = JSON.parse(missResp.body);
+        assert.strictEqual(missJson.found, false);
+        assert.strictEqual(Object.hasOwn(missJson, 'availableKeys'), false);
+      }
+    );
+  });
 });

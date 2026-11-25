@@ -1,7 +1,12 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { invokeResolver } from '../bridge';
 import { useDialogA11y } from '../hooks/useDialogA11y';
-import { getSafeHttpsUrl, validateHttpsUrlError } from '../utils';
+import {
+  getErrorMessage,
+  getSafeHttpsUrl,
+  hasPriorSignature,
+  validateHttpsUrlError,
+} from '../utils';
 import { BlastRadiusCard } from './BlastRadiusCard';
 import {
   BindIssueForm,
@@ -91,6 +96,12 @@ export const InspectionDrawer: React.FC<InspectionDrawerProps> = ({
   const closeButtonRef = useRef<HTMLButtonElement | null>(null);
   const initializedLinkIdRef = useRef<string | null>(null);
   const bindDirtyRef = useRef(false);
+  const syncedSnapshotRef = useRef<{
+    testStatus: VerificationTest['status'];
+    evidenceUrl: string;
+    notes: string;
+    meaning: string;
+  } | null>(null);
   const latestLinkRef = useRef<TraceLink | null>(link);
   latestLinkRef.current = link;
 
@@ -120,32 +131,55 @@ export const InspectionDrawer: React.FC<InspectionDrawerProps> = ({
   const workKey = link?.work?.key?.trim() || '';
   const contextIssueKey = panelContext?.issueKey?.trim() || '';
 
-  // Reset local form defaults strictly when selected link ID changes (survives 8s polling / focus refresh)
+  // Sync local form fields on link switch or when refreshed backend values change without overwriting dirty local edits
   useEffect(() => {
     const currentLink = latestLinkRef.current;
     if (!currentLink) {
       initializedLinkIdRef.current = null;
       bindDirtyRef.current = false;
+      syncedSnapshotRef.current = null;
       return;
     }
-    if (initializedLinkIdRef.current === currentLink.id) {
-      return;
-    }
-    initializedLinkIdRef.current = currentLink.id;
-    bindDirtyRef.current = false;
+    const nextEvidence = currentLink.test.evidenceUrl || '';
+    const nextNotes = currentLink.test.notes || '';
+    const nextMeaning = currentLink.signature.meaning || DEFAULT_SIGN_MEANING;
+    const prevSnapshot = syncedSnapshotRef.current;
 
-    setBindIssueInput(currentLink.work.key || contextIssueKey || '');
-    setTestStatusInput(currentLink.test.status);
-    setTestEvidenceUrl(currentLink.test.evidenceUrl || '');
-    setTestNotes(currentLink.test.notes || '');
-    setTestValidationError(null);
-    setSignMeaning(currentLink.signature.meaning || DEFAULT_SIGN_MEANING);
-    setAttestationPhrase('');
-    setAttestationConfirmed(false);
-    setAttestationChecked(false);
-    setDemoSimConfirmed(false);
-    setDemoSimMeaning('');
-  }, [link?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+    if (initializedLinkIdRef.current !== currentLink.id) {
+      initializedLinkIdRef.current = currentLink.id;
+      bindDirtyRef.current = false;
+
+      setBindIssueInput(currentLink.work.key || contextIssueKey || '');
+      setTestStatusInput(currentLink.test.status);
+      setTestEvidenceUrl(nextEvidence);
+      setTestNotes(nextNotes);
+      setTestValidationError(null);
+      setSignMeaning(nextMeaning);
+      setAttestationPhrase('');
+      setAttestationConfirmed(false);
+      setAttestationChecked(false);
+      setDemoSimConfirmed(false);
+      setDemoSimMeaning('');
+    } else if (prevSnapshot) {
+      if (testStatusInput === prevSnapshot.testStatus) setTestStatusInput(currentLink.test.status);
+      if (testEvidenceUrl === prevSnapshot.evidenceUrl) setTestEvidenceUrl(nextEvidence);
+      if (testNotes === prevSnapshot.notes) setTestNotes(nextNotes);
+      if (signMeaning === prevSnapshot.meaning) setSignMeaning(nextMeaning);
+    }
+
+    syncedSnapshotRef.current = {
+      testStatus: currentLink.test.status,
+      evidenceUrl: nextEvidence,
+      notes: nextNotes,
+      meaning: nextMeaning,
+    };
+  }, [
+    link?.id,
+    link?.test.status,
+    link?.test.evidenceUrl,
+    link?.test.notes,
+    link?.signature.meaning,
+  ]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Auto-fill unbound issue input from panelContext.issueKey only if user hasn't edited it
   useEffect(() => {
@@ -164,9 +198,10 @@ export const InspectionDrawer: React.FC<InspectionDrawerProps> = ({
     const activeProjectKey = panelContext?.projectKey?.trim().toUpperCase();
     const isCrossProjectDemoFixture =
       datasetMode === 'DEMO' &&
-      Boolean(activeProjectKey) &&
-      Boolean(workKey) &&
-      !workKey.toUpperCase().startsWith(`${activeProjectKey}-`);
+      (Boolean(panelContext?.isConfluence) ||
+        (Boolean(activeProjectKey) &&
+          Boolean(workKey) &&
+          !workKey.toUpperCase().startsWith(`${activeProjectKey}-`)));
 
     if (!currentLinkId || !workKey || isCrossProjectDemoFixture) {
       setGraphContext(null);
@@ -187,12 +222,8 @@ export const InspectionDrawer: React.FC<InspectionDrawerProps> = ({
       })
       .catch((err: unknown) => {
         if (!cancelled) {
-          const message =
-            err instanceof Error && err.message.trim()
-              ? err.message
-              : 'Unable to query Jira REST context.';
           setGraphContext(null);
-          setGraphContextError(message);
+          setGraphContextError(getErrorMessage(err, 'Unable to query Jira REST context.'));
         }
       })
       .finally(() => {
@@ -204,7 +235,7 @@ export const InspectionDrawer: React.FC<InspectionDrawerProps> = ({
     return () => {
       cancelled = true;
     };
-  }, [link?.id, workKey, datasetMode, panelContext?.projectKey]);
+  }, [link?.id, workKey, datasetMode, panelContext?.projectKey, panelContext?.isConfluence]);
 
   // Centralized WCAG dialog Escape stack, focus trap, and focus restoration
   useDialogA11y({
@@ -273,17 +304,18 @@ export const InspectionDrawer: React.FC<InspectionDrawerProps> = ({
 
   const handleSignOffClick = async () => {
     if (!canSubmitSignOff) return;
+    const submittedLinkId = link.id;
     try {
       const result = await onSignOffPart11({
         hazardKey: link.hazard.key,
-        linkId: link.id,
+        linkId: submittedLinkId,
         specId: link.spec.id,
         meaning: signMeaning.trim(),
         attestationConfirmed: true,
         attestationChecked: true,
         attestationPhrase: trimmedPhrase,
       });
-      if (result !== false) {
+      if (result !== false && latestLinkRef.current?.id === submittedLinkId) {
         setAttestationPhrase('');
         setAttestationConfirmed(false);
         setAttestationChecked(false);
@@ -295,9 +327,10 @@ export const InspectionDrawer: React.FC<InspectionDrawerProps> = ({
 
   const handleRemediateDemoClick = async () => {
     if (isBusy || !demoSimConfirmed) return;
+    const submittedLinkId = link.id;
     try {
       const result = await onRemediateDemo(link.hazard.key, demoSimMeaning.trim());
-      if (result !== false) {
+      if (result !== false && latestLinkRef.current?.id === submittedLinkId) {
         setDemoSimConfirmed(false);
         setDemoSimMeaning('');
       }
@@ -669,12 +702,7 @@ export const InspectionDrawer: React.FC<InspectionDrawerProps> = ({
               <span>5. Electronic Attestation &amp; Audit Trail</span>
             </div>
             {(() => {
-              const hasPriorSig = Boolean(
-                link.signature.artifactSha256 ||
-                  link.signature.signedBy ||
-                  link.signature.signedAt ||
-                  link.signature.invalidatedAt
-              );
+              const hasPriorSig = hasPriorSignature(link.signature);
               const sigBg = link.signature.isValid
                 ? 'var(--mt-success-bg)'
                 : hasPriorSig
@@ -699,12 +727,18 @@ export const InspectionDrawer: React.FC<InspectionDrawerProps> = ({
                 </div>
               );
             })()}
-            <div style={{ fontSize: 11, color: 'var(--mt-text-muted)', marginTop: 2 }}>
-              Role: {link.signature.role} {link.signature.authMethod ? `• Auth: ${link.signature.authMethod}` : ''}
-            </div>
-            <div style={{ fontSize: 11, color: 'var(--mt-text-secondary)', marginTop: 2 }}>
-              Meaning: &ldquo;{link.signature.meaning}&rdquo;
-            </div>
+            {(link.signature.role || link.signature.authMethod) && (
+              <div style={{ fontSize: 11, color: 'var(--mt-text-muted)', marginTop: 2 }}>
+                {link.signature.role ? `Role: ${link.signature.role}` : ''}
+                {link.signature.role && link.signature.authMethod ? ' • ' : ''}
+                {link.signature.authMethod ? `Auth: ${link.signature.authMethod}` : ''}
+              </div>
+            )}
+            {link.signature.meaning && (
+              <div style={{ fontSize: 11, color: 'var(--mt-text-secondary)', marginTop: 2 }}>
+                Meaning: &ldquo;{link.signature.meaning}&rdquo;
+              </div>
+            )}
             {link.signature.isValid &&
               link.signature.signedByAccountId &&
               link.test.recordedBy === link.signature.signedByAccountId && (

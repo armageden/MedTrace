@@ -64,8 +64,8 @@ When updating scopes (including `read:graph:page:confluence` and `read:graph:use
 To enforce IEC 62304 checks on interactive Jira issue transitions:
 
 1. Open **Jira Project Settings -> Workflows** and edit the target release workflow.
-2. Select the release transition (for example, `In Review -> Done` or `Ready for Release`).
-3. Add a **Validator** and choose **MedTrace Safety Gate** (`medtrace-safety-validator` in [manifest.yml](../../manifest.yml), backed by `src/workflow-validator.ts`).
+2. Select the release transition (for example, `In Progress -> Done`, `Under Review -> Done`, or `Ready for Release`).
+3. Add a **Validator** and choose **MedTrace IEC 62304 Safety Gate** (`medtrace-safety-validator` in [manifest.yml](../../manifest.yml), backed by `src/workflow-validator.ts`).
 4. Publish the workflow. Transitions on safety-tracked issues fail closed when the `LIVE` suite is uninitialized, when any matching trace link fails compliance evaluation (`requireTestEvidence: true` in `LIVE` mode), or when an unsynced issue carries a safety label or Hazard issue type (`probeUnsyncedSafetyIssue`).
 
 > **Validator boundary:** Atlassian issue [`ECO-624`](https://jira.atlassian.com/browse/ECO-624) reports an Automation case but is marked Invalid and does not establish direct REST API behavior. The repository's CI calls the release-gate workflow on pull requests and pushes to main when its secrets are configured. Validate deployment-specific automation paths on your site.
@@ -90,7 +90,7 @@ Use [`.env.example`](../../.env.example) as a template for local MCP clients (`m
 
 MedTrace includes two workflows under `.github/workflows/`:
 
-- [.github/workflows/ci.yml](../../.github/workflows/ci.yml): Runs with `contents: read` permissions on `push` to `main` and `pull_request` using Node.js 22 (`package-lock.json` and `static/frontend/package-lock.json` caches). Runs `npm run typecheck`, `npm run build:all`, `npm run test:all`, `npm run docs:check`, syntax checks (`mcp-server/index.mjs`, `scripts/validate-manifest.mjs`, `scripts/docs-check.mjs`, `scripts/rotate-mcp-secret.sh`), offline `npm run lint:manifest`, root/frontend `npm audit --audit-level=high` checks (both root and `static/frontend` currently report `0` vulnerabilities), tracked-file secret/env-file hygiene checks, and `npx --yes @forge/cli@15.0.0 lint --approve MAJOR_VERSION_RULE` when `FORGE_API_TOKEN` and `FORGE_EMAIL` secrets are set. A `release-gate` job calls the release gate reusable workflow (`secrets: inherit`) under the same secret-presence condition.
+- [.github/workflows/ci.yml](../../.github/workflows/ci.yml): Runs with `contents: read` permissions on `push` to `main` and `pull_request` using Node.js 22 (`package-lock.json` and `static/frontend/package-lock.json` caches). Runs `npm run typecheck`, `npm run build:all`, `npm run test:coverage:all`, `node scripts/docs-check.mjs --strict-listing`, syntax checks (`mcp-server/index.mjs`, `scripts/validate-manifest.mjs`, `scripts/docs-check.mjs`, `scripts/rotate-mcp-secret.sh`), offline `npm run lint:manifest`, root/frontend `npm audit --audit-level=high` checks (both root and `static/frontend` currently report `0` vulnerabilities), tracked-file secret/env-file hygiene checks (skipping binaries), and `npx --yes @forge/cli@15.0.0 lint --approve MAJOR_VERSION_RULE` when `FORGE_API_TOKEN` and `FORGE_EMAIL` secrets are set. A `release-gate` job (`needs: [verify, release-gate-preflight]`) calls the release gate reusable workflow (`secrets: inherit`) under the same secret-presence condition.
 - [.github/workflows/medtrace-release-gate.yml](../../.github/workflows/medtrace-release-gate.yml): Separate gate triggered via `workflow_dispatch`, `workflow_call`, and published-release events. CI calls it on pull requests and pushes to main when `MEDTRACE_MCP_SECRET` and `MEDTRACE_WEBTRIGGER_URL` are configured (skipped otherwise, including fork PRs). It sends a signed `POST action: "verify-release-gate"` and fails unless the webtrigger returns HTTP `200`, `result: true`, and `releaseBlocked !== true`.
 
 ## 7. Secret Rotation
@@ -112,9 +112,9 @@ Key flags and behavior in `scripts/rotate-mcp-secret.sh`:
 
 ## 8. Post-Install Live Ingestion
 
-1. Open **MedTrace Safety Matrix** in Jira (`jira:projectPage`) or **MedTrace Compliance** in Confluence (`confluence:globalPage`).
+1. Open **MedTrace IEC 62304** in Jira (`jira:projectPage`, **Apps -> MedTrace IEC 62304**) or Confluence (`confluence:globalPage`, `medtrace-compliance` route).
 2. Fresh `LIVE` installations start empty (`initialized: false`), keeping release gates fail-closed until live compliance artifacts are synced.
-3. Click **Sync Live Atlassian Data** to invoke `syncLiveSuite` (`LiveIngestionService.syncFromAtlassian`) with `LIVE` dataset mode.
+3. Click **Sync Live Atlassian** to invoke `syncLiveSuite` (`LiveIngestionService.syncFromAtlassian`) with `LIVE` dataset mode.
 4. Inspect the hash-chained ledger in **Audit Log** (`getAuditLog` / `verifyAuditChain`) and confirm `verify-release-gate` passes once safety trace links carry `PASSED` evidence and valid `HMAC-SHA256-SEAL-V1` Part 11 signatures.
 
 ## 9. Pre-Marketplace Listing Gate Checklist

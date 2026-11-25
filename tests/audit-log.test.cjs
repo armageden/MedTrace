@@ -717,4 +717,41 @@ test.describe('AuditLogService & AuditStorageAdapters - Monotonicity, Batching &
       assert.strictEqual(currentHead.headHash, entries[4].entryHash);
     });
   });
+
+  test.it('verifyAuditChain enforces expectedPrevHash on empty/beyond-tail and full non-truncated tails', async () => {
+    const entries = buildValidEntries(4);
+    const seed = seedEntriesIntoKvs(entries, 4);
+    const kvsMock = createMockAuditKvs(seed);
+
+    await withMockedKvs(kvsMock, async () => {
+      const emptyBeyond = await AuditLogService.verifyAuditChain({
+        fromSeq: 5,
+        expectedPrevHash: '0'.repeat(64),
+      });
+      assert.strictEqual(emptyBeyond.valid, false);
+      assert.match(emptyBeyond.reason, /Anchor expectedPrevHash mismatch past ledger tail/);
+
+      const matchedEmptyBeyond = await AuditLogService.verifyAuditChain({
+        fromSeq: 5,
+        expectedPrevHash: entries[3].entryHash,
+      });
+      assert.strictEqual(matchedEmptyBeyond.valid, true);
+
+      const { AUDIT_GENESIS_HASH } = require('../dist/audit-log.js');
+      const fullMatch = await AuditLogService.verifyAuditChain({
+        fromSeq: 1,
+        maxEntries: 50,
+        expectedPrevHash: AUDIT_GENESIS_HASH,
+      });
+      assert.strictEqual(fullMatch.valid, true);
+      assert.strictEqual(fullMatch.truncated, false);
+
+      const fullMismatch = await AuditLogService.verifyAuditChain({
+        fromSeq: 1,
+        maxEntries: 50,
+        expectedPrevHash: entries[3].entryHash,
+      });
+      assert.strictEqual(fullMismatch.valid, false);
+    });
+  });
 });

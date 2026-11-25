@@ -194,6 +194,35 @@ export class ComplianceEngine {
   }
 
   /**
+   * Re-evaluates an existing TraceLink and synchronizes `hazard.status` from `complianceState`.
+   */
+  public static reEvaluateLink(
+    link: TraceLink,
+    datasetMode: 'DEMO' | 'LIVE' = 'LIVE',
+    overrides?: Partial<EvaluateTraceOptions>
+  ): TraceLink {
+    const isLive = datasetMode === 'LIVE';
+    const evaluated = this.evaluateTraceLink(
+      link.hazard,
+      link.spec,
+      link.work,
+      link.test,
+      link.signature,
+      link.graphMetadata,
+      {
+        linkId: link.id,
+        part11Secret: process.env.MEDTRACE_PART11_SECRET,
+        requireCryptographicSeal: isLive,
+        requireTestEvidence: isLive,
+        reverificationTaskKey: link.reverificationTaskKey,
+        ...overrides,
+      }
+    );
+    evaluated.hazard.status = this.deriveHazardStatus(evaluated.complianceState);
+    return evaluated;
+  }
+
+  /**
    * Computes an HMAC-SHA256 tamper-evident seal over canonicalized 21 CFR Part 11 signature metadata.
    */
   public static computePart11Seal(payload: CanonicalPart11Payload, secret: string): string {
@@ -398,38 +427,24 @@ export class ComplianceEngine {
     }
 
     // 3b. Verification Evidence URL & Completeness Checks
-    if (test?.evidenceUrl && test.evidenceUrl.trim() !== '') {
-      try {
-        validateHttpsUrl(test.evidenceUrl);
-      } catch (err: unknown) {
-        const reason = err instanceof Error ? err.message : 'Invalid URL';
-        violations.push(
-          `IEC 62304 Verification Evidence Violation: Test [${test.testKey}] has unsafe or invalid evidenceUrl (${reason}).`
-        );
-        state = escalateComplianceState(state, severityForRiskClass(hazard.riskClass));
-      }
-    }
-    if (options?.requireTestEvidence && test?.status === 'PASSED') {
-      const missingParts: string[] = [];
-      if (!test.evidenceUrl || test.evidenceUrl.trim() === '') missingParts.push('evidenceUrl');
-      if (!test.executionDate || test.executionDate.trim() === '') missingParts.push('executionDate');
-      if (missingParts.length > 0) {
-        violations.push(
-          `IEC 62304 Verification Evidence Gap: Passed test [${test.testKey}] for Hazard [${hazard.key}] is missing required ${missingParts.join(' and ')}.`
-        );
-        state = escalateComplianceState(state, severityForRiskClass(hazard.riskClass));
-      }
+    const evidenceIssue = this.validateTestEvidence(
+      test,
+      hazard.key,
+      options?.requireTestEvidence
+    );
+    if (evidenceIssue) {
+      violations.push(evidenceIssue);
+      state = escalateComplianceState(state, severityForRiskClass(hazard.riskClass));
     }
 
     // 4. FDA 21 CFR Part 11: Electronic Signature Hash, Validity & Seal Enforcement
     const hasPriorSignOff = hasPriorElectronicSignOff(signature);
-    const hasHashDrift =
-      spec?.isSignatureInvalidated === true ||
-      (hasPriorSignOff &&
-        spec?.isMissingSentinel !== true &&
-        spec?.specRestricted !== true &&
-        Boolean(spec?.sha256Hash) &&
-        spec.sha256Hash !== signature?.artifactSha256);
+    const hasHashDrift = Boolean(
+      hasPriorSignOff &&
+        spec?.sha256Hash &&
+        signature?.artifactSha256 &&
+        spec.sha256Hash !== signature.artifactSha256
+    );
     const hasInvalidSignature =
       !signature ||
       !signature.isValid ||
@@ -437,7 +452,8 @@ export class ComplianceEngine {
       signature.signedBy.trim() === '' ||
       !signature.signedAt ||
       signature.signedAt.trim() === '' ||
-      isSignatureTimestampInvalidated(signature);
+      isSignatureTimestampInvalidated(signature) ||
+      (hasPriorSignOff && !hasHashDrift && isLinkSignatureDrifted({ spec, signature } as TraceLink));
 
     const part11Secret =
       typeof options?.part11Secret === 'string'
@@ -460,7 +476,8 @@ export class ComplianceEngine {
         `FDA 21 CFR Part 11 Violation: Electronic signature [${signature?.id || 'missing'}] is invalid or missing required signer attestation.`
       );
       state = escalateComplianceState(state, 'SIGNATURE_DRIFT');
-    } else if (hasSealFailure) {
+    }
+    if (hasSealFailure && !(!hasHashDrift && hasInvalidSignature)) {
       violations.push(
         `FDA 21 CFR Part 11 Cryptographic Seal Violation: Electronic signature [${signature?.id || 'missing'}] failed HMAC-SHA256 integrity verification.`
       );
@@ -491,6 +508,30 @@ export class ComplianceEngine {
     };
   }
 
+  private static validateTestEvidence(
+    test: TraceLink['test'] | undefined,
+    hazardKey: string,
+    requireTestEvidence?: boolean
+  ): string | null {
+    if (test?.evidenceUrl && test.evidenceUrl.trim() !== '') {
+      try {
+        validateHttpsUrl(test.evidenceUrl);
+      } catch (err: unknown) {
+        const reason = err instanceof Error ? err.message : 'Invalid URL';
+        return `IEC 62304 Verification Evidence Violation: Test [${test.testKey}] has unsafe or invalid evidenceUrl (${reason}).`;
+      }
+    }
+    if (requireTestEvidence && test?.status === 'PASSED') {
+      const missingParts: string[] = [];
+      if (!test.evidenceUrl || test.evidenceUrl.trim() === '') missingParts.push('evidenceUrl');
+      if (!test.executionDate || test.executionDate.trim() === '') missingParts.push('executionDate');
+      if (missingParts.length > 0) {
+        return `IEC 62304 Verification Evidence Gap: Passed test [${test.testKey}] for Hazard [${hazardKey}] is missing required ${missingParts.join(' and ')}.`;
+      }
+    }
+    return null;
+  }
+
   private static evaluateTestIssueVerificationGap(
     link: TraceLink,
     requireTestEvidence: boolean
@@ -502,23 +543,19 @@ export class ComplianceEngine {
       const status = test?.status || 'MISSING';
       return `IEC 62304 Verification Test Gap: Test [${testKey}] for Hazard [${hazardKey}] is ${status} (requires PASSED).`;
     }
-    if (test.evidenceUrl && test.evidenceUrl.trim() !== '') {
-      try {
-        validateHttpsUrl(test.evidenceUrl);
-      } catch (err: unknown) {
-        const reason = err instanceof Error ? err.message : 'Invalid URL';
-        return `IEC 62304 Verification Evidence Violation: Test [${test.testKey}] has unsafe or invalid evidenceUrl (${reason}).`;
-      }
-    }
-    if (requireTestEvidence) {
-      const missingParts: string[] = [];
-      if (!test.evidenceUrl || test.evidenceUrl.trim() === '') missingParts.push('evidenceUrl');
-      if (!test.executionDate || test.executionDate.trim() === '') missingParts.push('executionDate');
-      if (missingParts.length > 0) {
-        return `IEC 62304 Verification Evidence Gap: Passed test [${test.testKey}] for Hazard [${hazardKey}] is missing required ${missingParts.join(' and ')}.`;
-      }
-    }
-    return null;
+    return this.validateTestEvidence(test, hazardKey, requireTestEvidence);
+  }
+
+  /**
+   * Returns true if `link` references `cleanUpperKey` as its Jira work, hazard, or verification test key.
+   */
+  public static linkMatchesIssueKey(link: TraceLink, cleanUpperKey: string): boolean {
+    if (!cleanUpperKey) return false;
+    return (
+      (link.work?.key || '').trim().toUpperCase() === cleanUpperKey ||
+      (link.hazard?.key || '').trim().toUpperCase() === cleanUpperKey ||
+      (link.test?.testKey || '').trim().toUpperCase() === cleanUpperKey
+    );
   }
 
   /**
@@ -550,12 +587,7 @@ export class ComplianceEngine {
     }
 
     if (cleanIssueKey) {
-      const matchedLinks = suite.traceLinks.filter(
-        (l) =>
-          (l.work?.key || '').toUpperCase() === cleanIssueKey ||
-          (l.hazard?.key || '').toUpperCase() === cleanIssueKey ||
-          (l.test?.testKey || '').toUpperCase() === cleanIssueKey
-      );
+      const matchedLinks = suite.traceLinks.filter((l) => this.linkMatchesIssueKey(l, cleanIssueKey));
 
       if (matchedLinks.length === 0 && options?.isSafetyTaggedIssue === true) {
         const detail =

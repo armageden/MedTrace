@@ -4,6 +4,7 @@ import { SeederService } from './seeder';
 import {
   authorizeAndFilterLiveSuiteDetailed,
   redactBlastRadiusReport,
+  redactStringWithRestrictedLink,
 } from './seeder-identity';
 import {
   LiveIngestionService,
@@ -112,13 +113,17 @@ defineTypedResolver('getComplianceSuite', async (req) => {
   const caller = await assertAuthorizedReader(req);
   const rawSuite = await SeederService.getActiveComplianceSuite({ projectKey: caller.projectKey });
   const skipReconcile = req.payload?.skipReconcile === true;
+  const userPageAccessCache = new Map<string, boolean>();
   const suite = skipReconcile
     ? rawSuite
     : await LiveIngestionService.reconcileConfluenceSpecs(rawSuite, {
         actorAccountId: caller.accountId,
         projectKey: caller.projectKey,
+        userPageAccessCache,
       });
-  return filterLiveSuiteForCaller(caller, suite);
+  return filterLiveSuiteForCaller(caller, suite, {
+    precheckedConfluencePages: userPageAccessCache,
+  });
 });
 
 defineTypedResolver('seedDemoSuite', async (req) => {
@@ -147,6 +152,65 @@ defineTypedResolver('seedDemoSuite', async (req) => {
   };
 });
 
+function hasBalancedJqlParens(jql: string): boolean {
+  let depth = 0;
+  let quote: '"' | "'" | null = null;
+  for (let i = 0; i < jql.length; i++) {
+    const ch = jql[i];
+    if (quote) {
+      if (ch === '\\' && i + 1 < jql.length) {
+        i += 1;
+      } else if (ch === quote) {
+        quote = null;
+      }
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+    } else if (ch === '(') {
+      depth += 1;
+    } else if (ch === ')') {
+      depth -= 1;
+      if (depth < 0) return false;
+    }
+  }
+  return quote === null && depth === 0;
+}
+
+function splitJqlOrderBy(jql: string): { filterPart: string; orderPart: string } {
+  let quote: '"' | "'" | null = null;
+  let depth = 0;
+  for (let i = 0; i < jql.length; i++) {
+    const ch = jql[i];
+    if (quote) {
+      if (ch === '\\' && i + 1 < jql.length) {
+        i += 1;
+      } else if (ch === quote) {
+        quote = null;
+      }
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+    } else if (ch === '(') {
+      depth += 1;
+    } else if (ch === ')') {
+      depth = Math.max(0, depth - 1);
+    } else if (depth === 0) {
+      const slice = jql.slice(i);
+      const match = /^order\s+by\b/i.exec(slice);
+      const prevChar = i === 0 ? ' ' : jql[i - 1];
+      if (match && /[\s)]/.test(prevChar)) {
+        return {
+          filterPart: jql.slice(0, i).trim(),
+          orderPart: slice.trim(),
+        };
+      }
+    }
+  }
+  return { filterPart: jql.trim(), orderPart: '' };
+}
+
 defineTypedResolver('syncLiveSuite', async (req) => {
   const rawProjectKey =
     typeof req.payload?.projectKey === 'string' && req.payload.projectKey.trim().length > 0
@@ -171,15 +235,16 @@ defineTypedResolver('syncLiveSuite', async (req) => {
       ? req.payload.jql.trim()
       : undefined;
 
-  if (rawJql && /\bproject\b\s*(=|!=|\bin\b|\bnot\s+in\b)/i.test(rawJql)) {
+  if (rawJql && /\bproject\b\s*(?:=|!=|\bin\b|\bnot\s+in\b|\bis\s+(?:not\s+)?empty\b)/i.test(rawJql)) {
     throw new Error('Forbidden: Custom JQL cannot specify or override project scope.');
+  }
+  if (rawJql && !hasBalancedJqlParens(rawJql)) {
+    throw new Error('Bad Request: Custom JQL contains unbalanced quotes or parentheses.');
   }
 
   let scopedJql = rawJql;
   if (scopedJql && caller.projectKey) {
-    const orderMatch = /\border\s+by\b/i.exec(scopedJql);
-    const filterPart = (orderMatch ? scopedJql.slice(0, orderMatch.index) : scopedJql).trim();
-    const orderPart = orderMatch ? scopedJql.slice(orderMatch.index).trim() : '';
+    const { filterPart, orderPart } = splitJqlOrderBy(scopedJql);
     scopedJql = filterPart
       ? `project = "${caller.projectKey}" AND (${filterPart})${orderPart ? ` ${orderPart}` : ''}`
       : `project = "${caller.projectKey}"${orderPart ? ` ${orderPart}` : ''}`;
@@ -196,6 +261,7 @@ defineTypedResolver('syncLiveSuite', async (req) => {
       spaceId: rawSpaceId || caller.spaceId,
       jql: scopedJql,
       includeUntaggedIssues: req.payload?.includeUntaggedIssues === true,
+      ...(!caller.projectKey ? { preserveReadOnlyProjects: true } : {}),
       ...(typeof req.payload?.resumeFromCursor === 'boolean'
         ? { resumeFromCursor: req.payload.resumeFromCursor }
         : {}),
@@ -324,7 +390,12 @@ defineTypedResolver('signOffPart11', async (req) => {
     );
   }
 
-  await assertOperatorAuthorizedForTarget(req, { hazardKey, specId, linkId });
+  await assertOperatorAuthorizedForTarget(req, {
+    hazardKey,
+    specId,
+    linkId,
+    includeSharedSpecSiblings: true,
+  });
 
   const updated = await SeederService.signOffPart11({
     hazardKey,
@@ -474,14 +545,19 @@ defineTypedResolver('simulateTransition', async (req) => {
 
   if (!issueKey) {
     let rawSuite = await SeederService.getActiveComplianceSuite({ projectKey: caller.projectKey });
+    const userPageAccessCache = new Map<string, boolean>();
     if (isForgeRuntime() && rawSuite.datasetMode === 'LIVE' && rawSuite.initialized !== false) {
       rawSuite = await LiveIngestionService.reconcileConfluenceSpecs(rawSuite, {
         actorAccountId: caller.accountId,
         projectKey: caller.projectKey,
         allowAppFallback: true,
+        failClosedOnBudget: true,
+        userPageAccessCache,
       });
     }
-    const scopedSuite = await filterLiveSuiteForCaller(caller, rawSuite);
+    const scopedSuite = await filterLiveSuiteForCaller(caller, rawSuite, {
+      precheckedConfluencePages: userPageAccessCache,
+    });
     if (scopedSuite.datasetMode === 'LIVE' || caller.projectKey) {
       const outcome = ComplianceEngine.evaluateIssueReleaseGate(undefined, scopedSuite);
       return {
@@ -497,8 +573,29 @@ defineTypedResolver('simulateTransition', async (req) => {
       : { transition: { name: 'Done' } }
   );
 
+  let safeErrorMessage = result.errorMessage;
+  if (safeErrorMessage && issueKey && isForgeRuntime()) {
+    const rawSuite = await SeederService.getActiveComplianceSuite({ issueKeyFilter: issueKey });
+    if (rawSuite.datasetMode === 'LIVE' && rawSuite.initialized !== false && rawSuite.traceLinks.length > 0) {
+      const { restrictedPageIds, unredactedSuite } = await authorizeAndFilterLiveSuiteDetailed(rawSuite, {
+        extensionType: caller.extensionType,
+        projectKey: caller.projectKey,
+        checkConfluencePages: true,
+      });
+      if (restrictedPageIds.size > 0) {
+        for (const link of unredactedSuite.traceLinks) {
+          const pid = typeof link.spec?.pageId === 'string' ? link.spec.pageId.trim() : '';
+          if (pid && restrictedPageIds.has(pid)) {
+            safeErrorMessage = redactStringWithRestrictedLink(safeErrorMessage, link);
+          }
+        }
+      }
+    }
+  }
+
   return {
     ...result,
+    ...(safeErrorMessage !== undefined ? { errorMessage: safeErrorMessage } : {}),
     evaluatedIssueKey: issueKey,
   };
 });
@@ -510,9 +607,11 @@ defineTypedResolver('analyzeBlastRadius', async (req) => {
     throw new Error('Bad Request: triggerKey is required.');
   }
   const initialSuite = await SeederService.getActiveComplianceSuite({ projectKey: caller.projectKey });
+  const userPageAccessCache = new Map<string, boolean>();
   const rawSuite = await LiveIngestionService.reconcileConfluenceSpecs(initialSuite, {
     actorAccountId: caller.accountId,
     projectKey: caller.projectKey,
+    userPageAccessCache,
   });
   if (
     rawSuite.datasetMode !== 'LIVE' ||
@@ -529,6 +628,7 @@ defineTypedResolver('analyzeBlastRadius', async (req) => {
     extensionType: caller.extensionType,
     projectKey: caller.projectKey,
     checkConfluencePages: true,
+    precheckedConfluencePages: userPageAccessCache,
   });
   const report = ComplianceEngine.computeBlastRadius(triggerKey, unredactedSuite);
   return redactBlastRadiusReport(report, unredactedSuite.traceLinks, restrictedPageIds);
@@ -548,7 +648,7 @@ defineTypedResolver('getAuditLog', async (req) => {
       ? Math.floor(req.payload.beforeSeq)
       : undefined;
 
-  const rawSuite = await SeederService.getActiveComplianceSuite();
+  let rawSuite: ComplianceSummary | undefined;
   const collectedNewestFirst: AuditLogEntry[] = [];
   // shortcut: scans up to 25 pages (5,000 entries) / 8s to preserve the AuditLogEntry[] contract; switch to a cursor envelope if ledgers outgrow this.
   const MAX_SCAN_PAGES = 25;
@@ -559,6 +659,7 @@ defineTypedResolver('getAuditLog', async (req) => {
     const batch = await AuditLogService.getAuditLog(MAX_AUDIT_LOG_PAGE_LIMIT, cursorBeforeSeq);
     if (batch.length === 0) break;
 
+    rawSuite ??= await SeederService.getActiveComplianceSuite();
     const filteredBatch = await filterAuditEntriesForCaller(caller, batch, rawSuite);
     for (let i = filteredBatch.length - 1; i >= 0; i--) {
       collectedNewestFirst.push(filteredBatch[i]);

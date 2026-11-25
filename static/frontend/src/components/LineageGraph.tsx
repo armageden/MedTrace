@@ -283,28 +283,37 @@ export const LineageGraph: React.FC<LineageGraphProps> = ({
       }}
     >
       {isPopoverOpen && ambiguousRefs && (
-        <div
-          ref={popoverRef}
-          role="dialog"
-          aria-modal="true"
-          aria-label="Select trace link for shared node"
-          style={{
-            position: 'absolute',
-            top: 52,
-            left: '50%',
-            transform: 'translateX(-50%)',
-            zIndex: 30,
-            background: 'var(--mt-bg-overlay, #ffffff)',
-            border: '1px solid var(--mt-border, #dfe1e6)',
-            borderRadius: 8,
-            padding: '10px 12px',
-            boxShadow: '0 4px 16px rgba(9, 30, 66, 0.2)',
-            display: 'flex',
-            alignItems: 'center',
-            gap: 8,
-            flexWrap: 'wrap',
-          }}
-        >
+        <>
+          <div
+            onClick={closePopover}
+            aria-hidden="true"
+            style={{ position: 'absolute', inset: 0, zIndex: 29, background: 'rgba(9, 30, 66, 0.14)' }}
+          />
+          <div
+            ref={popoverRef}
+            role="dialog"
+            aria-modal="true"
+            aria-label="Select trace link for shared node"
+            style={{
+              position: 'absolute',
+              top: 52,
+              left: '50%',
+              transform: 'translateX(-50%)',
+              zIndex: 30,
+              maxWidth: 'calc(100% - 24px)',
+              maxHeight: 'calc(100% - 68px)',
+              overflowY: 'auto',
+              background: 'var(--mt-bg-overlay, #ffffff)',
+              border: '1px solid var(--mt-border, #dfe1e6)',
+              borderRadius: 8,
+              padding: '10px 12px',
+              boxShadow: '0 4px 16px rgba(9, 30, 66, 0.2)',
+              display: 'flex',
+              alignItems: 'center',
+              gap: 8,
+              flexWrap: 'wrap',
+            }}
+          >
           <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--mt-text-primary, #172b4d)' }}>
             Shared node — choose lineage to inspect:
           </span>
@@ -336,13 +345,15 @@ export const LineageGraph: React.FC<LineageGraphProps> = ({
           >
             ✕
           </button>
-        </div>
+          </div>
+        </>
       )}
 
       <ReactFlow
         nodes={nodes}
         edges={edges}
         nodeTypes={nodeTypes}
+        nodesFocusable={false}
         nodesDraggable={false}
         nodesConnectable={false}
         fitView
@@ -363,9 +374,10 @@ export const LineageGraph: React.FC<LineageGraphProps> = ({
               inset: 0,
               zIndex: 20,
               display: 'flex',
-              alignItems: 'center',
+              alignItems: compact ? 'flex-start' : 'center',
               justifyContent: 'center',
-              padding: 24,
+              overflowY: 'auto',
+              padding: compact ? 14 : 24,
               pointerEvents: 'auto',
             }}
           >

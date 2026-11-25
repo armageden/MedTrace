@@ -16,6 +16,17 @@ export interface QueryIssueGraphContextOptions {
    * Skipped in APP mode (Teamwork Graph is user-context only) and when no pageIds exist.
    */
   includeSpecOwners?: boolean;
+  /**
+   * When true, skips the extra `/rest/api/3/issue/{key}` metadata call and reuses `preloadedIssue`
+   * fields already retrieved from `/rest/api/3/search/jql`.
+   */
+  skipIssueMetadataFetch?: boolean;
+  preloadedIssue?: {
+    id?: string | number;
+    self?: string;
+    summary?: string;
+    issuelinks?: unknown[];
+  };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -286,12 +297,12 @@ async function fetchConfluenceRemoteLinks(
           const app = isRecord(item.application) ? item.application : undefined;
           const url = typeof obj?.url === 'string' ? obj.url : '';
           const globalId = typeof item.globalId === 'string' ? item.globalId : '';
-          const pageId = extractConfluencePageId(url, globalId);
           const appType = typeof app?.type === 'string' ? app.type : undefined;
           const isConfluence =
-            Boolean(pageId) ||
             appType === 'com.atlassian.confluence' ||
+            globalId.includes('appId=') ||
             /confluence|\/wiki\//i.test(url);
+          const pageId = isConfluence ? extractConfluencePageId(url, globalId) : undefined;
           if (isConfluence) {
             const title =
               typeof obj?.title === 'string' && obj.title
@@ -354,7 +365,16 @@ export class TeamworkGraphService {
       return null;
     }
 
-    const issueMeta = await fetchJiraIssueRestMetadata(client, cleanKey);
+    const issueMeta: JiraIssueRestMetadata = options?.skipIssueMetadataFetch
+      ? {
+          issueId: asNonEmptyString(options.preloadedIssue?.id),
+          issueSelf: asNonEmptyString(options.preloadedIssue?.self),
+          summary: asNonEmptyString(options.preloadedIssue?.summary),
+          issuelinks: Array.isArray(options.preloadedIssue?.issuelinks)
+            ? options.preloadedIssue.issuelinks
+            : [],
+        }
+      : await fetchJiraIssueRestMetadata(client, cleanKey);
 
     const { issueId, issueSelf, summary, status, issuelinks } = issueMeta;
 

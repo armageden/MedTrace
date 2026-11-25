@@ -1,8 +1,8 @@
-# MedTrace Regulatory Release Gate — reference CI workflow (ECO-624 defense-in-depth).
+# MedTrace Regulatory Release Gate — reference CI workflow (defense-in-depth at release boundaries).
 #
-# Workflow validators attached in Jira can be bypassed by Jira Automation rules and direct
-# REST API calls (platform issue ECO-624). This workflow enforces the identical IEC 62304
-# safety gate at the CI/release boundary via the authenticated MedTrace webtrigger.
+# Forge jira:workflowValidator enforces interactive Jira UI transitions. This workflow enforces
+# the identical IEC 62304 safety gate via the authenticated MedTrace webtrigger before automated
+# releases (note: Atlassian platform issue ECO-624 covered an Automation case marked Invalid).
 #
 # Required repository secrets:
 #   MEDTRACE_MCP_SECRET      — shared HMAC/perimeter secret configured in Forge

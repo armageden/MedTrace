@@ -1,5 +1,6 @@
 import api, { route } from '@forge/api';
 import { ComplianceEngine } from './compliance-engine';
+import { safeParseJson } from './crypto-utils';
 import { isSafetyTrackedIssue, LiveIngestionService } from './ingestion';
 import { isForgeRuntime } from './runtime';
 import { SeederService } from './seeder';
@@ -158,12 +159,7 @@ function normalizeIssueKey(payload?: WorkflowValidatorPayload | null): string | 
 export function isMatchedInSuite(issueKey: string, suite: ComplianceSummary): boolean {
   const clean = issueKey.trim().toUpperCase();
   if (!clean || !Array.isArray(suite?.traceLinks)) return false;
-  return suite.traceLinks.some(
-    (l) =>
-      (l.work?.key || '').toUpperCase() === clean ||
-      (l.hazard?.key || '').toUpperCase() === clean ||
-      (l.test?.testKey || '').toUpperCase() === clean
-  );
+  return suite.traceLinks.some((l) => ComplianceEngine.linkMatchesIssueKey(l, clean));
 }
 
 /**
@@ -174,12 +170,14 @@ export function isMatchedInSuite(issueKey: string, suite: ComplianceSummary): bo
  */
 export async function probeUnsyncedSafetyIssue(
   issueKey: string,
-  payload?: WorkflowValidatorPayload | null
+  payload?: WorkflowValidatorPayload | null,
+  options?: { failClosedOnMissingIssue?: boolean }
 ): Promise<{ isSafetyTaggedIssue: boolean; unsyncedSafetyReason?: string }> {
   const cleanKey = issueKey.trim().toUpperCase();
   if (
     payload?.issue?.fields &&
-    (Array.isArray(payload.issue.fields.labels) || payload.issue.fields.issuetype !== undefined)
+    Array.isArray(payload.issue.fields.labels) &&
+    payload.issue.fields.issuetype !== undefined
   ) {
     const tagged = isSafetyTrackedIssue({
       key: cleanKey,
@@ -205,7 +203,12 @@ export async function probeUnsyncedSafetyIssue(
       .asApp()
       .requestJira(route`/rest/api/3/issue/${cleanKey}?fields=labels,issuetype`);
     if (resp.status === 404) {
-      return { isSafetyTaggedIssue: false };
+      return options?.failClosedOnMissingIssue
+        ? {
+            isSafetyTaggedIssue: true,
+            unsyncedSafetyReason: `Target Jira issue ${cleanKey} was not found (HTTP 404); failing closed at release gate.`,
+          }
+        : { isSafetyTaggedIssue: false };
     }
     if (resp.status !== 200) {
       return {
@@ -213,10 +216,16 @@ export async function probeUnsyncedSafetyIssue(
         unsyncedSafetyReason: `Unable to verify safety labels for unsynced issue ${cleanKey} (Jira HTTP ${resp.status}); failing closed.`,
       };
     }
-    const issueData = (await resp.json()) as {
+    const issueData = await safeParseJson<{
       key?: string;
       fields?: { labels?: unknown[]; issuetype?: { name?: string } };
-    };
+    }>(resp);
+    if (!issueData) {
+      return {
+        isSafetyTaggedIssue: true,
+        unsyncedSafetyReason: `Unable to verify safety labels for unsynced issue ${cleanKey} (malformed Jira response); failing closed.`,
+      };
+    }
     const tagged = isSafetyTrackedIssue({
       key: cleanKey,
       fields: issueData?.fields,
@@ -283,6 +292,7 @@ export async function workflowValidatorHandler(
       if (!cleanIssue) {
         suite = await LiveIngestionService.reconcileConfluenceSpecs(suite, {
           allowAppFallback: true,
+          failClosedOnBudget: true,
         });
       } else if (isMatchedInSuite(cleanIssue, suite)) {
         const targetPageIds = suite.traceLinks
@@ -298,6 +308,7 @@ export async function workflowValidatorHandler(
             targetPageIds,
             issueKeyFilter: cleanIssue,
             allowAppFallback: true,
+            failClosedOnBudget: true,
           });
         }
       }

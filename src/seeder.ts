@@ -6,6 +6,7 @@ import {
   isKvsConflictError,
   JIRA_ISSUE_KEY_RE,
   measureJsonBytes,
+  safeParseJson,
   sanitizeKvsKeySegment,
   sha256Hex,
   validateHttpsUrl,
@@ -13,6 +14,7 @@ import {
 import { isForgeRuntime } from './runtime';
 import {
   extractAllJiraProjectKeysFromLink,
+  extractPrimaryJiraProjectKeyFromLink,
   getActiveUserIdentityResolver,
   getPart11SigningSecret,
   mapJiraStatusToWorkStatus,
@@ -162,6 +164,7 @@ export interface CommitSuiteMutationParams {
   expectedVersion: number;
   auditEntry: AuditAppendInput;
   baselineUpdates?: BaselineMutationRecord[];
+  previousSuite?: ComplianceSummary;
 }
 
 export interface GetSuiteOptions {
@@ -194,22 +197,6 @@ export interface CreateReverificationTaskResult {
   projectKey: string;
   alreadyExisted?: boolean;
   summary: ComplianceSummary;
-}
-
-function extractProjectKeyFromTraceLink(link: TraceLink): string | undefined {
-  const workKey = link.work?.key?.trim().toUpperCase();
-  if (workKey && JIRA_ISSUE_KEY_RE.test(workKey)) {
-    return workKey.split('-')[0];
-  }
-  const hazDerived = link.hazard?.key?.trim().toUpperCase().replace(/^HAZ-/i, '');
-  if (hazDerived && JIRA_ISSUE_KEY_RE.test(hazDerived)) {
-    return hazDerived.split('-')[0];
-  }
-  const testDerived = link.test?.testKey?.trim().toUpperCase().replace(/^TEST-/i, '');
-  if (testDerived && JIRA_ISSUE_KEY_RE.test(testDerived)) {
-    return testDerived.split('-')[0];
-  }
-  return undefined;
 }
 
 /**
@@ -383,7 +370,8 @@ export class SeederService {
    */
   static async saveComplianceSuite(
     summary: ComplianceSummary,
-    expectedVersion?: number
+    expectedVersion?: number,
+    previousSuite?: ComplianceSummary
   ): Promise<ComplianceSummary> {
     const auditHead = await AuditLogService.getHead();
     const initialized = summary.initialized ?? (summary.traceLinks.length > 0 || summary.datasetMode === 'DEMO');
@@ -446,10 +434,16 @@ export class SeederService {
       for (const k of recheckedMeta?.blockingReasonShardKeys || []) previousKeys.add(k);
       for (const k of recheckedMeta?.linkKeyShardKeys || []) previousKeys.add(k);
       for (const k of recheckedMeta?.issueKeyIndexShardKeys || []) previousKeys.add(k);
+      let oldLinkKeys: string[] = Array.isArray(recheckedMeta?.linkKeys) ? [...recheckedMeta.linkKeys] : [];
       if (recheckedMeta?.linkKeyShardKeys && recheckedMeta.linkKeyShardKeys.length > 0) {
         const oldLinkShards = await batchGetStrict<string[]>(recheckedMeta.linkKeyShardKeys);
-        for (const shardArr of oldLinkShards.values()) {
-          for (const k of shardArr) previousKeys.add(k);
+        oldLinkKeys = [];
+        for (const shardKey of recheckedMeta.linkKeyShardKeys) {
+          const shardArr = oldLinkShards.get(shardKey) || [];
+          for (const k of shardArr) {
+            previousKeys.add(k);
+            oldLinkKeys.push(k);
+          }
         }
       }
 
@@ -488,12 +482,36 @@ export class SeederService {
         return cloneJsonValue(enrichedSummary);
       }
 
+      const prevLinkById = new Map<string, { key: string; serialized: string }>();
+      if (
+        typeof expectedVersion === 'number' &&
+        previousSuite &&
+        oldLinkKeys.length > 0 &&
+        previousSuite.traceLinks.length === oldLinkKeys.length
+      ) {
+        for (let i = 0; i < previousSuite.traceLinks.length; i++) {
+          const prevLink = previousSuite.traceLinks[i];
+          const prevKey = oldLinkKeys[i];
+          const prevLogicalId =
+            prevLink.id ||
+            ComplianceEngine.buildTraceLinkId(prevLink.hazard.key, prevLink.spec.id, prevLink.work?.key);
+          if (prevKey) {
+            prevLinkById.set(prevLogicalId, { key: prevKey, serialized: JSON.stringify(prevLink) });
+          }
+        }
+      }
+
       const versionedLinkKeys: string[] = [];
       const versionedLinkItemsToWrite: Array<{ key: string; value: TraceLink }> = [];
 
       for (const link of enrichedSummary.traceLinks) {
         const logicalId =
           link.id || ComplianceEngine.buildTraceLinkId(link.hazard.key, link.spec.id, link.work?.key);
+        const prevEntry = prevLinkById.get(logicalId);
+        if (prevEntry && JSON.stringify(link) === prevEntry.serialized) {
+          versionedLinkKeys.push(prevEntry.key);
+          continue;
+        }
         const key = buildSafeKvsKey(`${LINK_KEY_PREFIX}v${nextVersion}:`, logicalId);
         versionedLinkKeys.push(key);
         versionedLinkItemsToWrite.push({ key, value: link });
@@ -505,9 +523,9 @@ export class SeederService {
         nextVersion
       );
 
-      let stagedKeys: string[] = [];
+      const stagedKeys: string[] = [];
       try {
-        stagedKeys = await batchSetStrict([...versionedLinkItemsToWrite, ...metaShardItems]);
+        await batchSetStrict([...versionedLinkItemsToWrite, ...metaShardItems], stagedKeys);
         await kvs.set(SUITE_META_KEY, meta);
         committed = true;
       } catch (stageErr) {
@@ -526,7 +544,14 @@ export class SeederService {
         ...metaShardItems.map((i) => i.key),
       ]);
       const obsoleteKeys = Array.from(previousKeys).filter((k) => !newKeySet.has(k));
-      await batchDeleteBestEffort(obsoleteKeys);
+      try {
+        await batchDeleteBestEffort(obsoleteKeys);
+      } catch (gcErr: unknown) {
+        console.warn(
+          '[MedTrace Seeder] Best-effort cleanup of obsolete KVS shards failed after commit:',
+          gcErr instanceof Error ? gcErr.message : String(gcErr)
+        );
+      }
       return cloneJsonValue(enrichedSummary);
     } finally {
       if (!committed) {
@@ -539,20 +564,55 @@ export class SeederService {
     }
   }
 
+  private static async resolveBlockingReasonsFromMeta(meta: ShardedSuiteMetaV2): Promise<string[]> {
+    if (meta.blockingReasonShardKeys && meta.blockingReasonShardKeys.length > 0) {
+      const reasonShards = await batchGetStrict<string[]>(meta.blockingReasonShardKeys);
+      return meta.blockingReasonShardKeys.flatMap((key) => reasonShards.get(key) || []);
+    }
+    return Array.isArray(meta.blockingReasons) ? [...meta.blockingReasons] : [];
+  }
+
+  private static buildSummaryFromMeta(
+    meta: ShardedSuiteMetaV2,
+    traceLinks: TraceLink[],
+    blockingReasons: string[],
+    auditHead: { lastSeq: number; headHash: string }
+  ): ComplianceSummary {
+    return {
+      projectName: meta.projectName,
+      datasetMode: meta.datasetMode ?? 'LIVE',
+      initialized:
+        meta.initialized ??
+        (traceLinks.length > 0 || meta.totalHazards > 0 || meta.datasetMode === 'DEMO'),
+      standards: meta.standards,
+      totalHazards: meta.totalHazards,
+      classCCount: meta.classCCount,
+      classBCount: meta.classBCount,
+      classACount: meta.classACount,
+      verifiedPercentage: meta.verifiedPercentage,
+      releaseBlocked: meta.releaseBlocked,
+      blockingReasons,
+      signatureDriftCount: meta.signatureDriftCount,
+      traceLinks,
+      lastAuditTimestamp: meta.lastAuditTimestamp,
+      ...(meta.lastSyncedAt ? { lastSyncedAt: meta.lastSyncedAt } : {}),
+      ...(meta.syncIncomplete === true ? { syncIncomplete: true } : {}),
+      ...(meta.incompleteProjectKeys && meta.incompleteProjectKeys.length > 0
+        ? { incompleteProjectKeys: meta.incompleteProjectKeys }
+        : {}),
+      storageFormat: 'SHARDED_V2',
+      auditEntryCount: auditHead.lastSeq,
+      auditHeadHash: auditHead.headHash,
+    };
+  }
+
   private static async loadShardedSuiteFromKvs(): Promise<{ summary: ComplianceSummary; version: number } | undefined> {
     const meta = await kvs.get<ShardedSuiteMetaV2>(SUITE_META_KEY);
     if (!meta || (!Array.isArray(meta.linkKeys) && !Array.isArray(meta.linkKeyShardKeys))) {
       return undefined;
     }
 
-    let blockingReasons = Array.isArray(meta.blockingReasons) ? [...meta.blockingReasons] : [];
-    if (meta.blockingReasonShardKeys && meta.blockingReasonShardKeys.length > 0) {
-      const reasonShards = await batchGetStrict<string[]>(meta.blockingReasonShardKeys);
-      blockingReasons = [];
-      for (const key of meta.blockingReasonShardKeys) {
-        blockingReasons.push(...(reasonShards.get(key) || []));
-      }
-    }
+    const blockingReasons = await this.resolveBlockingReasonsFromMeta(meta);
 
     let resolvedLinkKeys = Array.isArray(meta.linkKeys) ? [...meta.linkKeys] : [];
     if (meta.linkKeyShardKeys && meta.linkKeyShardKeys.length > 0) {
@@ -569,30 +629,7 @@ export class SeederService {
 
     return {
       version: meta.version ?? 0,
-      summary: {
-        projectName: meta.projectName,
-        datasetMode: meta.datasetMode ?? 'LIVE',
-        initialized: meta.initialized ?? (traceLinks.length > 0 || meta.datasetMode === 'DEMO'),
-        standards: meta.standards,
-        totalHazards: meta.totalHazards,
-        classCCount: meta.classCCount,
-        classBCount: meta.classBCount,
-        classACount: meta.classACount,
-        verifiedPercentage: meta.verifiedPercentage,
-        releaseBlocked: meta.releaseBlocked,
-        blockingReasons,
-        signatureDriftCount: meta.signatureDriftCount,
-        traceLinks,
-        lastAuditTimestamp: meta.lastAuditTimestamp,
-        ...(meta.lastSyncedAt ? { lastSyncedAt: meta.lastSyncedAt } : {}),
-        ...(meta.syncIncomplete === true ? { syncIncomplete: true } : {}),
-        ...(meta.incompleteProjectKeys && meta.incompleteProjectKeys.length > 0
-          ? { incompleteProjectKeys: meta.incompleteProjectKeys }
-          : {}),
-        storageFormat: 'SHARDED_V2',
-        auditEntryCount: auditHead.lastSeq,
-        auditHeadHash: auditHead.headHash,
-      },
+      summary: this.buildSummaryFromMeta(meta, traceLinks, blockingReasons, auditHead),
     };
   }
 
@@ -607,8 +644,9 @@ export class SeederService {
       );
     }
 
-    const previousState = await this.getSuiteWithVersion();
-    const previousSuiteSnapshot = cloneJsonValue(previousState.summary);
+    const previousSuiteSnapshot = cloneJsonValue(
+      params.previousSuite ?? (await this.getSuiteWithVersion()).summary
+    );
     const baselineSnapshots = new Map<string, SignedSpecBaseline | undefined>();
     const baselineKeys = this.computeAffectedBaselineKeys(params.baselineUpdates || []);
 
@@ -619,7 +657,11 @@ export class SeederService {
     let suiteSaved = false;
     let baselinesTouched = false;
     try {
-      const savedSuite = await this.saveComplianceSuite(params.summary, params.expectedVersion);
+      const savedSuite = await this.saveComplianceSuite(
+        params.summary,
+        params.expectedVersion,
+        previousSuiteSnapshot
+      );
       suiteSaved = true;
 
       if (params.baselineUpdates && params.baselineUpdates.length > 0) {
@@ -714,6 +756,9 @@ export class SeederService {
             traceLinks: [],
           },
         };
+        if (measureJsonBytes(backupToPersist) > MAX_AUDIT_DETAILS_BYTES) {
+          backupToPersist.summary.blockingReasons = backupToPersist.summary.blockingReasons.slice(0, 50);
+        }
       }
       if (!isForgeRuntime()) {
         this.inMemoryLiveBackup = backupToPersist;
@@ -1008,7 +1053,7 @@ export class SeederService {
     return ComplianceEngine.generateComplianceReport(
       filteredLinks,
       suite.datasetMode ?? 'LIVE',
-      `${cleanProject} (${suite.projectName})`,
+      cleanProject,
       {
         storageFormat: suite.storageFormat,
         auditEntryCount: suite.auditEntryCount,
@@ -1037,11 +1082,8 @@ export class SeederService {
         return await this.getUninitializedLiveSuite();
       }
       const head = await AuditLogService.getHead();
-      const filteredLinks = this.inMemorySuite.traceLinks.filter(
-        (link) =>
-          (link.work?.key || '').trim().toUpperCase() === cleanKey ||
-          (link.hazard?.key || '').trim().toUpperCase() === cleanKey ||
-          (link.test?.testKey || '').trim().toUpperCase() === cleanKey
+      const filteredLinks = this.inMemorySuite.traceLinks.filter((link) =>
+        ComplianceEngine.linkMatchesIssueKey(link, cleanKey)
       );
       return cloneJsonValue({
         ...this.inMemorySuite,
@@ -1090,42 +1132,10 @@ export class SeederService {
       traceLinks = matchedKeys.map((key) => linkMap.get(key)!);
     }
 
-    let blockingReasons = Array.isArray(meta.blockingReasons) ? [...meta.blockingReasons] : [];
-    if (
-      blockingReasons.length === 0 &&
-      Array.isArray(meta.blockingReasonShardKeys) &&
-      meta.blockingReasonShardKeys.length > 0
-    ) {
-      const reasonShardMap = await batchGetStrict<string[]>(meta.blockingReasonShardKeys);
-      blockingReasons = meta.blockingReasonShardKeys.flatMap((k) => reasonShardMap.get(k) || []);
-    }
-
+    const blockingReasons = await this.resolveBlockingReasonsFromMeta(meta);
     const auditHead = await AuditLogService.getHead();
 
-    return {
-      projectName: meta.projectName,
-      datasetMode: meta.datasetMode ?? 'LIVE',
-      initialized: meta.initialized ?? (meta.totalHazards > 0 || meta.datasetMode === 'DEMO'),
-      standards: meta.standards,
-      totalHazards: meta.totalHazards,
-      classCCount: meta.classCCount,
-      classBCount: meta.classBCount,
-      classACount: meta.classACount,
-      verifiedPercentage: meta.verifiedPercentage,
-      releaseBlocked: meta.releaseBlocked,
-      blockingReasons,
-      signatureDriftCount: meta.signatureDriftCount,
-      traceLinks,
-      lastAuditTimestamp: meta.lastAuditTimestamp,
-      ...(meta.lastSyncedAt ? { lastSyncedAt: meta.lastSyncedAt } : {}),
-      ...(meta.syncIncomplete === true ? { syncIncomplete: true } : {}),
-      ...(meta.incompleteProjectKeys && meta.incompleteProjectKeys.length > 0
-        ? { incompleteProjectKeys: meta.incompleteProjectKeys }
-        : {}),
-      storageFormat: 'SHARDED_V2',
-      auditEntryCount: auditHead.lastSeq,
-      auditHeadHash: auditHead.headHash,
-    };
+    return this.buildSummaryFromMeta(meta, traceLinks, blockingReasons, auditHead);
   }
 
   private static filterSuiteLinksByIssueKey(
@@ -1138,11 +1148,8 @@ export class SeederService {
     }
     return {
       ...suite,
-      traceLinks: suite.traceLinks.filter(
-        (link) =>
-          (link.work?.key || '').trim().toUpperCase() === cleanKey ||
-          (link.hazard?.key || '').trim().toUpperCase() === cleanKey ||
-          (link.test?.testKey || '').trim().toUpperCase() === cleanKey
+      traceLinks: suite.traceLinks.filter((link) =>
+        ComplianceEngine.linkMatchesIssueKey(link, cleanKey)
       ),
     };
   }
@@ -1197,9 +1204,7 @@ export class SeederService {
     if (sharded) {
       return sharded;
     }
-    const active = await this.getActiveComplianceSuite();
-    const afterMigration = active.initialized ? await this.loadShardedSuiteFromKvs() : undefined;
-    return afterMigration ?? { summary: active, version: 0 };
+    return { summary: await this.getUninitializedLiveSuite(), version: 0 };
   }
 
   /**
@@ -1236,7 +1241,7 @@ export class SeederService {
       if (resp.status !== 200) {
         throw new Error(`Jira issue ${cleanIssueKey} could not be verified (HTTP ${resp.status}).`);
       }
-      const issueData = (await resp.json()) as {
+      const issueData = await safeParseJson<{
         id?: string;
         key?: string;
         fields?: {
@@ -1244,7 +1249,10 @@ export class SeederService {
           status?: { name?: string; statusCategory?: { key?: string; name?: string } };
           assignee?: { displayName?: string } | null;
         };
-      };
+      }>(resp);
+      if (!issueData) {
+        throw new Error(`Jira issue ${cleanIssueKey} returned malformed JSON metadata.`);
+      }
       targetLink.work.id = String(issueData?.id || cleanIssueKey.toLowerCase());
       targetLink.work.key = String(issueData?.key || cleanIssueKey);
       if (issueData?.fields?.summary) {
@@ -1261,22 +1269,7 @@ export class SeederService {
     delete targetLink.work.commitSha;
     targetLink.graphMetadata = undefined;
 
-    const evaluated = ComplianceEngine.evaluateTraceLink(
-      targetLink.hazard,
-      targetLink.spec,
-      targetLink.work,
-      targetLink.test,
-      targetLink.signature,
-      undefined,
-      {
-        linkId: targetLink.id,
-        part11Secret: process.env.MEDTRACE_PART11_SECRET,
-        requireCryptographicSeal: true,
-        requireTestEvidence: current.datasetMode === 'LIVE',
-        reverificationTaskKey: targetLink.reverificationTaskKey,
-      }
-    );
-    evaluated.hazard.status = ComplianceEngine.deriveHazardStatus(evaluated.complianceState);
+    const evaluated = ComplianceEngine.reEvaluateLink(targetLink, current.datasetMode ?? 'LIVE');
     current.traceLinks[idx] = evaluated;
 
     const updated = ComplianceEngine.generateComplianceReport(
@@ -1302,7 +1295,7 @@ export class SeederService {
           previousIssueKey,
           newIssueKey: targetLink.work.key,
           workKey: targetLink.work.key,
-          projectKey: extractProjectKeyFromTraceLink(evaluated) || null,
+          projectKey: extractPrimaryJiraProjectKeyFromLink(evaluated) || null,
         },
         authMethod,
       },
@@ -1334,8 +1327,9 @@ export class SeederService {
         )
       : current.traceLinks.findIndex(
           (l) =>
-            (cleanHazard && l.hazard.key.toLowerCase() === cleanHazard) ||
-            (cleanTest && l.test.testKey.toLowerCase() === cleanTest)
+            (!cleanHazard || (l.hazard?.key || '').toLowerCase() === cleanHazard) &&
+            (!cleanTest || (l.test?.testKey || '').toLowerCase() === cleanTest) &&
+            Boolean(cleanHazard || cleanTest)
         );
     if (idx < 0) {
       throw new Error(
@@ -1346,7 +1340,11 @@ export class SeederService {
     const targetLink = current.traceLinks[idx];
     const previousStatus = targetLink.test.status;
     const resolvedTestKeyLower = (targetLink.test?.testKey || cleanTest || '').trim().toLowerCase();
-    const executionDate = params.executionDate?.trim() || new Date().toISOString();
+    const rawExecutionDate = typeof params.executionDate === 'string' ? params.executionDate.trim() : '';
+    if (rawExecutionDate && Number.isNaN(Date.parse(rawExecutionDate))) {
+      throw new Error(`Invalid executionDate "${rawExecutionDate}": must be a valid ISO-8601 date string.`);
+    }
+    const executionDate = rawExecutionDate || new Date().toISOString();
     const recordedBy = params.actorAccountId.trim();
 
     let validatedEvidenceUrl: string | undefined;
@@ -1402,22 +1400,7 @@ export class SeederService {
         candidate.test.notes = trimmedNotesValue;
       }
 
-      const evaluated = ComplianceEngine.evaluateTraceLink(
-        candidate.hazard,
-        candidate.spec,
-        candidate.work,
-        candidate.test,
-        candidate.signature,
-        candidate.graphMetadata,
-        {
-          linkId: candidate.id,
-          part11Secret: process.env.MEDTRACE_PART11_SECRET,
-          requireCryptographicSeal: true,
-          requireTestEvidence: current.datasetMode === 'LIVE',
-          reverificationTaskKey: candidate.reverificationTaskKey,
-        }
-      );
-      evaluated.hazard.status = ComplianceEngine.deriveHazardStatus(evaluated.complianceState);
+      const evaluated = ComplianceEngine.reEvaluateLink(candidate, current.datasetMode ?? 'LIVE');
       current.traceLinks[i] = evaluated;
       if (evaluated.work?.key && !affectedWorkKeys.includes(evaluated.work.key)) {
         affectedWorkKeys.push(evaluated.work.key);
@@ -1449,7 +1432,7 @@ export class SeederService {
           hazardKey: evaluatedTarget.hazard.key,
           workKey: evaluatedTarget.work?.key || null,
           affectedWorkKeys,
-          projectKey: extractProjectKeyFromTraceLink(evaluatedTarget) || null,
+          projectKey: extractPrimaryJiraProjectKeyFromLink(evaluatedTarget) || null,
           previousStatus,
           newStatus: params.status,
           evidenceUrl: evaluatedTarget.test.evidenceUrl || null,
@@ -1514,11 +1497,23 @@ export class SeederService {
         `21 CFR Part 11 Violation: Cannot sign hazard ${targetLink.hazard.key} because no linked Confluence SRS specification with a valid SHA-256 hash exists.`
       );
     }
+    const targetProjectKey = extractPrimaryJiraProjectKeyFromLink(targetLink);
+    if (
+      params.projectKey &&
+      targetProjectKey &&
+      params.projectKey.trim().toUpperCase() !== targetProjectKey
+    ) {
+      throw new Error(
+        `Forbidden: Target projectKey "${params.projectKey}" does not match link project "${targetProjectKey}".`
+      );
+    }
+    const effectiveProjectKey = targetProjectKey || params.projectKey;
+
     const identityResolver = getActiveUserIdentityResolver();
     const resolvedIdentity = await identityResolver.resolveSignerIdentity({
       actorAccountId: actorId,
       extensionType: params.extensionType,
-      projectKey: params.projectKey,
+      projectKey: effectiveProjectKey,
       spaceKey: params.spaceKey,
       authMethod: params.authMethod,
     });
@@ -1529,7 +1524,11 @@ export class SeederService {
     const authMethod = params.authMethod || 'PART11_ATTESTATION';
     const signatureAlgorithm = 'HMAC-SHA256-SEAL-V1' as const;
 
-    const existingBaseline = await this.getSignedSpecBaseline(targetLink.spec.id, targetLink.hazard.key);
+    const existingBaseline =
+      (await this.getSignedSpecBaseline(targetLink.spec.id, targetLink.hazard.key)) ||
+      (targetLink.spec.pageId
+        ? await this.getSignedSpecBaseline(targetLink.spec.pageId, targetLink.hazard.key)
+        : undefined);
     let signedMs = Date.now();
     const baselineInvMs = existingBaseline?.invalidatedAt ? Date.parse(existingBaseline.invalidatedAt) : NaN;
     const sigInvMs = targetLink.signature.invalidatedAt ? Date.parse(targetLink.signature.invalidatedAt) : NaN;
@@ -1559,7 +1558,6 @@ export class SeederService {
 
     const targetHazardLower = targetLink.hazard.key.trim().toLowerCase();
     const targetSpecLower = targetLink.spec.id.trim().toLowerCase();
-    const targetPageLower = (targetLink.spec.pageId || '').trim().toLowerCase();
     const signedHash = targetLink.spec.sha256Hash;
     const affectedWorkKeys: string[] = [];
 
@@ -1568,9 +1566,7 @@ export class SeederService {
       const sameBaseline =
         i === idx ||
         (candidate.hazard.key.trim().toLowerCase() === targetHazardLower &&
-          (candidate.spec.id.trim().toLowerCase() === targetSpecLower ||
-            (targetPageLower !== '' &&
-              (candidate.spec.pageId || '').trim().toLowerCase() === targetPageLower)) &&
+          candidate.spec.id.trim().toLowerCase() === targetSpecLower &&
           candidate.spec.isMissingSentinel !== true &&
           candidate.spec.sha256Hash === signedHash);
 
@@ -1594,22 +1590,10 @@ export class SeederService {
       candidate.spec.lastSignedHash = signedHash;
       candidate.spec.isSignatureInvalidated = false;
 
-      const evaluated = ComplianceEngine.evaluateTraceLink(
-        candidate.hazard,
-        candidate.spec,
-        candidate.work,
-        candidate.test,
-        candidate.signature,
-        candidate.graphMetadata,
-        {
-          linkId: candidate.id,
-          part11Secret,
-          requireCryptographicSeal: true,
-          requireTestEvidence: current.datasetMode === 'LIVE',
-          reverificationTaskKey: candidate.reverificationTaskKey,
-        }
-      );
-      evaluated.hazard.status = ComplianceEngine.deriveHazardStatus(evaluated.complianceState);
+      const evaluated = ComplianceEngine.reEvaluateLink(candidate, current.datasetMode ?? 'LIVE', {
+        part11Secret,
+        requireCryptographicSeal: true,
+      });
       current.traceLinks[i] = evaluated;
       if (evaluated.work?.key && !affectedWorkKeys.includes(evaluated.work.key)) {
         affectedWorkKeys.push(evaluated.work.key);
@@ -1653,7 +1637,7 @@ export class SeederService {
           specId: evaluatedTarget.spec.id,
           workKey: evaluatedTarget.work?.key || null,
           affectedWorkKeys,
-          projectKey: extractProjectKeyFromTraceLink(evaluatedTarget) || null,
+          projectKey: extractPrimaryJiraProjectKeyFromLink(evaluatedTarget) || null,
           artifactSha256: evaluatedTarget.spec.sha256Hash,
           signedBy,
           signedByAccountId,
@@ -1695,15 +1679,24 @@ export class SeederService {
     const cleanLinkId = params.linkId?.trim();
     const cleanHazard = params.hazardKey?.trim().toLowerCase();
     const cleanIssue = params.issueKey?.trim().toLowerCase();
+    const matchesIssue = (l: TraceLink): boolean =>
+      !cleanIssue ||
+      (l.work?.key || '').toLowerCase() === cleanIssue ||
+      (l.hazard?.key || '').toLowerCase() === cleanIssue ||
+      (l.test?.testKey || '').toLowerCase() === cleanIssue;
+
     const idx = cleanLinkId
-      ? current.traceLinks.findIndex((l) => l.id === cleanLinkId)
+      ? current.traceLinks.findIndex(
+          (l) =>
+            l.id === cleanLinkId &&
+            (!cleanHazard || l.hazard.key.toLowerCase() === cleanHazard) &&
+            matchesIssue(l)
+        )
       : current.traceLinks.findIndex(
           (l) =>
-            (cleanHazard && l.hazard.key.toLowerCase() === cleanHazard) ||
-            (cleanIssue &&
-              ((l.work?.key || '').toLowerCase() === cleanIssue ||
-                (l.hazard?.key || '').toLowerCase() === cleanIssue ||
-                (l.test?.testKey || '').toLowerCase() === cleanIssue))
+            (!cleanHazard || l.hazard.key.toLowerCase() === cleanHazard) &&
+            matchesIssue(l) &&
+            Boolean(cleanHazard || cleanIssue)
         );
 
     if (idx < 0) {
@@ -1714,7 +1707,7 @@ export class SeederService {
 
     const targetLink = current.traceLinks[idx];
     const targetProjectKey =
-      extractProjectKeyFromTraceLink(targetLink) ||
+      extractPrimaryJiraProjectKeyFromLink(targetLink) ||
       (params.issueKey && JIRA_ISSUE_KEY_RE.test(params.issueKey.trim().toUpperCase())
         ? params.issueKey.trim().toUpperCase().split('-')[0]
         : undefined);
@@ -1727,21 +1720,29 @@ export class SeederService {
 
     const requester = params.callerMode === 'APP' ? api.asApp() : api.asUser();
 
-    // 1. Verify caller holds CREATE_ISSUES in target project
+    // 1. Verify caller holds CREATE_ISSUES and (EDIT_ISSUES or ADMINISTER_PROJECTS) in target project
     const permResp = await requester.requestJira(
-      route`/rest/api/3/mypermissions?projectKey=${targetProjectKey}&permissions=CREATE_ISSUES`
+      route`/rest/api/3/mypermissions?projectKey=${targetProjectKey}&permissions=CREATE_ISSUES,EDIT_ISSUES,ADMINISTER_PROJECTS`
     );
     if (permResp.status !== 200) {
       throw new Error(
-        `Forbidden: Unable to verify Jira CREATE_ISSUES permission in project ${targetProjectKey} (HTTP ${permResp.status}).`
+        `Forbidden: Unable to verify Jira CREATE_ISSUES and EDIT_ISSUES permissions in project ${targetProjectKey} (HTTP ${permResp.status}).`
       );
     }
     const permJson = (await permResp.json().catch(() => ({}))) as {
-      permissions?: { CREATE_ISSUES?: { havePermission?: boolean } };
+      permissions?: {
+        CREATE_ISSUES?: { havePermission?: boolean };
+        EDIT_ISSUES?: { havePermission?: boolean };
+        ADMINISTER_PROJECTS?: { havePermission?: boolean };
+      };
     };
-    if (permJson?.permissions?.CREATE_ISSUES?.havePermission !== true) {
+    const hasCreatePerm = permJson?.permissions?.CREATE_ISSUES?.havePermission === true;
+    const hasEditOrAdminPerm =
+      permJson?.permissions?.EDIT_ISSUES?.havePermission === true ||
+      permJson?.permissions?.ADMINISTER_PROJECTS?.havePermission === true;
+    if (!hasCreatePerm || !hasEditOrAdminPerm) {
       throw new Error(
-        `Forbidden: Requires Jira CREATE_ISSUES permission in project ${targetProjectKey}.`
+        `Forbidden: Requires Jira CREATE_ISSUES and EDIT_ISSUES permissions in project ${targetProjectKey}.`
       );
     }
 
@@ -1937,8 +1938,17 @@ export class SeederService {
           };
           const types = Array.isArray(ltJson.issueLinkTypes) ? ltJson.issueLinkTypes : [];
           const relates = types.find((t) => String(t.name || '').toLowerCase() === 'relates');
+          const neutral = types.find(
+            (t) =>
+              t.name &&
+              !/\b(test(s|ed|ing)?|verif(y|ies|ied|ication)|mitigat|hazard|risk)\b/i.test(
+                String(t.name)
+              )
+          );
           if (relates?.name) {
             linkTypeName = relates.name;
+          } else if (neutral?.name) {
+            linkTypeName = String(neutral.name);
           } else if (types[0]?.name) {
             linkTypeName = String(types[0].name);
           }
@@ -1986,22 +1996,9 @@ export class SeederService {
     ): Promise<ComplianceSummary> => {
       const link = suiteToUpdate.traceLinks[linkIndex];
       link.reverificationTaskKey = createdIssueKey;
-      const evaluated = ComplianceEngine.evaluateTraceLink(
-        link.hazard,
-        link.spec,
-        link.work,
-        link.test,
-        link.signature,
-        link.graphMetadata,
-        {
-          linkId: link.id,
-          part11Secret: process.env.MEDTRACE_PART11_SECRET,
-          requireCryptographicSeal: true,
-          requireTestEvidence: true,
-          reverificationTaskKey: createdIssueKey,
-        }
-      );
-      evaluated.hazard.status = ComplianceEngine.deriveHazardStatus(evaluated.complianceState);
+      const evaluated = ComplianceEngine.reEvaluateLink(link, suiteToUpdate.datasetMode ?? 'LIVE', {
+        reverificationTaskKey: createdIssueKey,
+      });
       suiteToUpdate.traceLinks[linkIndex] = evaluated;
 
       const updated = ComplianceEngine.generateComplianceReport(
@@ -2051,7 +2048,8 @@ export class SeederService {
         break;
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err);
-        const isCasConflict = /concurrent modification detected|cas conflict|vlock/i.test(msg);
+        const isCasConflict =
+          isKvsConflictError(err) || /concurrent modification|version lock|cas conflict|vlock/i.test(msg);
         if (!isCasConflict || attempt >= maxCommitRetries) {
           throw err;
         }
@@ -2179,16 +2177,9 @@ export class SeederService {
     targetLink.spec.lastSignedHash = targetLink.spec.sha256Hash;
     targetLink.spec.isSignatureInvalidated = false;
 
-    const evaluated = ComplianceEngine.evaluateTraceLink(
-      targetLink.hazard,
-      targetLink.spec,
-      targetLink.work,
-      targetLink.test,
-      targetLink.signature,
-      targetLink.graphMetadata,
-      { linkId: targetLink.id, part11Secret: secret }
-    );
-    evaluated.hazard.status = ComplianceEngine.deriveHazardStatus(evaluated.complianceState);
+    const evaluated = ComplianceEngine.reEvaluateLink(targetLink, current.datasetMode ?? 'DEMO', {
+      part11Secret: secret,
+    });
     current.traceLinks[idx] = evaluated;
 
     const updatedSummary = ComplianceEngine.generateComplianceReport(

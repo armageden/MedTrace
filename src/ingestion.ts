@@ -3,10 +3,11 @@ import { kvs } from '@forge/kvs';
 import { ComplianceEngine } from './compliance-engine';
 import {
   cloneJsonValue,
-  isKvsConflictError,
-  isSignatureTimestampInvalidated,
+  isHttpOk,
   JIRA_ISSUE_KEY_RE,
   JIRA_PROJECT_KEY_RE,
+  safeParseJson,
+  sanitizeKvsKeySegment,
   sha256Hex,
 } from './crypto-utils';
 import { isForgeRuntime } from './runtime';
@@ -17,7 +18,11 @@ import {
   SeederService,
   SignedSpecBaseline,
 } from './seeder';
-import { TeamworkGraphService } from './teamwork-graph';
+import {
+  extractAllJiraProjectKeysFromLink,
+  hasJiraBrowsePermissionForCaller,
+} from './seeder-identity';
+import { resolveCloudId, TeamworkGraphService } from './teamwork-graph';
 import {
   buildBaselineMutationForInvalidation,
   ConfluencePageData,
@@ -30,7 +35,6 @@ import {
   handleJiraIssueUpdatedTrigger,
   inferRiskClass,
   isBaselineInvalidated,
-  isConcurrencyError,
   isPureHazardIssue,
   isPureVerificationTestIssue,
   JiraApiIssue,
@@ -38,7 +42,6 @@ import {
   JiraIssueUpdatedResult,
   normalizeStringArray,
   reconcileConfluenceSpecsTrigger,
-  ResolvedJiraLinkedIssue,
   resolveLinkedHazardAndTest,
   stripStorageMarkup,
 } from './triggers';
@@ -104,12 +107,6 @@ function inferTestTypeFromIssue(
   if (combined.includes('clinical')) return 'Clinical Validation';
   if (combined.includes('unit')) return 'Unit Test';
   return riskClass === 'CLASS_C' ? 'Automated HIL (Hardware-in-Loop)' : 'Integration Test';
-}
-
-function extractCloudIdFromSelfUrl(selfUrl?: string): string | undefined {
-  if (typeof selfUrl !== 'string') return undefined;
-  const match = selfUrl.match(/\/ex\/jira\/([0-9a-f-]{8,})/i);
-  return match?.[1];
 }
 
 /**
@@ -263,7 +260,7 @@ async function fetchAllJiraIssues(
   startedAt: number,
   warnings: string[],
   initialPageToken?: string
-): Promise<{ issues: JiraApiIssue[]; truncated: boolean; nextPageToken?: string }> {
+): Promise<{ issues: JiraApiIssue[]; overflowKeys: string[]; truncated: boolean; nextPageToken?: string }> {
   const issues: JiraApiIssue[] = [];
   const seenTokens = new Set<string>();
   let nextPageToken: string | undefined = initialPageToken;
@@ -293,11 +290,14 @@ async function fetchAllJiraIssues(
       throw new Error(`Jira search failed (HTTP ${jiraResp.status}): ${errText.slice(0, 200)}`);
     }
 
-    const jiraJson = (await jiraResp.json()) as {
+    const jiraJson = await safeParseJson<{
       issues?: JiraApiIssue[];
       nextPageToken?: string;
       isLast?: boolean;
-    };
+    }>(jiraResp);
+    if (!jiraJson) {
+      throw new Error('Jira search returned malformed JSON response.');
+    }
     const pageIssues = Array.isArray(jiraJson?.issues) ? jiraJson.issues : [];
     issues.push(...pageIssues);
 
@@ -310,7 +310,7 @@ async function fetchAllJiraIssues(
         issues.length > maxIssues || (Boolean(candidateToken) && jiraJson?.isLast !== true);
       if (hadMore) {
         truncated = true;
-        if (issues.length === maxIssues && candidateToken && jiraJson?.isLast !== true) {
+        if (candidateToken && jiraJson?.isLast !== true) {
           resumePageToken = candidateToken;
         }
         warnings.push(`Jira issue scan reached maxIssues cap (${maxIssues}); results truncated.`);
@@ -334,8 +334,18 @@ async function fetchAllJiraIssues(
     nextPageToken = candidateToken;
   }
 
+  const slicedIssues = issues.length > maxIssues ? issues.slice(0, maxIssues) : issues;
+  const overflowKeys =
+    issues.length > maxIssues
+      ? issues
+          .slice(maxIssues)
+          .map((i) => (typeof i?.key === 'string' ? i.key.trim().toUpperCase() : ''))
+          .filter((k) => JIRA_ISSUE_KEY_RE.test(k))
+      : [];
+
   return {
-    issues: issues.length > maxIssues ? issues.slice(0, maxIssues) : issues,
+    issues: slicedIssues,
+    overflowKeys,
     truncated,
     ...(truncated && resumePageToken ? { nextPageToken: resumePageToken } : {}),
   };
@@ -371,7 +381,10 @@ async function fetchJiraIssuesByKeys(
       const errText = await jiraResp.text();
       throw new Error(`Jira resume search failed (HTTP ${jiraResp.status}): ${errText.slice(0, 200)}`);
     }
-    const jiraJson = (await jiraResp.json()) as { issues?: JiraApiIssue[] };
+    const jiraJson = await safeParseJson<{ issues?: JiraApiIssue[] }>(jiraResp);
+    if (!jiraJson) {
+      throw new Error('Jira resume search returned malformed JSON response.');
+    }
     if (Array.isArray(jiraJson?.issues)) {
       issues.push(...jiraJson.issues);
     }
@@ -422,10 +435,15 @@ async function fetchAllConfluencePages(
       break;
     }
 
-    const confJson = (await confResp.json()) as {
+    const confJson = await safeParseJson<{
       results?: ConfluencePageData[];
       _links?: { next?: string };
-    };
+    }>(confResp);
+    if (!confJson) {
+      truncated = true;
+      warnings.push('Confluence pages query returned malformed JSON; proceeding with partial pages.');
+      break;
+    }
     const results = Array.isArray(confJson?.results) ? confJson.results : [];
     pages.push(...results);
 
@@ -522,10 +540,23 @@ export class LiveIngestionService {
           )
         : {
             issues: [] as JiraApiIssue[],
+            overflowKeys: [] as string[],
             truncated: pendingTruncated || Boolean(tokenForNextJiraPage),
             ...(tokenForNextJiraPage ? { nextPageToken: tokenForNextJiraPage } : {}),
           };
-    const issues = [...pendingIssues, ...jiraResult.issues];
+    const seenIssueKeys = new Set<string>();
+    const issues: JiraApiIssue[] = [];
+    for (const candidateIssue of [...pendingIssues, ...jiraResult.issues]) {
+      const keyUpper = typeof candidateIssue?.key === 'string' ? candidateIssue.key.trim().toUpperCase() : '';
+      if (keyUpper && seenIssueKeys.has(keyUpper)) {
+        continue;
+      }
+      if (keyUpper) {
+        seenIssueKeys.add(keyUpper);
+      }
+      issues.push(candidateIssue);
+    }
+    const overflowKeys = jiraResult.overflowKeys ?? [];
     let truncated = pendingTruncated || jiraResult.truncated;
 
     // 2. Paginate Confluence pages ONLY when spaceId is explicitly scoped; otherwise fetch linked pageIds
@@ -545,6 +576,7 @@ export class LiveIngestionService {
     }
 
     const pageCache = new Map<string, ConfluencePageData | null>();
+    const pageFetchFailures = new Map<string, 'FORBIDDEN' | 'TRANSIENT' | 'NOT_FOUND'>();
     for (const p of pages) {
       if (p?.id !== undefined && p?.id !== null) {
         pageCache.set(String(p.id), p);
@@ -566,9 +598,9 @@ export class LiveIngestionService {
                 route`/wiki/api/v2/spaces?keys=${normalized.projectKey}&limit=5`
               );
               if (spaceResp.status === 200) {
-                const spaceJson = (await spaceResp.json()) as {
+                const spaceJson = await safeParseJson<{
                   results?: Array<{ id?: string | number }>;
-                };
+                }>(spaceResp);
                 const matchedSpaceId =
                   Array.isArray(spaceJson?.results) && spaceJson.results[0]?.id !== undefined
                     ? String(spaceJson.results[0].id).trim()
@@ -603,10 +635,14 @@ export class LiveIngestionService {
               );
               return collected;
             }
-            const confJson = (await confResp.json()) as {
+            const confJson = await safeParseJson<{
               results?: ConfluencePageData[];
               _links?: { next?: string };
-            };
+            }>(confResp);
+            if (!confJson) {
+              warnings.push('Confluence heuristic pages query returned malformed JSON; proceeding with Jira remote links only.');
+              return collected;
+            }
             const results = Array.isArray(confJson?.results) ? confJson.results : [];
             collected.push(...results);
             for (const p of collected) {
@@ -655,10 +691,26 @@ export class LiveIngestionService {
             route`/wiki/api/v2/pages/${pageId}?body-format=storage`
           );
           if (singlePageResp.status === 200) {
-            const pageJson = (await singlePageResp.json()) as ConfluencePageData;
+            const pageJson = await safeParseJson<ConfluencePageData>(singlePageResp);
+            if (!pageJson) {
+              pageFetchFailures.set(pageId, 'TRANSIENT');
+              warnings.push(
+                `Confluence page ${pageId} linked from ${referencingIssueKey} returned malformed JSON.`
+              );
+              pageCache.set(pageId, null);
+              return null;
+            }
             pageCache.set(pageId, pageJson);
             return pageJson;
           }
+          pageFetchFailures.set(
+            pageId,
+            singlePageResp.status === 404
+              ? 'NOT_FOUND'
+              : singlePageResp.status === 401 || singlePageResp.status === 403
+                ? 'FORBIDDEN'
+                : 'TRANSIENT'
+          );
           warnings.push(
             `Confluence page ${pageId} linked from ${referencingIssueKey} returned HTTP ${singlePageResp.status}.`
           );
@@ -666,6 +718,7 @@ export class LiveIngestionService {
           return null;
         } catch (err: unknown) {
           const msg = err instanceof Error ? err.message : String(err);
+          pageFetchFailures.set(pageId, 'TRANSIENT');
           warnings.push(
             `Failed to fetch Confluence page ${pageId} linked from ${referencingIssueKey}: ${msg}`
           );
@@ -796,6 +849,13 @@ export class LiveIngestionService {
         {
           callerMode: normalized.callerMode,
           requireConfluenceLinkToEnrich: !hasStaticTrack,
+          skipIssueMetadataFetch: true,
+          preloadedIssue: {
+            id: issue.id,
+            self: issue.self,
+            summary: fields.summary,
+            issuelinks: fields.issuelinks,
+          },
         }
       );
 
@@ -875,7 +935,7 @@ export class LiveIngestionService {
             ? `LIVE (${graphCtx.source})`
             : 'LIVE (JIRA_REST)';
       const entityAri = graphCtx?.issueAri || `jira:issue:${issueKey}`;
-      const jiraCloudId = extractCloudIdFromSelfUrl(issue.self) || extractCloudIdFromSelfUrl(linkedHazard?.self);
+      const jiraCloudId = resolveCloudId(issue.self) || resolveCloudId(linkedHazard?.self);
 
       const buildResolvedHazard = (
         hazardKey: string,
@@ -970,8 +1030,36 @@ export class LiveIngestionService {
         }
       }
 
-      // Unlinked sentinel path
+      // Unlinked sentinel path (preserve existing non-sentinel specs when Confluence access is denied or transiently unavailable)
       if (matchedPages.length === 0) {
+        const protectedPrevLinks = prevWorkLinks.filter((pl) => {
+          const pid = typeof pl.spec?.pageId === 'string' ? pl.spec.pageId.trim() : '';
+          if (!pid || pl.spec?.isMissingSentinel === true) return false;
+          const failure = pageFetchFailures.get(pid);
+          return failure === 'FORBIDDEN' || failure === 'TRANSIENT';
+        });
+        if (protectedPrevLinks.length > 0) {
+          return {
+            skipped: false,
+            links: protectedPrevLinks.map((pl) => {
+              const preserved = cloneJsonValue(pl);
+              preserved.work = {
+                ...preserved.work,
+                title: fields.summary || preserved.work.title,
+                status: work.status,
+                assignee: fields.assignee?.displayName || 'Unassigned',
+              };
+              if (linkedReverification?.key) {
+                preserved.reverificationTaskKey = linkedReverification.key;
+              }
+              return preserved;
+            }),
+            linkedPairs: protectedPrevLinks.length,
+            drifts: 0,
+            baselineUpdates: [],
+          };
+        }
+
         const specId = `unlinked-${issueKey.toLowerCase()}`;
         const prevExact =
           existingByWorkAndSpec.get(`${issueKey.toUpperCase()}::${specId}`) || prevWorkLinks[0];
@@ -993,7 +1081,7 @@ export class LiveIngestionService {
         const test = buildResolvedTest(prevExact?.test);
 
         const signature: Part11Signature = {
-          id: `sig-${spec.id}`,
+          id: `sig-${sanitizeKvsKeySegment(`${hazardKey}--${spec.id}`)}`,
           signedBy: prevExact?.signature?.signedBy || '',
           ...(prevExact?.signature?.signedByAccountId
             ? { signedByAccountId: prevExact.signature.signedByAccountId }
@@ -1134,7 +1222,7 @@ export class LiveIngestionService {
 
         if (baseline) {
           const candidateSig: Part11Signature = {
-            id: `sig-${spec.id}`,
+            id: `sig-${sanitizeKvsKeySegment(`${hazardKey}--${spec.id}`)}`,
             signedBy: baseline.signedBy,
             ...(baseline.signedByAccountId ? { signedByAccountId: baseline.signedByAccountId } : {}),
             signedAt: baseline.signedAt,
@@ -1174,7 +1262,7 @@ export class LiveIngestionService {
           };
         } else {
           signature = {
-            id: `sig-${spec.id}`,
+            id: `sig-${sanitizeKvsKeySegment(`${hazardKey}--${spec.id}`)}`,
             signedBy: prevExact?.signature?.signedBy || '',
             ...(prevExact?.signature?.signedByAccountId
               ? { signedByAccountId: prevExact.signature.signedByAccountId }
@@ -1230,6 +1318,7 @@ export class LiveIngestionService {
     };
 
     const traceLinks: TraceLink[] = [];
+    const seenBuiltLinkIds = new Set<string>();
     const baselineUpdates: BaselineMutationRecord[] = [];
     const processedWorkKeys = new Set<string>();
     const unprocessedKeys: string[] = [];
@@ -1264,33 +1353,88 @@ export class LiveIngestionService {
           skippedUntaggedCount++;
           continue;
         }
-        traceLinks.push(...result.links);
+        for (const built of result.links) {
+          if (!seenBuiltLinkIds.has(built.id)) {
+            seenBuiltLinkIds.add(built.id);
+            traceLinks.push(built);
+          }
+        }
         linkedPairsFound += result.linkedPairs;
         driftDetectedCount += result.drifts;
         baselineUpdates.push(...result.baselineUpdates);
       }
     }
 
+    let preservedOtherProjectCount = 0;
+
     if (
       existingSuite.datasetMode === 'LIVE' &&
       existingSuite.initialized !== false &&
       existingSuite.traceLinks.length > 0 &&
-      (traceLinks.length > 0 || resumedFromCursor)
+      (traceLinks.length > 0 || resumedFromCursor || (!truncated && !normalized.hasCustomJql))
     ) {
       const syncedProjectPrefix = normalized.projectKey
         ? `${normalized.projectKey.trim().toUpperCase()}-`
         : undefined;
       const seenLinkIds = new Set(traceLinks.map((l) => l.id));
       let preservedTruncatedCount = 0;
-      let preservedOtherProjectCount = 0;
       let preservedFilteredJqlCount = 0;
+      const browsePermCache = new Map<string, boolean>();
+
+      const isLinkInUnbrowsableProject = async (link: TraceLink): Promise<boolean> => {
+        if (syncedProjectPrefix || normalized.callerMode !== 'USER' || !isForgeRuntime()) {
+          return false;
+        }
+        const linkProjects = extractAllJiraProjectKeysFromLink(link);
+        for (const projKey of linkProjects) {
+          let allowed = browsePermCache.get(projKey);
+          if (allowed === undefined) {
+            if (options.preserveReadOnlyProjects) {
+              try {
+                const permResp = await api
+                  .asUser()
+                  .requestJira(
+                    route`/rest/api/3/mypermissions?projectKey=${projKey}&permissions=BROWSE_PROJECTS,EDIT_ISSUES,ADMINISTER_PROJECTS`
+                  );
+                if (!isHttpOk(permResp)) {
+                  allowed = false;
+                } else {
+                  const pData = (await permResp.json().catch(() => ({}))) as {
+                    active?: unknown;
+                    permissions?: Record<string, { havePermission?: boolean } | undefined>;
+                  };
+                  const canBrowse =
+                    pData.permissions?.BROWSE_PROJECTS?.havePermission === true ||
+                    (pData.permissions?.BROWSE_PROJECTS === undefined &&
+                      (pData.permissions?.EDIT_ISSUES?.havePermission === true ||
+                        pData.permissions?.ADMINISTER_PROJECTS?.havePermission === true));
+                  const canEdit =
+                    pData.permissions?.EDIT_ISSUES?.havePermission === true ||
+                    pData.permissions?.ADMINISTER_PROJECTS?.havePermission === true;
+                  allowed = pData.active !== false && canBrowse && canEdit;
+                }
+              } catch {
+                allowed = false;
+              }
+            } else {
+              allowed = await hasJiraBrowsePermissionForCaller({ projectKey: projKey });
+            }
+            browsePermCache.set(projKey, allowed);
+          }
+          if (!allowed) {
+            return true;
+          }
+        }
+        return false;
+      };
 
       for (const existingLink of existingSuite.traceLinks) {
         const workKeyUpper = (existingLink.work?.key || '').trim().toUpperCase();
         const hasStandardPrefix = /^[A-Z][A-Z0-9_]*-\d+$/.test(workKeyUpper);
-        const isOtherProject = Boolean(
-          syncedProjectPrefix && hasStandardPrefix && !workKeyUpper.startsWith(syncedProjectPrefix)
-        );
+        const isOtherProject =
+          Boolean(
+            syncedProjectPrefix && hasStandardPrefix && !workKeyUpper.startsWith(syncedProjectPrefix)
+          ) || (await isLinkInUnbrowsableProject(existingLink));
         const isUnprocessedTruncated = Boolean(
           (truncated || resumedFromCursor) && workKeyUpper && !processedWorkKeys.has(workKeyUpper)
         );
@@ -1336,7 +1480,9 @@ export class LiveIngestionService {
       }
     }
 
-    const nextPendingKeys = Array.from(new Set([...unprocessedKeys, ...remainingFetchKeys]));
+    const nextPendingKeys = Array.from(
+      new Set([...overflowKeys, ...unprocessedKeys, ...remainingFetchKeys])
+    );
     const retainedInitialToken =
       truncated && !jiraResult.truncated && resumedFromCursor ? initialPageToken : undefined;
     const nextResumeToken = jiraResult.nextPageToken || retainedInitialToken;
@@ -1383,6 +1529,58 @@ export class LiveIngestionService {
       let summaryToReturn = existingSuite;
       const incompleteProjectsOnEmpty = mergeIncompleteProjects([]);
       const incompleteOnEmpty = truncated || incompleteProjectsOnEmpty.length > 0;
+      const shouldPruneClearedLiveSuite =
+        !truncated &&
+        !normalized.hasCustomJql &&
+        !resumedFromCursor &&
+        existingSuite.datasetMode === 'LIVE' &&
+        existingSuite.initialized !== false &&
+        existingSuite.traceLinks.length > 0;
+
+      if (shouldPruneClearedLiveSuite) {
+        const prunedAt = new Date().toISOString();
+        const prunedSummary = ComplianceEngine.generateComplianceReport([], 'LIVE', existingSuite.projectName, {
+          initialized: false,
+          lastSyncedAt: prunedAt,
+          syncIncomplete: incompleteOnEmpty,
+          incompleteProjectKeys: incompleteProjectsOnEmpty,
+        });
+        summaryToReturn = await commitSuiteMutation({
+          summary: prunedSummary,
+          expectedVersion: existingVersion ?? 0,
+          previousSuite: existingSuite,
+          auditEntry: {
+            actorAccountId,
+            action: 'SYNC_LIVE',
+            targetKey: normalized.projectKey || existingSuite.projectName,
+            details: {
+              projectKey: normalized.projectKey || null,
+              prunedToUninitialized: true,
+              previousTraceLinkCount: existingSuite.traceLinks.length,
+              jiraIssuesScanned: issues.length,
+              confluencePagesScanned,
+              lastSyncedAt: prunedAt,
+            },
+            authMethod: normalized.callerMode === 'APP' ? 'SYSTEM_INIT' : 'FORGE_USER_SESSION',
+          },
+        });
+        warnings.push(
+          `No safety-tracked Jira issues remain in ${normalized.projectKey ? `project ${normalized.projectKey}` : 'the synced scope'}; pruned stale trace link(s) from KVS.`
+        );
+        return {
+          success: true,
+          datasetMode: 'LIVE',
+          jiraIssuesScanned: issues.length,
+          confluencePagesScanned,
+          linkedPairsFound: 0,
+          driftDetectedCount: 0,
+          truncated: false,
+          skippedUntaggedCount,
+          warnings,
+          summary: summaryToReturn,
+        };
+      }
+
       if (
         truncated &&
         existingSuite.datasetMode === 'LIVE' &&
@@ -1415,9 +1613,17 @@ export class LiveIngestionService {
               ...(nextResumeToken ? { nextPageToken: nextResumeToken } : {}),
               ...(nextPendingKeys.length > 0 ? { pendingIssueKeysCount: nextPendingKeys.length } : {}),
             },
-            authMethod: 'FORGE_USER_SESSION',
+            authMethod: normalized.callerMode === 'APP' ? 'SYSTEM_INIT' : 'FORGE_USER_SESSION',
           },
         });
+      } else if (truncated) {
+        summaryToReturn = {
+          ...summaryToReturn,
+          syncIncomplete: true,
+          ...(incompleteProjectsOnEmpty.length > 0
+            ? { incompleteProjectKeys: incompleteProjectsOnEmpty }
+            : {}),
+        };
       }
       warnings.push(
         'No safety-tracked Jira issues matched the live sync query (label a Jira issue with class-a / class-b / class-c or medtrace-hazard, or create a Hazard issue type); keeping existing compliance suite unchanged.'
@@ -1440,9 +1646,11 @@ export class LiveIngestionService {
 
     const projectLabel =
       normalized.projectKey ||
-      issues[0]?.fields?.project?.name ||
-      (existingSuite.initialized ? existingSuite.projectName : undefined) ||
-      'Atlassian Cloud Live Medical Project';
+      (preservedOtherProjectCount > 0 && existingSuite.initialized && existingSuite.projectName
+        ? existingSuite.projectName
+        : issues[0]?.fields?.project?.name ||
+          (existingSuite.initialized ? existingSuite.projectName : undefined) ||
+          'Atlassian Cloud Live Medical Project');
 
     const syncedWorkKeys = Array.from(processedWorkKeys);
     const syncedProjectKeys = Array.from(
@@ -1468,6 +1676,7 @@ export class LiveIngestionService {
       summary,
       expectedVersion: existingVersion ?? 0,
       baselineUpdates,
+      previousSuite: existingSuite,
       auditEntry: {
         actorAccountId,
         action: 'SYNC_LIVE',
@@ -1485,7 +1694,7 @@ export class LiveIngestionService {
           ...(jiraResult.nextPageToken ? { nextPageToken: jiraResult.nextPageToken } : {}),
           ...(resumedFromCursor ? { resumedFromCursor: true } : {}),
         },
-        authMethod: 'FORGE_USER_SESSION',
+        authMethod: normalized.callerMode === 'APP' ? 'SYSTEM_INIT' : 'FORGE_USER_SESSION',
       },
     });
 
@@ -1527,6 +1736,8 @@ export class LiveIngestionService {
       projectKey?: string;
       issueKeyFilter?: string;
       allowAppFallback?: boolean;
+      failClosedOnBudget?: boolean;
+      userPageAccessCache?: Map<string, boolean>;
     }
   ): Promise<ComplianceSummary> {
     return reconcileConfluenceSpecsTrigger(suite, {

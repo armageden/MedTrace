@@ -117,6 +117,7 @@ export const RecordTestForm: React.FC<RecordTestFormProps> = ({
       <input
         type="text"
         aria-label="Evidence URL"
+        aria-invalid={Boolean(testValidationError)}
         className="mt-input"
         value={testEvidenceUrl}
         onChange={(e) => onChangeEvidenceUrl(e.target.value)}
@@ -252,12 +253,18 @@ export const SignOffAttestationForm: React.FC<SignOffAttestationFormProps> = ({
         type="text"
         className="mt-input"
         style={{ marginTop: 3 }}
+        aria-invalid={trimmedPhrase.length > 0 && !phraseMatches}
+        aria-describedby={trimmedPhrase.length > 0 && !phraseMatches ? 'signoff-phrase-error' : undefined}
         value={attestationPhrase}
         onChange={(e) => onChangeAttestationPhrase(e.target.value)}
         placeholder={PART11_ATTESTATION_PHRASE}
       />
       {trimmedPhrase.length > 0 && !phraseMatches && (
-        <div style={{ fontSize: 10, color: 'var(--mt-danger-text)', marginTop: 2 }}>
+        <div
+          id="signoff-phrase-error"
+          role="alert"
+          style={{ fontSize: 10, color: 'var(--mt-danger-text)', marginTop: 2 }}
+        >
           Must exactly match: {PART11_ATTESTATION_PHRASE}
         </div>
       )}
@@ -309,10 +316,10 @@ export const SignOffAttestationForm: React.FC<SignOffAttestationFormProps> = ({
       style={{
         border: 'none',
         background: 'var(--mt-brand-bg)',
-        color: '#ffffff',
+        color: 'var(--ds-text-inverse, #ffffff)',
       }}
     >
-      <PenTool size={14} /> Sign Off Spec (Attestation)
+      <PenTool size={14} aria-hidden="true" /> Sign Off Spec (Attestation)
     </button>
   </div>
 );

@@ -1325,3 +1325,55 @@ test('docs-check: sync-consistency catches stale read:graph, removed AGG, and te
     fixture.cleanup();
   }
 });
+
+test('validate-manifest & docs-check enforce missing resource index.html and bold Devpost draft counts/paths', async () => {
+  const missingDistFixture = createTempTree('medtrace-manifest-nodist-', {
+    'manifest.yml': fs.readFileSync(path.join(REPO_ROOT, 'manifest.yml'), 'utf8'),
+    'static/icons/medtrace-icon.svg': '<svg xmlns="http://www.w3.org/2000/svg"></svg>\n',
+    'dist/index.js': [
+      'export function resolverHandler() {}',
+      'export function workflowValidatorHandler() {}',
+      'export function rovoActionHandler() {}',
+      'export function mcpWebtriggerHandler() {}',
+      'export function confluencePageUpdatedTrigger() {}',
+      'export function jiraIssueUpdatedTrigger() {}',
+      '',
+    ].join('\n'),
+  });
+  try {
+    const res = await validateManifest({ rootDir: missingDistFixture.dir });
+    assert.equal(res.ok, false);
+    assert.ok(
+      res.errors.some((e) => e.includes('[resource]') && e.includes('static/frontend/dist')),
+      `Expected missing resource error, got: ${res.errors.join(' | ')}`,
+    );
+  } finally {
+    missingDistFixture.cleanup();
+  }
+
+  const boldDraftFixture = createTempTree(
+    'medtrace-docs-bold-draft-',
+    makeValidDocsFixtureFiles({
+      'devpost_submission_draft.md': [
+        '# Draft',
+        '**255 automated tests pass (`0` failures):** **207** backend/MCP/script tests + **43** React/Vitest frontend tests.',
+        'Missing doc path: `src/does-not-exist.ts`.',
+        '',
+      ].join('\n'),
+    }),
+  );
+  try {
+    const res = runDocsCheck({ root: boldDraftFixture.dir });
+    assert.equal(res.exitCode, 1);
+    assert.ok(
+      res.errors.some((e) => e.includes('devpost_submission_draft.md:') && e.includes('255 !== 207 + 43')),
+      `Expected bold test count mismatch, got: ${JSON.stringify(res.errors)}`,
+    );
+    assert.ok(
+      res.errors.some((e) => e.includes('devpost_submission_draft.md:') && e.includes('src/does-not-exist.ts')),
+      `Expected missing backtick path error in devpost_submission_draft.md, got: ${JSON.stringify(res.errors)}`,
+    );
+  } finally {
+    boldDraftFixture.cleanup();
+  }
+});

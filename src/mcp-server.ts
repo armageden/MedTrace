@@ -4,6 +4,7 @@ import { JIRA_ISSUE_KEY_RE, JIRA_PROJECT_KEY_RE } from './crypto-utils';
 import { LiveIngestionService } from './ingestion';
 import { isForgeRuntime } from './runtime';
 import { SeederService } from './seeder';
+import { verifyJiraIdentity } from './rbac';
 import {
   authorizeAndFilterLiveSuiteDetailed,
   AuthorizedLiveSuiteResult,
@@ -11,6 +12,8 @@ import {
   extractAllJiraIssueKeysFromLink,
   extractAllJiraProjectKeysFromLink,
   extractJiraProjectKeyFromRawKey,
+  extractPrimaryJiraProjectKeyFromLink,
+  hasJiraBrowsePermissionForCaller,
   redactBlastRadiusReport,
 } from './seeder-identity';
 import { fetchSpecOwnersFromTeamworkGraph, resolveConfluenceCloudId } from './teamwork-graph';
@@ -27,7 +30,8 @@ import {
   VerificationTest,
 } from './types';
 
-const CONFLUENCE_ID_RE = /^[a-zA-Z0-9_-]{1,64}$/;
+const SHORT_SAFETY_TOKEN_RE = /^(?:pwm|mcu|adc|dac|hil|srs|iso|iec|fda|cfr|sha|crc|spi|i2c|can|ble|rtc|wdt|dma|isr)$/i;
+const MAX_ROVO_TEXT_SCAN_CHARS = 100_000;
 
 const STOP_WORDS = new Set([
   'with', 'from', 'that', 'this', 'must', 'every', 'during', 'within', 'clause',
@@ -78,7 +82,7 @@ export interface HazardLineageNotFoundResponse {
   initialized: boolean;
   queriedKey: string;
   message: string;
-  availableKeys: Array<{
+  availableKeys?: Array<{
     hazardKey: string;
     workKey: string;
     specId: string;
@@ -93,6 +97,8 @@ export interface HazardLineageSummaryResponse {
   totalHazards: number;
   verifiedPercentage: string;
   releaseBlocked: boolean;
+  syncIncomplete?: boolean;
+  blockingReasons: string[];
   traceLinks: Array<{
     id: string;
     hazardKey: string;
@@ -184,8 +190,15 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function extractMeaningfulTokens(text: string): string[] {
-  const tokens = text.toLowerCase().match(/\b[a-z0-9][a-z0-9_-]{3,}\b/g) || [];
-  return Array.from(new Set(tokens.filter((t) => !STOP_WORDS.has(t))));
+  const bounded = text.length > MAX_ROVO_TEXT_SCAN_CHARS ? text.slice(0, MAX_ROVO_TEXT_SCAN_CHARS) : text;
+  const tokens = bounded.toLowerCase().match(/\b[a-z0-9][a-z0-9_-]{2,}\b/g) || [];
+  return Array.from(
+    new Set(
+      tokens.filter(
+        (t) => !STOP_WORDS.has(t) && (t.length >= 4 || SHORT_SAFETY_TOKEN_RE.test(t))
+      )
+    )
+  );
 }
 
 function collectCanonicalLinkKeys(link: TraceLink): string[] {
@@ -255,24 +268,17 @@ function extractRovoExtensionScope(
 
   const spaceId =
     typeof rawSpaceId === 'string' && rawSpaceId.trim() !== '' ? rawSpaceId.trim() : undefined;
-  if (spaceId && !CONFLUENCE_ID_RE.test(spaceId)) {
+  if (spaceId && !/^[a-zA-Z0-9_-]{1,64}$/.test(spaceId)) {
     throw new RovoAuthError('Forbidden: Invalid Confluence spaceId in extension context.');
   }
 
   const contentId =
     typeof rawContentId === 'string' && rawContentId.trim() !== '' ? rawContentId.trim() : undefined;
-  if (contentId && !CONFLUENCE_ID_RE.test(contentId)) {
+  if (contentId && !/^[a-zA-Z0-9_-]{1,64}$/.test(contentId)) {
     throw new RovoAuthError('Forbidden: Invalid Confluence contentId in extension context.');
   }
 
   return { extensionType, projectKey, issueKey, spaceId, contentId };
-}
-
-function extractProjectKeyFromJiraKey(key?: string): string | undefined {
-  if (typeof key !== 'string') return undefined;
-  const clean = key.trim().toUpperCase();
-  if (!JIRA_ISSUE_KEY_RE.test(clean)) return undefined;
-  return clean.split('-')[0];
 }
 
 async function checkJiraBrowsePermission(target?: {
@@ -324,6 +330,12 @@ async function assertRovoUserReadAccess(
     return;
   }
 
+  try {
+    await verifyJiraIdentity(accountId);
+  } catch (err: unknown) {
+    throw new RovoAuthError(err instanceof Error ? err.message : 'Forbidden: Jira user session validation failed.');
+  }
+
   const hasJiraRead = await checkJiraBrowsePermission({
     issueKey: scope.issueKey,
     projectKey: scope.projectKey,
@@ -353,34 +365,43 @@ async function scopeSuiteForRovoCaller(
     if (projectPermCache.has(clean)) {
       return projectPermCache.get(clean) === true;
     }
-    const allowed = await checkJiraBrowsePermission({ projectKey: clean });
+    const allowed = await hasJiraBrowsePermissionForCaller({ projectKey: clean });
     projectPermCache.set(clean, allowed);
     return allowed;
   };
 
   const hasIssueAccess = async (issueKey: string): Promise<boolean> => {
     const clean = issueKey.trim().toUpperCase();
-    const issueProj = extractProjectKeyFromJiraKey(clean);
+    const issueProj = extractJiraProjectKeyFromRawKey(clean, 'JIRA_ISSUE');
     if (scope.projectKey && issueProj && issueProj !== scope.projectKey) {
       return false;
     }
     if (issuePermCache.has(clean)) {
       return issuePermCache.get(clean) === true;
     }
-    const allowed = await checkJiraBrowsePermission({ issueKey: clean });
+    const allowed = await hasJiraBrowsePermissionForCaller({ issueKey: clean });
     issuePermCache.set(clean, allowed);
     return allowed;
   };
 
   // Validate explicitly requested keys against EVERY associated Jira artifact permission before returning or searching.
   const lookupKeys: string[] = [];
-  if (inputs.issueKey && inputs.issueKey.trim() !== '') lookupKeys.push(inputs.issueKey.trim());
-  if (inputs.hazardKey && inputs.hazardKey.trim() !== '') lookupKeys.push(inputs.hazardKey.trim());
-  const textScan = `${inputs.prDiff || ''} ${inputs.componentName || ''} ${inputs.issueKey || ''}`;
-  for (const keyToken of textScan.match(/\b[A-Za-z][A-Za-z0-9_]{0,20}-\d+\b/g) || []) {
-    if (!lookupKeys.some((k) => k.toLowerCase() === keyToken.toLowerCase())) {
-      lookupKeys.push(keyToken);
+  const seenLookupLower = new Set<string>();
+  const addLookupKey = (rawKey?: string): void => {
+    const trimmed = typeof rawKey === 'string' ? rawKey.trim() : '';
+    if (!trimmed) return;
+    const lower = trimmed.toLowerCase();
+    if (!seenLookupLower.has(lower)) {
+      seenLookupLower.add(lower);
+      lookupKeys.push(trimmed);
     }
+  };
+  addLookupKey(inputs.issueKey);
+  addLookupKey(inputs.hazardKey);
+  const rawScan = `${inputs.prDiff || ''} ${inputs.componentName || ''} ${inputs.issueKey || ''}`;
+  const textScan = rawScan.length > MAX_ROVO_TEXT_SCAN_CHARS ? rawScan.slice(0, MAX_ROVO_TEXT_SCAN_CHARS) : rawScan;
+  for (const keyToken of textScan.match(/\b[A-Za-z][A-Za-z0-9_]{0,20}-\d+\b/g) || []) {
+    addLookupKey(keyToken);
   }
 
   for (const key of lookupKeys) {
@@ -454,12 +475,12 @@ export class McpToolService {
       issueKey?: string;
       hazardKey?: string;
     },
-    options?: { suite?: ComplianceSummary; cloudId?: string }
+    options?: { suite?: ComplianceSummary; cloudId?: string; includeAvailableKeys?: boolean }
   ): Promise<HazardLineageResponse> {
     let suite = options?.suite ?? (await SeederService.getActiveComplianceSuite());
-    const rawIssueKey = typeof inputs?.issueKey === 'string' ? inputs.issueKey : '';
-    const rawHazardKey = typeof inputs?.hazardKey === 'string' ? inputs.hazardKey : '';
-    const lookupKey = (rawIssueKey || rawHazardKey).trim();
+    const rawIssueKey = typeof inputs?.issueKey === 'string' ? inputs.issueKey.trim() : '';
+    const rawHazardKey = typeof inputs?.hazardKey === 'string' ? inputs.hazardKey.trim() : '';
+    const lookupKey = rawIssueKey || rawHazardKey;
 
     if (!options?.suite && isForgeRuntime() && suite.datasetMode === 'LIVE' && suite.initialized !== false) {
       const targetPageIds = lookupKey
@@ -533,12 +554,16 @@ export class McpToolService {
         initialized,
         queriedKey: lookupKey,
         message: `No trace link found for key "${lookupKey}" in project "${suite.projectName}".`,
-        availableKeys: suite.traceLinks.map((l) => ({
-          hazardKey: l.hazard.key,
-          workKey: l.work.key,
-          specId: l.spec.id,
-          testKey: l.test.testKey,
-        })),
+        ...(options?.includeAvailableKeys !== false
+          ? {
+              availableKeys: suite.traceLinks.map((l) => ({
+                hazardKey: l.hazard.key,
+                workKey: l.work.key,
+                specId: l.spec.id,
+                testKey: l.test.testKey,
+              })),
+            }
+          : {}),
       };
     }
 
@@ -549,6 +574,8 @@ export class McpToolService {
       totalHazards: suite.totalHazards,
       verifiedPercentage: `${suite.verifiedPercentage}%`,
       releaseBlocked: suite.releaseBlocked,
+      ...(suite.syncIncomplete ? { syncIncomplete: true } : {}),
+      blockingReasons: suite.blockingReasons,
       traceLinks: suite.traceLinks.map((l) => ({
         id: l.id,
         hazardKey: l.hazard.key,
@@ -592,6 +619,7 @@ export class McpToolService {
     ) {
       suite = await LiveIngestionService.reconcileConfluenceSpecs(suite, {
         allowAppFallback: true,
+        failClosedOnBudget: true,
       });
     }
     const evalSuite = options?.unredactedSuite ?? suite;
@@ -621,9 +649,17 @@ export class McpToolService {
       };
     }
 
-    const prDiff = typeof inputs?.prDiff === 'string' ? inputs.prDiff : '';
-    const componentName = typeof inputs?.componentName === 'string' ? inputs.componentName : '';
-    const issueKey = typeof inputs?.issueKey === 'string' ? inputs.issueKey : '';
+    const rawPrDiff = typeof inputs?.prDiff === 'string' ? inputs.prDiff : '';
+    const prDiff =
+      rawPrDiff.length > MAX_ROVO_TEXT_SCAN_CHARS
+        ? rawPrDiff.slice(0, MAX_ROVO_TEXT_SCAN_CHARS)
+        : rawPrDiff;
+    const rawComponentName = typeof inputs?.componentName === 'string' ? inputs.componentName : '';
+    const componentName =
+      rawComponentName.length > MAX_ROVO_TEXT_SCAN_CHARS
+        ? rawComponentName.slice(0, MAX_ROVO_TEXT_SCAN_CHARS)
+        : rawComponentName;
+    const issueKey = typeof inputs?.issueKey === 'string' ? inputs.issueKey.slice(0, 64) : '';
     const fullText = `${prDiff} ${componentName} ${issueKey}`;
 
     // 1. Match explicit keys present across all canonical fields in the active suite
@@ -637,14 +673,18 @@ export class McpToolService {
       keyMatches.push(directIssueKey);
     }
 
-    // 2. Dynamic word-boundary token matching against real suite artifacts
-    let triggerKeys: string[] = keyMatches;
+    // 2. Dynamic word-boundary token matching against real suite artifacts (run alongside keyMatches when diff/component text exists)
+    let triggerKeys: string[] = [...keyMatches];
     let tokenMatchedLinks: TraceLink[] = [];
-    if (triggerKeys.length === 0) {
-      tokenMatchedLinks = findLinksMatchingTextTokens(fullText, suite.traceLinks);
+    const descriptiveText = `${prDiff} ${componentName}`.trim();
+    if (descriptiveText) {
+      tokenMatchedLinks = findLinksMatchingTextTokens(descriptiveText, suite.traceLinks);
       if (tokenMatchedLinks.length > 0) {
         triggerKeys = Array.from(
-          new Set(tokenMatchedLinks.map((l) => l.spec?.id || l.hazard.key).filter(Boolean))
+          new Set([
+            ...triggerKeys,
+            ...tokenMatchedLinks.map((l) => l.spec?.id || l.hazard.key).filter(Boolean),
+          ])
         );
       }
     }
@@ -703,6 +743,9 @@ export class McpToolService {
       : evalSuite.releaseBlocked;
 
     const canShip = !hasUnverifiedGaps;
+    const activeViolations = isTargeted
+      ? Array.from(new Set(traversedLinks.flatMap((l) => l.violations)))
+      : suite.blockingReasons;
 
     let guidance: string[];
     if (hasUnverifiedGaps) {
@@ -737,7 +780,13 @@ export class McpToolService {
       verifiedCoveragePercentage: `${suite.verifiedPercentage}%`,
       classCSummary: {
         totalClassC: suite.classCCount,
-        status: suite.releaseBlocked ? 'BLOCKED_BY_SAFETY_GATE' : 'CONFIGURED_CHECKS_PASSED',
+        status: isTargeted
+          ? canShip
+            ? 'CONFIGURED_CHECKS_PASSED'
+            : 'BLOCKED_BY_SAFETY_GATE'
+          : suite.releaseBlocked
+            ? 'BLOCKED_BY_SAFETY_GATE'
+            : 'CONFIGURED_CHECKS_PASSED',
       },
       signatureDriftDetected: suite.signatureDriftCount > 0,
       touchesSafetyCriticalCode: Boolean(isTargeted),
@@ -745,7 +794,7 @@ export class McpToolService {
         affectedHazards.length > 0
           ? affectedHazards
           : ['None (No matched safety-critical artifacts in change scope)'],
-      activeViolations: suite.blockingReasons,
+      activeViolations,
       remediationGuidance: guidance,
       graphBlastRadius: blastRadius
         ? {
@@ -888,8 +937,15 @@ export async function rovoActionHandler(
       if (isForgeRuntime()) {
         const extensionScope = extractRovoExtensionScope(ctx, payloadCtx);
         const requestedIssue = sanitizedInputs.issueKey?.trim().toUpperCase();
+        const requestedHazard = sanitizedInputs.hazardKey?.trim().toUpperCase();
+        const matchedHazardLink = requestedHazard
+          ? scopedAuth?.unredactedSuite.traceLinks.find(
+              (l) => l.hazard?.key?.trim().toUpperCase() === requestedHazard
+            )
+          : undefined;
         const targetProj =
-          extractProjectKeyFromJiraKey(requestedIssue) ||
+          extractJiraProjectKeyFromRawKey(requestedIssue, 'JIRA_ISSUE') ||
+          (matchedHazardLink ? extractPrimaryJiraProjectKeyFromLink(matchedHazardLink) : undefined) ||
           extensionScope.projectKey;
         const permRoute =
           requestedIssue && JIRA_ISSUE_KEY_RE.test(requestedIssue)
@@ -981,7 +1037,7 @@ export async function rovoActionHandler(
       const extensionType = String(ctx.extension?.type ?? payloadCtx?.extension?.type ?? '').toLowerCase();
       const cloudId = extensionType.startsWith('confluence')
         ? contextCloudId
-        : resolveConfluenceCloudId() ?? contextCloudId;
+        : resolveConfluenceCloudId();
       const res = await McpToolService.getHazardLineage(
         {
           issueKey: sanitizedInputs.issueKey,

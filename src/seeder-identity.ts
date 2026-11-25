@@ -1,7 +1,7 @@
 import api, { route } from '@forge/api';
 import { AuditLogService } from './audit-log';
 import { ComplianceEngine } from './compliance-engine';
-import { JIRA_ISSUE_KEY_RE, JIRA_PROJECT_KEY_RE } from './crypto-utils';
+import { isHttpOk, JIRA_ISSUE_KEY_RE, JIRA_PROJECT_KEY_RE, safeParseJson } from './crypto-utils';
 import { isForgeRuntime } from './runtime';
 import {
   AuthorizedUserIdentity,
@@ -67,7 +67,7 @@ function hasConfluenceEditorPermission(operations: Array<{ operation?: string; t
       isAdmin = true;
     } else if (
       (operation === 'create' || operation === 'update' || operation === 'delete') &&
-      (targetType === 'page' || targetType === 'space' || targetType === 'comment' || targetType === '')
+      (targetType === 'page' || targetType === 'space' || targetType === '')
     ) {
       canEdit = true;
     }
@@ -80,12 +80,12 @@ async function resolveJiraSignerIdentity(ctx: UserIdentityResolverContext): Prom
   if (myselfResp.status !== 200) {
     throw new Error(`Forbidden: Failed to verify Jira signatory identity (HTTP ${myselfResp.status}).`);
   }
-  const userData = (await myselfResp.json()) as {
+  const userData = (await safeParseJson<{
     accountId?: string;
     displayName?: string;
     emailAddress?: string;
     active?: boolean;
-  };
+  }>(myselfResp)) ?? {};
   if (!userData?.accountId || userData.active === false) {
     throw new Error('Forbidden: Authenticated Jira user account is inactive or missing accountId.');
   }
@@ -100,9 +100,9 @@ async function resolveJiraSignerIdentity(ctx: UserIdentityResolverContext): Prom
   if (permsResp.status !== 200) {
     throw new Error(`Forbidden: Unable to verify Jira permissions for signatory (HTTP ${permsResp.status}).`);
   }
-  const permsData = (await permsResp.json()) as {
+  const permsData = (await safeParseJson<{
     permissions?: Record<string, { havePermission?: boolean }>;
-  };
+  }>(permsResp)) ?? {};
   const canEdit = Boolean(permsData?.permissions?.EDIT_ISSUES?.havePermission);
   const isAdmin = Boolean(permsData?.permissions?.ADMINISTER_PROJECTS?.havePermission);
   if (!canEdit && !isAdmin) {
@@ -128,12 +128,12 @@ async function resolveConfluenceSignerIdentity(ctx: UserIdentityResolverContext)
   if (userResp.status !== 200) {
     throw new Error(`Forbidden: Failed to verify Confluence signatory identity (HTTP ${userResp.status}).`);
   }
-  const userData = (await userResp.json()) as {
+  const userData = (await safeParseJson<{
     accountId?: string;
     displayName?: string;
     publicName?: string;
     email?: string;
-  };
+  }>(userResp)) ?? {};
   if (!userData?.accountId) {
     throw new Error('Forbidden: Authenticated Confluence user response missing accountId.');
   }
@@ -145,9 +145,9 @@ async function resolveConfluenceSignerIdentity(ctx: UserIdentityResolverContext)
   if (spacesResp.status !== 200) {
     throw new Error(`Forbidden: Unable to inspect Confluence global space permissions (HTTP ${spacesResp.status}).`);
   }
-  const spacesJson = (await spacesResp.json()) as {
+  const spacesJson = (await safeParseJson<{
     results?: Array<{ id?: string; key?: string; type?: string }>;
-  };
+  }>(spacesResp)) ?? {};
   const globalSpaces = (spacesJson?.results || []).filter(
     (s) => s?.id && (!s.type || s.type.toLowerCase() === 'global') && (!ctx.spaceKey || s.key === ctx.spaceKey)
   );
@@ -159,9 +159,9 @@ async function resolveConfluenceSignerIdentity(ctx: UserIdentityResolverContext)
       .asUser()
       .requestConfluence(route`/wiki/api/v2/spaces/${space.id!}/operations`);
     if (opsResp.status !== 200) continue;
-    const opsJson = (await opsResp.json()) as {
+    const opsJson = (await safeParseJson<{
       operations?: Array<{ operation?: string; targetType?: string }>;
-    };
+    }>(opsResp)) ?? {};
     const perms = hasConfluenceEditorPermission(opsJson?.operations || []);
     if (perms.canEdit) {
       authorizedEditor = true;
@@ -300,10 +300,6 @@ interface JiraBrowsePermissionsPayload {
   permissions?: Record<string, JiraBrowsePermissionEntry | undefined>;
 }
 
-function isIdentityHttpOk(res: { ok?: boolean; status: number }): boolean {
-  return typeof res.ok === 'boolean' ? res.ok : res.status >= 200 && res.status < 300;
-}
-
 /**
  * Extracts a canonical Jira project key from an issue key or synthetic `HAZ-<PROJ>-<NUM>` /
  * `TEST-<PROJ>-<NUM>` identifier without treating synthetic `HAZ-<NUM>` or `TEST-<NUM>` keys as Jira projects.
@@ -312,25 +308,7 @@ export function extractJiraProjectKeyFromRawKey(
   rawKey?: unknown,
   source?: 'JIRA_ISSUE' | 'APP_MANAGED'
 ): string | undefined {
-  if (typeof rawKey !== 'string') return undefined;
-  const upper = rawKey.trim().toUpperCase();
-  if (!upper) return undefined;
-
-  if (upper.startsWith('HAZ-') || upper.startsWith('TEST-')) {
-    const stripped = upper.replace(/^(?:HAZ|TEST)-/i, '');
-    if (JIRA_ISSUE_KEY_RE.test(stripped)) {
-      return stripped.split('-')[0];
-    }
-    if (source === 'JIRA_ISSUE' && JIRA_ISSUE_KEY_RE.test(upper)) {
-      return upper.split('-')[0];
-    }
-    return undefined;
-  }
-
-  if (JIRA_ISSUE_KEY_RE.test(upper)) {
-    return upper.split('-')[0];
-  }
-  return undefined;
+  return normalizeJiraIssueCandidate(rawKey, source)?.split('-')[0];
 }
 
 function normalizeJiraIssueCandidate(
@@ -425,7 +403,7 @@ export async function checkJiraBrowsePermissionDetailed(target?: {
 
   try {
     const res = await api.asUser().requestJira(permRoute);
-    if (!isIdentityHttpOk(res)) {
+    if (!isHttpOk(res)) {
       return { httpOk: false, status: res.status, inactive: false, allowed: false };
     }
     const data = (await res.json().catch(() => ({}))) as JiraBrowsePermissionsPayload;
@@ -463,20 +441,22 @@ export async function canReadConfluencePageForCaller(pageId: string): Promise<bo
   if (!cleanId) return false;
   try {
     const res = await api.asUser().requestConfluence(route`/wiki/api/v2/pages/${cleanId}`);
-    return isIdentityHttpOk(res);
+    return isHttpOk(res);
   } catch {
     return false;
   }
 }
 
-function redactStringWithRestrictedLink(text: string, link: TraceLink): string {
+export function redactStringWithRestrictedLink(text: string, link: TraceLink): string {
   const placeholder = 'Restricted Confluence Specification';
   let out = text;
   const origTitle = (link.spec?.title || '').trim();
-  if (origTitle && out.includes(origTitle)) {
-    out = out.split(origTitle).join(placeholder);
+  if (origTitle) {
+    if (out.includes(origTitle)) {
+      out = out.split(origTitle).join(placeholder);
+    }
     const shortCode = origTitle.split(':')[0].trim();
-    if (/^[a-z]{2,10}-\d+$/i.test(shortCode) && out.includes(shortCode)) {
+    if (shortCode && out.includes(shortCode)) {
       out = out.split(shortCode).join(placeholder);
     }
   }
@@ -491,9 +471,9 @@ function redactStringWithRestrictedLink(text: string, link: TraceLink): string {
         out = out.split(cleanHash).join('[redacted]');
       }
       const prefix = cleanHash.slice(0, 8);
-      if (out.includes(prefix)) {
-        out = out.split(prefix).join('[redacted]');
-      }
+      const escapedPrefix = prefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const prefixRe = new RegExp(`${escapedPrefix}[a-f0-9]*`, 'gi');
+      out = out.replace(prefixRe, '[redacted]');
     }
   }
   return out;
@@ -556,6 +536,7 @@ export function redactBlastRadiusReport(
     ...report,
     triggerArtifact: {
       ...report.triggerArtifact,
+      key: scrub(report.triggerArtifact.key),
       title: scrub(report.triggerArtifact.title),
       deltaReason: scrub(report.triggerArtifact.deltaReason),
     },
@@ -573,6 +554,7 @@ export interface AuthorizeLiveSuiteOptions {
   extensionType?: string;
   projectKey?: string;
   checkConfluencePages?: boolean;
+  precheckedConfluencePages?: ReadonlyMap<string, boolean>;
 }
 
 export interface AuthorizedLiveSuiteResult {
@@ -596,7 +578,11 @@ export async function authorizeAndFilterLiveSuiteDetailed(
     suite.initialized === false ||
     suite.traceLinks.length === 0
   ) {
-    return { unredactedSuite: suite, outboundSuite: suite, restrictedPageIds: emptyRestricted };
+    const scopedEmpty =
+      options?.projectKey?.trim().toUpperCase() && suite.datasetMode === 'LIVE'
+        ? { ...suite, projectName: options.projectKey.trim().toUpperCase() }
+        : suite;
+    return { unredactedSuite: scopedEmpty, outboundSuite: scopedEmpty, restrictedPageIds: emptyRestricted };
   }
 
   const runtimeActive = isForgeRuntime();
@@ -607,7 +593,9 @@ export async function authorizeAndFilterLiveSuiteDetailed(
 
   const checkConfluence = runtimeActive && options?.checkConfluencePages !== false;
   const projectPermCache = new Map<string, boolean>();
-  const confluencePagePermCache = new Map<string, boolean>();
+  const confluencePagePermCache = new Map<string, boolean>(
+    options?.precheckedConfluencePages ?? []
+  );
   let globalBrowsePerm: boolean | undefined;
 
   const canBrowseProject = async (projectKey: string): Promise<boolean> => {
@@ -703,10 +691,7 @@ export async function authorizeAndFilterLiveSuiteDetailed(
     }
   }
 
-  const scopedName =
-    cleanScopeProject && !suite.projectName.toUpperCase().startsWith(cleanScopeProject)
-      ? `${cleanScopeProject} (${suite.projectName})`
-      : suite.projectName;
+  const scopedName = cleanScopeProject || suite.projectName;
 
   const hasProjectIncompleteList =
     Array.isArray(suite.incompleteProjectKeys) && suite.incompleteProjectKeys.length > 0;

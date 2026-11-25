@@ -995,4 +995,30 @@ describe('FE-01..FE-04 & FE-07: App races, bridge errors, confirm seed, and tran
     await user.click(screen.getByRole('button', { name: /matrix/i }));
     expect(screen.getByText(/Connect Your Live Jira & Confluence Artifacts/i)).toBeInTheDocument();
   });
+
+  it('passes skipReconcile: true on window focus refresh so tab switches avoid full Confluence sweeps', async () => {
+    const suite = makeSuite();
+    mockedInvokeResolver.mockImplementation(async (key) => {
+      if (key === 'getComplianceSuite') return suite;
+      if (key === 'queryGraphContext') return null;
+      return null;
+    });
+
+    const dateNowSpy = vi.spyOn(Date, 'now').mockReturnValue(20_000);
+    try {
+      cleanup();
+      render(<App />);
+      await screen.findByText('PumpGuard Live');
+
+      await act(async () => {
+        fireEvent(window, new Event('focus'));
+      });
+
+      await waitFor(() => {
+        expect(mockedInvokeResolver).toHaveBeenCalledWith('getComplianceSuite', { skipReconcile: true });
+      });
+    } finally {
+      dateNowSpy.mockRestore();
+    }
+  });
 });

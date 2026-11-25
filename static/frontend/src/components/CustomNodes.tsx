@@ -2,6 +2,7 @@ import React from 'react';
 import { Handle, Node, NodeProps, Position } from '@xyflow/react';
 import { ShieldAlert, FileText, AlertOctagon, Lock, Unlock, GitPullRequest, Activity } from 'lucide-react';
 import { IsoHazard, ConfluenceSpec, JiraWorkItem, VerificationTest, Part11Signature } from '../types';
+import { hasPriorSignature } from '../utils';
 
 export interface FlowLinkRef {
   id: string;
@@ -339,7 +340,9 @@ const TestNodeInner: React.FC<NodeProps<Node<FlowNodePayload<VerificationTest>>>
               background: isFailingOrUntested
                 ? 'var(--mt-danger-bold, #de350b)'
                 : 'var(--mt-success-bg, #e3fcef)',
-              color: isFailingOrUntested ? '#ffffff' : 'var(--mt-success-text, #006644)',
+              color: isFailingOrUntested
+                ? 'var(--ds-text-inverse, #ffffff)'
+                : 'var(--mt-success-text, #006644)',
               letterSpacing: '0.5px',
             }}
           >
@@ -400,9 +403,7 @@ const SignatureNodeInner: React.FC<NodeProps<Node<FlowNodePayload<Part11Signatur
         <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
           <SharedCountBadge count={data.linkRefs.length} />
           {(() => {
-            const hasPriorSignOff = Boolean(
-              sig.artifactSha256 || sig.signedBy || sig.signedAt || sig.invalidatedAt
-            );
+            const hasPriorSignOff = hasPriorSignature(sig);
             const badgeBg = sig.isValid
               ? 'var(--mt-success-bg, #e3fcef)'
               : hasPriorSignOff

@@ -118,7 +118,7 @@ export const TransitionModal: React.FC<TransitionModalProps> = ({ isOpen, onClos
                   textTransform: 'uppercase',
                 }}
               >
-                JIRA WORKFLOW VALIDATOR GATE — {evaluatedKey ? `ISSUE ${evaluatedKey}` : 'GLOBAL RELEASE GATE'}
+                COMPLIANCE RELEASE GATE — {evaluatedKey ? `ISSUE ${evaluatedKey}` : 'GLOBAL RELEASE GATE'}
               </div>
               <div
                 id={titleId}
@@ -135,16 +135,18 @@ export const TransitionModal: React.FC<TransitionModalProps> = ({ isOpen, onClos
                   ? 'Transition to "Done" Blocked'
                   : 'Transition to "Done" Authorized'}
               </div>
-              <div
-                style={{
-                  fontSize: 11,
-                  color: 'var(--mt-text-muted)',
-                  marginTop: 2,
-                  fontStyle: 'italic',
-                }}
-              >
-                Evaluated via shared workflowValidatorHandler policy; Jira workflow attachment requires site-admin.
-              </div>
+              {!hasEvalError && (
+                <div
+                  style={{
+                    fontSize: 11,
+                    color: 'var(--mt-text-muted)',
+                    marginTop: 2,
+                    fontStyle: 'italic',
+                  }}
+                >
+                  Evaluated via shared workflowValidatorHandler policy; Jira workflow attachment requires site-admin.
+                </div>
+              )}
             </div>
           </div>
           <button

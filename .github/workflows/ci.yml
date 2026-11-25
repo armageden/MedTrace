@@ -42,16 +42,13 @@ jobs:
       - name: Build backend and frontend bundles
         run: npm run build:all
 
-      - name: Run full test suites (backend, MCP, scripts, frontend)
-        run: npm run test:all
-
-      # Coverage ratchet: thresholds sit ~5 points below measured baselines
-      # (backend 88/77/87, frontend 77/70/76). Only tighten, never loosen.
-      - name: Enforce coverage thresholds (backend and frontend)
+      # Coverage ratchet runs all backend, MCP, script, and frontend suites while enforcing thresholds
+      # (thresholds sit ~5 points below measured baselines: backend 88/77/87, frontend 77/70/76).
+      - name: Run full test suites with coverage thresholds
         run: npm run test:coverage:all
 
-      - name: Check documentation links, anchors, and entry coverage
-        run: npm run docs:check
+      - name: Check documentation links, anchors, entry coverage, and listing readiness
+        run: node scripts/docs-check.mjs --strict-listing
 
       - name: Syntax check scripts and MCP stdio server
         run: |
@@ -90,12 +87,21 @@ jobs:
               { name: "GitHub Token", re: /\bgh[pousr]_[A-Za-z0-9]{36,}\b/ },
               { name: "Private Key Header", re: /-----BEGIN (?:RSA |EC |DSA |OPENSSH |)PRIVATE KEY-----/ },
               { name: "Hardcoded MedTrace hex secret", re: /\bMEDTRACE_(?:MCP|PART11)_SECRET\s*=\s*["\x27]?[a-f0-9]{32,}["\x27]?/i },
+              {
+                name: "Hardcoded MedTrace non-hex secret",
+                skipTests: true,
+                re: /\bMEDTRACE_(?:MCP|PART11)_SECRET\s*[:=]\s*["\x27]?(?!(?:your[-_]|example|placeholder|redacted|\$|\<))[A-Za-z0-9+/=_-]{24,}["\x27]?/i,
+              },
             ];
+            const binaryRe = /\.(png|jpe?g|gif|webp|ico|woff2?|ttf|eot|pdf|zip|tar|gz)$/i;
             const hits = [];
             for (const file of files) {
+              if (binaryRe.test(file)) continue;
               if (!fs.existsSync(file) || fs.statSync(file).isDirectory()) continue;
+              const isTestFile = /(?:^|\/)(?:tests|__tests__)\//.test(file);
               const content = fs.readFileSync(file, "utf8");
-              for (const { name, re } of secretPatterns) {
+              for (const { name, re, skipTests } of secretPatterns) {
+                if (skipTests && isTestFile) continue;
                 if (re.test(content)) hits.push({ file, pattern: name });
               }
             }
@@ -136,7 +142,7 @@ jobs:
 
   release-gate:
     name: IEC 62304 release gate
-    needs: release-gate-preflight
+    needs: [verify, release-gate-preflight]
     if: needs.release-gate-preflight.outputs.enabled == 'true'
     uses: ./.github/workflows/medtrace-release-gate.yml
     secrets: inherit

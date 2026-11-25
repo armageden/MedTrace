@@ -92,7 +92,7 @@ export const LiveOnboardingCard: React.FC<LiveOnboardingCardProps> = ({
               padding: '8px 14px',
               border: 'none',
               background: 'var(--mt-brand-bg, #0052cc)',
-              color: '#ffffff',
+              color: 'var(--ds-text-inverse, #ffffff)',
             }}
           >
             <RefreshCw size={14} aria-hidden="true" /> Sync Live Atlassian

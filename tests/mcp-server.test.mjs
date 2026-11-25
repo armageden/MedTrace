@@ -1108,4 +1108,46 @@ test.describe('MCP Server Stdio E2E with Authenticated HMAC/Nonce Webtrigger (Ta
       await srv.close();
     }
   });
+
+  test.it('loadLocalEnv warns on unreadable cwd .env without blocking and signedCloudRequest fails closed on 200 non-JSON', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'medtrace-env-warn-'));
+    const dirAsEnv = path.join(tmpDir, '.env');
+    fs.mkdirSync(dirAsEnv); // EISDIR when readFileSync is attempted
+
+    const stderrChunks = [];
+    const origWrite = process.stderr.write;
+    process.stderr.write = (chunk, ...rest) => {
+      stderrChunks.push(String(chunk));
+      return typeof rest[0] === 'function' ? rest[0]() : true;
+    };
+    try {
+      const loaded = mcpModule.loadLocalEnv({}, tmpDir);
+      assert.strictEqual(loaded === null || typeof loaded === 'string', true);
+      assert.match(stderrChunks.join(''), /Warning: failed to read/);
+    } finally {
+      process.stderr.write = origWrite;
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+
+    const htmlServer = http.createServer((_req, res) => {
+      res.writeHead(200, { 'Content-Type': 'text/html' });
+      res.end('<html><body>Bad Gateway Proxy</body></html>');
+    });
+    await new Promise((resolve) => htmlServer.listen(0, '127.0.0.1', resolve));
+    const port = htmlServer.address().port;
+    try {
+      const resp = await mcpModule.signedCloudRequest('GET', undefined, {
+        secret: 'test-mcp-secret',
+        webtriggerUrl: `http://127.0.0.1:${port}`,
+        allowInsecureLocalhost: true,
+        timeoutMs: 2000,
+      });
+      assert.strictEqual(resp.ok, false);
+      assert.strictEqual(resp.status, 200);
+      assert.strictEqual(resp.errorType, 'INVALID_RESPONSE');
+      assert.match(resp.error, /non-JSON response/);
+    } finally {
+      await new Promise((resolve) => htmlServer.close(resolve));
+    }
+  });
 });
