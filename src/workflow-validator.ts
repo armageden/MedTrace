@@ -32,7 +32,6 @@ export interface WorkflowValidatorPayload {
 const RELEASE_STATUS_NAME_RE = /^(done|closed|resolved|released|ready for release)$/i;
 const RELEASE_TRANSITION_NAME_RE =
   /^(done|mark(ed)?( as)? done|move to done|release|ready for release|complete(d)?|close(d)?|resolve(d)?)$/i;
-const statusDoneCache = new Map<string, boolean>();
 
 function isDoneStatusLike(status?: { name?: string; statusCategory?: { key?: string } } | null): boolean | undefined {
   if (!status || typeof status !== 'object') return undefined;
@@ -64,19 +63,19 @@ export function isReleaseTransitionPayload(payload?: WorkflowValidatorPayload | 
 async function resolveTransitionToDone(
   payload?: WorkflowValidatorPayload | null,
   issueKey?: string
-): Promise<boolean> {
+): Promise<boolean | undefined> {
   if (isReleaseTransitionPayload(payload)) {
     return true;
   }
   const t = payload?.transition;
   if (!t || typeof t !== 'object') {
-    return false;
+    return undefined;
   }
   if (t.to && typeof t.to === 'object' && isDoneStatusLike(t.to) === false) {
     return false;
   }
   if (!isForgeRuntime()) {
-    return false;
+    return undefined;
   }
 
   const rawToId =
@@ -87,10 +86,6 @@ async function resolveTransitionToDone(
         : '';
 
   if (rawToId) {
-    const cached = statusDoneCache.get(rawToId);
-    if (cached !== undefined) {
-      return cached;
-    }
     try {
       const resp = await api.asApp().requestJira(route`/rest/api/3/status/${rawToId}`);
       if (resp.status === 200) {
@@ -98,12 +93,13 @@ async function resolveTransitionToDone(
           name?: string;
           statusCategory?: { key?: string };
         } | null;
-        const isDone = isDoneStatusLike(statusData) === true;
-        statusDoneCache.set(rawToId, isDone);
-        return isDone;
+        const resolved = isDoneStatusLike(statusData);
+        if (resolved !== undefined) {
+          return resolved;
+        }
       }
     } catch {
-      return false;
+      // Unknown resolution remains conservative; a resolved non-Done status returns false below.
     }
   }
 
@@ -128,16 +124,16 @@ async function resolveTransitionToDone(
             const byStatus = isDoneStatusLike(matched.to);
             if (byStatus !== undefined) return byStatus;
             const mName = typeof matched.name === 'string' ? matched.name.trim().toLowerCase() : '';
-            if (mName) return RELEASE_TRANSITION_NAME_RE.test(mName);
+            if (mName && RELEASE_TRANSITION_NAME_RE.test(mName)) return true;
           }
         }
       } catch {
-        return false;
+        // Unknown resolution remains conservative; only a resolved non-Done target returns false.
       }
     }
   }
 
-  return false;
+  return undefined;
 }
 
 function normalizeIssueKey(payload?: WorkflowValidatorPayload | null): string | undefined {
@@ -250,8 +246,9 @@ export async function probeUnsyncedSafetyIssue(
  * `ComplianceEngine.evaluateIssueReleaseGate` (shared with the CI/CD `verify-release-gate` webtrigger):
  * - Fails closed when the suite is uninitialized (`suite.initialized === false` or 0 trace links).
  * - Evaluates the Global Release Gate (`issueKey = undefined`) when `issueKey` is omitted or empty/whitespace.
- * - Blocks tracked non-`VERIFIED` issues, blocks unsynced issues carrying safety labels or hazard issue types,
- *   and approves verified or everyday non-safety untracked issues on initialized suites.
+ * - Blocks tracked non-`VERIFIED` issues on release or unknown transitions, blocks unsynced issues carrying
+ *   safety labels or hazard issue types, and approves verified or everyday non-safety untracked issues on initialized suites.
+ * - Approves explicitly resolved non-release transitions so a mis-bound validator does not cage ordinary workflow movement.
  * - Fails closed (`result: false`) on any unexpected runtime or storage exception.
  *
  * Atlassian issue `ECO-624` reports a Jira Automation case but is marked Invalid and does not establish
@@ -271,6 +268,12 @@ export async function workflowValidatorHandler(
         transition: payload?.transition ?? null,
       })
     );
+
+    const transitionToDone = await resolveTransitionToDone(payload, issueKey);
+    if (transitionToDone === false) {
+      console.log(`[MedTrace WorkflowValidator] Non-release transition APPROVED (${issueKey || 'global'}).`);
+      return { result: true };
+    }
 
     let suite = await SeederService.getActiveComplianceSuite(
       issueKey ? { issueKeyFilter: issueKey } : undefined
@@ -296,11 +299,7 @@ export async function workflowValidatorHandler(
         });
       } else if (isMatchedInSuite(cleanIssue, suite)) {
         const targetPageIds = suite.traceLinks
-          .filter(
-            (l) =>
-              (l.work?.key || '').toUpperCase() === cleanIssue ||
-              (l.hazard?.key || '').toUpperCase() === cleanIssue
-          )
+          .filter((l) => ComplianceEngine.linkMatchesIssueKey(l, cleanIssue))
           .map((l) => l.spec?.pageId)
           .filter((p): p is string => typeof p === 'string' && p.trim().length > 0);
         if (targetPageIds.length > 0) {
@@ -314,14 +313,13 @@ export async function workflowValidatorHandler(
       }
     }
 
-    const transitionToDone = await resolveTransitionToDone(payload, issueKey);
     const outcome: TransitionResult = ComplianceEngine.evaluateIssueReleaseGate(
       issueKey,
       suite,
-      safetyProbe || transitionToDone
+      safetyProbe || transitionToDone === true
         ? {
             ...(safetyProbe ?? {}),
-            ...(transitionToDone ? { transitionToDone: true } : {}),
+            ...(transitionToDone === true ? { transitionToDone: true } : {}),
           }
         : undefined
     );

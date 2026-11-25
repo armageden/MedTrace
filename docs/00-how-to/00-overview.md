@@ -14,6 +14,7 @@ Diátaxis-style operational guides and runbooks providing copy-pasteable executi
 | [01-add-iso-hazard.md](./01-add-iso-hazard.md) | How to define a new ISO 14971 clinical hazard and attach IEC 62304 verification. |
 | [02-add-mcp-tool.md](./02-add-mcp-tool.md) | How to expose a new Model Context Protocol tool to local IDEs and Atlassian Rovo. |
 | [03-deploy-production.md](./03-deploy-production.md) | How to deploy MedTrace, provision encrypted secrets, enforce CI gates (`ECO-624`), and run pre-Marketplace listing checks. |
+| [04-live-judge-proof.md](./04-live-judge-proof.md) | How to create and demonstrate the real Jira/Confluence requirement-drift proof chain. |
 | [sync-docs-runbook.md](./sync-docs-runbook.md) | Mandatory post-task documentation synchronization checklist and repository file inventory. |
 
 ## Standard Verification Scripts ([package.json](../../package.json))

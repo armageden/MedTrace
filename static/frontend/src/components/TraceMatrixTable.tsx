@@ -9,6 +9,8 @@ interface TraceMatrixTableProps {
   onSelectTraceLink: (linkId: string) => void;
   onSyncLive?: () => void;
   onSeedDemo?: () => void;
+  onCreateLiveProof?: () => void;
+  canCreateLiveProof?: boolean;
   isBusy?: boolean;
 }
 
@@ -17,6 +19,8 @@ export const TraceMatrixTable: React.FC<TraceMatrixTableProps> = ({
   onSelectTraceLink,
   onSyncLive,
   onSeedDemo,
+  onCreateLiveProof,
+  canCreateLiveProof,
   isBusy = false,
 }) => {
   const [searchTerm, setSearchTerm] = useState('');
@@ -146,6 +150,8 @@ export const TraceMatrixTable: React.FC<TraceMatrixTableProps> = ({
                     <LiveOnboardingCard
                       onSyncLive={onSyncLive}
                       onSeedDemo={onSeedDemo}
+                      onCreateLiveProof={onCreateLiveProof}
+                      canCreateLiveProof={canCreateLiveProof}
                       isBusy={isBusy}
                     />
                   ) : (

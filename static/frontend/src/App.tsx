@@ -161,6 +161,7 @@ export const App: React.FC = () => {
   const [isConfirmSeedOpen, setIsConfirmSeedOpen] = useState(false);
   const [isSeeding, setIsSeeding] = useState(false);
   const [isSyncingLive, setIsSyncingLive] = useState(false);
+  const [isCreatingLiveProof, setIsCreatingLiveProof] = useState(false);
   const [isMutating, setIsMutating] = useState(false);
   const [isTestingTransition, setIsTestingTransition] = useState(false);
   const [transitionResult, setTransitionResult] = useState<TransitionResult | null>(null);
@@ -171,6 +172,7 @@ export const App: React.FC = () => {
   const summaryRef = useRef<ComplianceSummary | null>(null);
   const activeMutationRef = useRef(false);
   const initialInFlightRef = useRef(false);
+  const suitePollInFlightRef = useRef(false);
   const mutationEpochRef = useRef(0);
   const suiteRequestSeqRef = useRef(0);
   const activeTransitionRef = useRef(false);
@@ -196,7 +198,10 @@ export const App: React.FC = () => {
 
   const fetchAndApplySuite = useCallback(
     async (mode: 'initial' | 'poll' | 'focus') => {
-      if (mode !== 'initial' && (activeMutationRef.current || initialInFlightRef.current)) {
+      if (
+        mode !== 'initial' &&
+        (activeMutationRef.current || initialInFlightRef.current || suitePollInFlightRef.current)
+      ) {
         return;
       }
 
@@ -206,6 +211,8 @@ export const App: React.FC = () => {
         initialInFlightRef.current = true;
         pollPausedRef.current = false;
         setIsInitialLoading(true);
+      } else {
+        suitePollInFlightRef.current = true;
       }
 
       try {
@@ -265,14 +272,22 @@ export const App: React.FC = () => {
           return;
         }
         const detail = getErrorMessage(err, 'Forge bridge invoke failed');
-        if (
-          summaryRef.current === null ||
-          /auth|consent|401|403|token|session|expired|unauthor/i.test(detail)
-        ) {
+        const isAuthLike = /auth|consent|401|403|token|session|expired|unauthor/i.test(detail);
+        if (summaryRef.current === null || isAuthLike) {
           pollPausedRef.current = true;
         }
         if (mode === 'poll') {
-          // Silent background poll preserves current verified state and any active error notices
+          if (isAuthLike && summaryRef.current !== null) {
+            setNotice((prev) => {
+              if (prev && prev.source !== 'load') return prev;
+              return {
+                kind: 'warning',
+                source: 'load',
+                message: `Live refresh paused (${detail}); showing last verified compliance state.`,
+                retryable: true,
+              };
+            });
+          }
           return;
         }
         if (summaryRef.current !== null) {
@@ -295,6 +310,8 @@ export const App: React.FC = () => {
           if (reqSeq === suiteRequestSeqRef.current) {
             setIsInitialLoading(false);
           }
+        } else {
+          suitePollInFlightRef.current = false;
         }
       }
     },
@@ -512,6 +529,42 @@ export const App: React.FC = () => {
       },
       formatError: (detail) =>
         `Live Atlassian sync failed (${detail}). Existing state was NOT changed.`,
+    });
+
+  const handleCreateLiveProof = async (): Promise<boolean> =>
+    runSummaryMutation({
+      setBusy: setIsCreatingLiveProof,
+      actionLabel: 'Live proof chain creation',
+      noticeSource: 'sync',
+      invoke: () =>
+        invokeResolver('createLiveProofScenario', {
+          ...(panelContext.projectKey ? { projectKey: panelContext.projectKey } : {}),
+          ...(panelContext.spaceId ? { spaceId: panelContext.spaceId } : {}),
+        }),
+      onSuccess: (raw, nextSummary) => {
+        if (!isPlainRecord(raw)) return;
+        const createdWorkKey = typeof raw.workIssueKey === 'string' ? raw.workIssueKey.trim().toUpperCase() : '';
+        const createdLink = createdWorkKey
+          ? nextSummary.traceLinks.find((link) => link.work.key.trim().toUpperCase() === createdWorkKey)
+          : undefined;
+        if (createdLink) setSelectedLinkId(createdLink.id);
+        const hazardIssueKey = typeof raw.hazardIssueKey === 'string' ? raw.hazardIssueKey : 'unknown hazard';
+        const workIssueKey = typeof raw.workIssueKey === 'string' ? raw.workIssueKey : 'unknown work item';
+        const testIssueKey = typeof raw.testIssueKey === 'string' ? raw.testIssueKey : 'unknown test';
+        const pageId = typeof raw.pageId === 'string' ? raw.pageId : 'unknown page';
+        const warnings = Array.isArray(raw.warnings)
+          ? raw.warnings.filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
+          : [];
+        setNotice({
+          kind: warnings.length > 0 ? 'warning' : 'success',
+          source: 'sync',
+          message: `Created live proof chain: Confluence page ${pageId}, hazard ${hazardIssueKey}, work ${workIssueKey}, and verification test ${testIssueKey}. Next: record HTTPS test evidence and sign off, then edit the requirement from 5.0 to 5.5 mL/hr.${
+            warnings.length > 0 ? ` ${warnings.join(' ')}` : ''
+          }`,
+        });
+      },
+      formatError: (detail) =>
+        `Live proof chain creation failed (${detail}). Any artifacts listed in the error were real Atlassian records and were not deleted automatically.`,
     });
 
   const handleAnalyzeBlastRadius = async () => {
@@ -761,7 +814,7 @@ export const App: React.FC = () => {
       formatError: (detail) => `Failed to create re-verification Jira task (${detail}).`,
     });
 
-  const isAnyMutationBusy = isSeeding || isSyncingLive || isMutating;
+  const isAnyMutationBusy = isSeeding || isSyncingLive || isCreatingLiveProof || isMutating;
   const isBusy = isAnyMutationBusy || isAnalyzingBlastRadius;
   const selectedLink = summary
     ? summary.traceLinks.find((l) => l.id === selectedLinkId) || null
@@ -896,6 +949,7 @@ export const App: React.FC = () => {
               <button
                 type="button"
                 onClick={() => {
+                  pollPausedRef.current = false;
                   void fetchAndApplySuite('focus');
                 }}
                 disabled={isAnyMutationBusy}
@@ -933,6 +987,10 @@ export const App: React.FC = () => {
               void handleSyncLive();
             }}
             onSeedDemo={handleSeed}
+            onCreateLiveProof={() => {
+              void handleCreateLiveProof();
+            }}
+            canCreateLiveProof={Boolean(panelContext.projectKey)}
             isBusy={isBusy}
           />
         ) : (
@@ -943,6 +1001,10 @@ export const App: React.FC = () => {
               void handleSyncLive();
             }}
             onSeedDemo={handleSeed}
+            onCreateLiveProof={() => {
+              void handleCreateLiveProof();
+            }}
+            canCreateLiveProof={Boolean(panelContext.projectKey)}
             isBusy={isBusy}
           />
         )}
@@ -960,7 +1022,7 @@ export const App: React.FC = () => {
         onRemediateDemo={handleRemediateDemo}
         onCreateReverificationTask={handleCreateReverificationTask}
         isMutating={isMutating}
-        isGlobalBusy={isSeeding || isSyncingLive || isAnalyzingBlastRadius}
+        isGlobalBusy={isSeeding || isSyncingLive || isCreatingLiveProof || isAnalyzingBlastRadius}
       />
 
       <ConfirmSeedModal

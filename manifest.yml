@@ -167,7 +167,9 @@ permissions:
     - read:graph:page:confluence
     - read:graph:user:atlassian
     # Granular Confluence REST v2 + current-user + avi:confluence:updated:page trigger scopes (required for /wiki/api/v2/pages, /spaces, /*/operations, and /wiki/rest/api/user/current)
+    # write:page:confluence is used only to create the opt-in live proof SRS page; MedTrace does not modify existing pages.
     - read:page:confluence
+    - write:page:confluence
     - read:space:confluence
     - read:user:confluence
     - read:content.metadata:confluence

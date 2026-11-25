@@ -1,22 +1,26 @@
 import React from 'react';
-import { RefreshCw, ShieldCheck, Sparkles } from 'lucide-react';
+import { RefreshCw, ShieldCheck, Sparkles, Zap } from 'lucide-react';
 
 export interface LiveOnboardingCardProps {
   onSyncLive?: () => void;
   onSeedDemo?: () => void;
+  onCreateLiveProof?: () => void;
+  canCreateLiveProof?: boolean;
   isBusy?: boolean;
 }
 
 const ONBOARDING_STEPS = [
-  'Label safety-critical Jira issues with class-a, class-b, or class-c (or create Jira issue types Hazard / Test).',
-  'Link each Jira implementation issue to its Confluence SRS requirement page (or reference SRS-<pageId>) and native Hazard / Test issues.',
-  'Click Sync Live Atlassian to ingest active traceability links and establish baseline Confluence SHA-256 hashes.',
-  'Record HTTPS test verification evidence and execute 21 CFR Part 11 electronic attestation sign-off to unlock release gates.',
+  'Create Live Proof Chain creates a real Confluence SRS page plus linked native Jira hazard, implementation, and verification-test issues.',
+  'Record HTTPS test verification evidence and execute 21 CFR Part 11 electronic attestation sign-off to establish the compliant baseline.',
+  'Edit the Confluence requirement from 5.0 to 5.5 mL/hr to prove hash drift, stale approval invalidation, impact analysis, and release blocking.',
+  'Manual path: label safety-critical Jira issues with class-a, class-b, or class-c, link implementation work to SRS pages and Hazard / Test issues, then click Sync Live Atlassian.',
 ];
 
 export const LiveOnboardingCard: React.FC<LiveOnboardingCardProps> = ({
   onSyncLive,
   onSeedDemo,
+  onCreateLiveProof,
+  canCreateLiveProof = true,
   isBusy = false,
 }) => (
   <div
@@ -80,8 +84,29 @@ export const LiveOnboardingCard: React.FC<LiveOnboardingCardProps> = ({
       ))}
     </ol>
 
-    {(onSyncLive || onSeedDemo) && (
+    {(onSyncLive || onSeedDemo || onCreateLiveProof) && (
       <div style={{ marginTop: 18, display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+        {onCreateLiveProof && (
+          <button
+            type="button"
+            disabled={isBusy || !canCreateLiveProof}
+            onClick={onCreateLiveProof}
+            className="mt-btn"
+            title={
+              canCreateLiveProof
+                ? 'Creates one real SRS page and three linked native Jira issues. Evidence and approval remain explicit user actions.'
+                : 'Open MedTrace from a Jira project page to create the live proof chain.'
+            }
+            style={{
+              padding: '8px 14px',
+              border: 'none',
+              background: 'var(--mt-success-bg, #006644)',
+              color: 'var(--ds-text-inverse, #ffffff)',
+            }}
+          >
+            <Zap size={14} aria-hidden="true" /> Create Live Proof Chain
+          </button>
+        )}
         {onSyncLive && (
           <button
             type="button"

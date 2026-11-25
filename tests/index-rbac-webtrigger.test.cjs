@@ -281,6 +281,8 @@ const ALL_RESOLVERS = [
   'analyzeBlastRadius',
   'getAuditLog',
   'verifyAuditChain',
+  'createReverificationTask',
+  'createLiveProofScenario',
 ];
 
 const READER_RESOLVERS = [
@@ -299,6 +301,8 @@ const OPERATOR_RESOLVERS = [
   'recordTestResult',
   'signOffPart11',
   'bindIssueToHazard',
+  'createReverificationTask',
+  'createLiveProofScenario',
 ];
 
 test.describe('SEC-01 & SEC-03: Resolver RBAC, Confused-Deputy, Part 11 & Webtrigger Security', () => {
@@ -325,9 +329,9 @@ test.describe('SEC-01 & SEC-03: Resolver RBAC, Confused-Deputy, Part 11 & Webtri
   });
 
   // =========================================================================
-  // 1. Unauthenticated access rejected on all 12 resolvers
+  // 1. Unauthenticated access rejected on all 14 resolvers
   // =========================================================================
-  test.it('rejects missing or blank accountId across all 12 resolvers before calling Atlassian APIs', async () => {
+  test.it('rejects missing or blank accountId across all 14 resolvers before calling Atlassian APIs', async () => {
     let apiCalls = 0;
     await withForgeMocks(
       {
@@ -363,7 +367,7 @@ test.describe('SEC-01 & SEC-03: Resolver RBAC, Confused-Deputy, Part 11 & Webtri
   // =========================================================================
   // 2. Confluence RBAC (Reader vs Operator + Personal-Space Trap)
   // =========================================================================
-  test.it('Confluence read-only viewer (even with personal-space write) passes permitted reads and fails all 6 mutators', async () => {
+  test.it('Confluence read-only viewer (even with personal-space write) passes permitted reads and fails all 8 mutators', async () => {
     await withForgeMocks(
       {
         requestConfluence: async (url) => {
@@ -471,7 +475,7 @@ test.describe('SEC-01 & SEC-03: Resolver RBAC, Confused-Deputy, Part 11 & Webtri
         assert.strictEqual(simTrans.evaluatedIssueKey, undefined);
         assert.ok(READER_RESOLVERS.includes('simulateTransition'));
 
-        // Confluence viewer MUST fail all 6 operator mutators despite personal space admin rights
+        // Confluence viewer MUST fail all 8 operator mutators despite personal space admin rights
         const payloads = {
           seedDemoSuite: {},
           syncLiveSuite: {},
@@ -485,6 +489,8 @@ test.describe('SEC-01 & SEC-03: Resolver RBAC, Confused-Deputy, Part 11 & Webtri
             attestationPhrase: PART11_ATTESTATION_PHRASE,
           },
           bindIssueToHazard: { hazardKey: 'HAZ-101', issueKey: 'MED-200' },
+          createReverificationTask: { issueKey: 'MED-200' },
+          createLiveProofScenario: { projectKey: 'MED' },
         };
         for (const fnKey of OPERATOR_RESOLVERS) {
           await assert.rejects(
@@ -590,7 +596,7 @@ test.describe('SEC-01 & SEC-03: Resolver RBAC, Confused-Deputy, Part 11 & Webtri
   // =========================================================================
   // 3. Jira RBAC, Cross-Project / JQL Confused-Deputy & callerMode USER
   // =========================================================================
-  test.it('Jira viewer passes reads and fails all 6 mutators; myself mismatch rejected', async () => {
+  test.it('Jira viewer passes reads and fails all 8 mutators; myself mismatch rejected', async () => {
     await withForgeMocks(
       {
         requestJira: async (url) => {
@@ -622,7 +628,7 @@ test.describe('SEC-01 & SEC-03: Resolver RBAC, Confused-Deputy, Part 11 & Webtri
         );
         assert.ok(suite.totalHazards >= 1);
 
-        // All 6 operators fail
+        // All 8 operators fail
         for (const fnKey of OPERATOR_RESOLVERS) {
           await assert.rejects(
             () =>

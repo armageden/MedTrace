@@ -14,6 +14,7 @@ import {
   JiraIssueUpdatedResult,
 } from './ingestion';
 import { AuditLogService, MAX_AUDIT_LOG_PAGE_LIMIT } from './audit-log';
+import { LiveProofScenarioService } from './live-proof-scenario';
 import { TeamworkGraphService } from './teamwork-graph';
 import { rovoActionHandler } from './mcp-server';
 import { workflowValidatorHandler } from './workflow-validator';
@@ -279,6 +280,40 @@ defineTypedResolver('syncLiveSuite', async (req) => {
     ...syncResult,
     warnings: filteredWarnings,
     summary: filteredSummary,
+  };
+});
+
+defineTypedResolver('createLiveProofScenario', async (req) => {
+  const rawProjectKey =
+    typeof req.payload?.projectKey === 'string' && req.payload.projectKey.trim().length > 0
+      ? req.payload.projectKey.trim().toUpperCase()
+      : undefined;
+  const rawSpaceId =
+    typeof req.payload?.spaceId === 'string' && req.payload.spaceId.trim().length > 0
+      ? req.payload.spaceId.trim()
+      : undefined;
+  const caller = await assertAuthorizedOperator(req, {
+    projectKey: rawProjectKey,
+    spaceId: rawSpaceId,
+  });
+  const projectKey = rawProjectKey || caller.projectKey;
+  if (!projectKey) {
+    throw new Error('Bad Request: projectKey is required when the current extension context has no Jira project.');
+  }
+  if (isForgeRuntime() && caller.extensionType.startsWith('confluence:')) {
+    await verifyJiraIdentity(caller.accountId);
+    await assertJiraOperatorPermissions(projectKey);
+  }
+
+  const result = await LiveProofScenarioService.createScenario({
+    projectKey,
+    ...(rawSpaceId || caller.spaceId ? { spaceId: rawSpaceId || caller.spaceId } : {}),
+    actorAccountId: caller.accountId,
+  });
+
+  return {
+    ...result,
+    summary: await filterLiveSuiteForCaller(caller, result.summary),
   };
 });
 

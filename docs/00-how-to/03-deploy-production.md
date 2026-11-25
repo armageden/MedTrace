@@ -24,10 +24,11 @@ npm run build:all
 npm run test:all
 npm run docs:check
 npm run lint:manifest
-forge lint
+forge lint --approve MAJOR_VERSION_RULE
 ```
 
 - `npm run lint:manifest` invokes `scripts/validate-manifest.mjs`, running offline `@forge/manifest` validations (`FULL`, `PRODUCT_TRIGGER`, `AGENT_PRODUCT_CONTEXT`), checking all compiled handler exports under `dist/index.js`, and blocking remote `http://` or `https://` UI icon URLs.
+- Plain `forge lint` reports `MAJOR_VERSION_RULE` approval because adding `write:page:confluence` intentionally changes installation consent (`0` errors / `0` warnings / `1` approval). Once that scope increase is reviewed and intentional, use `forge lint --approve MAJOR_VERSION_RULE`; it passes with `No issues found.`
 
 ## 2. Configure Required Encrypted Secrets
 
@@ -57,7 +58,9 @@ forge install -e production --site <your-site>.atlassian.net --product jira
 forge install -e production --site <your-site>.atlassian.net --product confluence
 ```
 
-When updating scopes (including `read:graph:page:confluence` and `read:graph:user:atlassian` for Teamwork Graph `confluencePageOwners`) or manifest modules on an existing installation, pass `--upgrade` to `forge install` for both `--product jira` and `--product confluence`. Because Forge partitions `@forge/kvs` storage per installed product/context and Atlassian-hosted `rovo:mcp` exposure is enabled per product in Connected apps, ensure live sync is initialized on the product partition you expose via `rovo:mcp`.
+When updating scopes (including `read:graph:page:confluence` and `read:graph:user:atlassian` for Teamwork Graph `confluencePageOwners`, or `write:page:confluence` for the explicit live proof SRS page) or manifest modules on an existing installation, pass `--upgrade` to `forge install` for both `--product jira` and `--product confluence`; added write scopes require user/admin major-version consent before the corresponding feature can execute. Because Forge partitions `@forge/kvs` storage per installed product/context and Atlassian-hosted `rovo:mcp` exposure is enabled per product in Connected apps, ensure live sync is initialized on the product partition you expose via `rovo:mcp`.
+
+Do not add future `app.rovo` metadata until the installed `@forge/manifest` schema accepts it; `@forge/manifest` `13.9.0` rejects unknown `app.rovo` properties. Follow [../03-mcp-integration/hosted-mcp-verification.md](../03-mcp-integration/hosted-mcp-verification.md) before changing that metadata.
 
 ## 4. Bind the Jira Workflow Validator
 
@@ -66,7 +69,7 @@ To enforce IEC 62304 checks on interactive Jira issue transitions:
 1. Open **Jira Project Settings -> Workflows** and edit the target release workflow.
 2. Select the release transition (for example, `In Progress -> Done`, `Under Review -> Done`, or `Ready for Release`).
 3. Add a **Validator** and choose **MedTrace IEC 62304 Safety Gate** (`medtrace-safety-validator` in [manifest.yml](../../manifest.yml), backed by `src/workflow-validator.ts`).
-4. Publish the workflow. Transitions on safety-tracked issues fail closed when the `LIVE` suite is uninitialized, when any matching trace link fails compliance evaluation (`requireTestEvidence: true` in `LIVE` mode), or when an unsynced issue carries a safety label or Hazard issue type (`probeUnsyncedSafetyIssue`).
+4. Publish the workflow. Release or unknown-target transitions on safety-tracked issues fail closed when the `LIVE` suite is uninitialized, when any matching trace link fails compliance evaluation (`requireTestEvidence: true` in `LIVE` mode), or when an unsynced issue carries a safety label or Hazard issue type (`probeUnsyncedSafetyIssue`). Explicitly resolved non-release transitions pass so accidental binding to ordinary movement does not trap the workflow; bind the validator only to release transitions regardless.
 
 > **Validator boundary:** Atlassian issue [`ECO-624`](https://jira.atlassian.com/browse/ECO-624) reports an Automation case but is marked Invalid and does not establish direct REST API behavior. The repository's CI calls the release-gate workflow on pull requests and pushes to main when its secrets are configured. Validate deployment-specific automation paths on your site.
 
@@ -114,8 +117,9 @@ Key flags and behavior in `scripts/rotate-mcp-secret.sh`:
 
 1. Open **MedTrace IEC 62304** in Jira (`jira:projectPage`, **Apps -> MedTrace IEC 62304**) or Confluence (`confluence:globalPage`, `medtrace-compliance` route).
 2. Fresh `LIVE` installations start empty (`initialized: false`), keeping release gates fail-closed until live compliance artifacts are synced.
-3. Click **Sync Live Atlassian** to invoke `syncLiveSuite` (`LiveIngestionService.syncFromAtlassian`) with `LIVE` dataset mode.
-4. Inspect the hash-chained ledger in **Audit Log** (`getAuditLog` / `verifyAuditChain`) and confirm `verify-release-gate` passes once safety trace links carry `PASSED` evidence and valid `HMAC-SHA256-SEAL-V1` Part 11 signatures.
+3. For the judge/evaluation golden path, open the Jira project page and click **Create Live Proof Chain** to invoke `createLiveProofScenario`; it creates real native artifacts without fabricating test evidence or approvals. Use [04-live-judge-proof.md](./04-live-judge-proof.md) for the complete proof sequence.
+4. For existing artifacts, click **Sync Live Atlassian** to invoke `syncLiveSuite` (`LiveIngestionService.syncFromAtlassian`) with `LIVE` dataset mode.
+5. Inspect the hash-chained ledger in **Audit Log** (`getAuditLog` / `verifyAuditChain`) and confirm `verify-release-gate` passes once safety trace links carry `PASSED` evidence and valid `HMAC-SHA256-SEAL-V1` Part 11 signatures.
 
 ## 9. Pre-Marketplace Listing Gate Checklist
 

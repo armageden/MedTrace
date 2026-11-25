@@ -11,6 +11,7 @@ The `rovo:mcp` module exposes the Rovo actions below to remote MCP clients throu
 ## Files
 
 - [live-sync.md](./live-sync.md) — MCP stdio server (`mcp-server/index.mjs` v1.1.0), Rovo actions (`src/mcp-server.ts`), HMAC-SHA256 webtrigger transport (`src/index.ts`), SHA-256 nonce replay store (`src/nonce-store.ts`), tool input/error contracts, and IDE client setup.
+- [hosted-mcp-verification.md](./hosted-mcp-verification.md) — Judge-grade external hosted `rovo:mcp` OAuth/tool verification workflow, product-partition caveats, and future `app.rovo` manifest compatibility guardrails.
 - [mcp-server/README.md](../../mcp-server/README.md) — Standalone quickstart for running the local MCP stdio bridge.
 
 ## Tool & Action Surface

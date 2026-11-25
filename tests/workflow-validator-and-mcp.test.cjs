@@ -1490,7 +1490,7 @@ test.describe('McpToolService & rovoActionHandler Integration Tests', () => {
       assert.strictEqual(unclassRes.result, false);
       assert.match(unclassRes.errorMessage || '', /Classification Gap/i);
 
-      // 5. Other non-release transitions retain existing blocking behavior on non-Done work items
+      // 5. Explicit non-release transitions pass instead of trapping ordinary workflow movement
       const nonReleaseRes = await workflowValidatorHandler({
         issue: { key: 'MED-REV-1' },
         transition: {
@@ -1499,8 +1499,8 @@ test.describe('McpToolService & rovoActionHandler Integration Tests', () => {
           to: { name: 'In Progress', statusCategory: { key: 'indeterminate' } },
         },
       });
-      assert.strictEqual(nonReleaseRes.result, false);
-      assert.match(nonReleaseRes.errorMessage || '', /must be "Done"/i);
+      assert.strictEqual(nonReleaseRes.result, true);
+      assert.strictEqual(nonReleaseRes.errorMessage, undefined);
 
       // 6. ID-only Forge workflowValidator payload ({ transition: { from: { id }, to: { id } } }) resolves via /rest/api/3/status/{id}
       await withForgeMocks(
@@ -1537,7 +1537,7 @@ test.describe('McpToolService & rovoActionHandler Integration Tests', () => {
             issue: { key: 'MED-REV-1' },
             transition: { from: { id: '10032' }, to: { id: '3' } },
           });
-          assert.strictEqual(idNonDoneRes.result, false);
+          assert.strictEqual(idNonDoneRes.result, true);
         }
       );
 
@@ -1728,6 +1728,12 @@ test.describe('McpToolService & rovoActionHandler Integration Tests', () => {
     const prevSecret = process.env.MEDTRACE_PART11_SECRET;
     process.env.MEDTRACE_PART11_SECRET = 'wf-testkey-secret-001';
     const origGetActive = SeederService.getActiveComplianceSuite;
+    const origReconcile = LiveIngestionService.reconcileConfluenceSpecs;
+    const reconcileOptions = [];
+    LiveIngestionService.reconcileConfluenceSpecs = async (suite, options) => {
+      reconcileOptions.push(options);
+      return suite;
+    };
     try {
       const specHash = 'c'.repeat(64);
       const signedAt = '2026-11-20T12:00:00Z';
@@ -1859,10 +1865,15 @@ test.describe('McpToolService & rovoActionHandler Integration Tests', () => {
           const passedRes = await workflowValidatorHandler({ issue: { key: 'MED-12' } });
           assert.strictEqual(passedRes.result, true);
           assert.strictEqual(passedRes.errorMessage, undefined);
+          assert.ok(
+            reconcileOptions.some((options) => Array.isArray(options?.targetPageIds) && options.targetPageIds.includes('7712')),
+            'test-key transitions must reconcile the linked Confluence spec page'
+          );
         }
       );
     } finally {
       SeederService.getActiveComplianceSuite = origGetActive;
+      LiveIngestionService.reconcileConfluenceSpecs = origReconcile;
       if (prevSecret === undefined) delete process.env.MEDTRACE_PART11_SECRET;
       else process.env.MEDTRACE_PART11_SECRET = prevSecret;
     }
@@ -1972,11 +1983,19 @@ test.describe('McpToolService & rovoActionHandler Integration Tests', () => {
                       name: 'Release Done',
                       to: { id: '10002', name: 'Done', statusCategory: { key: 'done', name: 'Done' } },
                     },
+                    {
+                      id: '32',
+                      name: 'Deploy',
+                      to: { id: '10003' },
+                    },
                   ],
                 });
               }
               if (url === '/rest/api/3/status/500') {
                 return makeJsonResponse(500, { errorMessages: ['upstream error'] });
+              }
+              if (url === '/rest/api/3/status/600') {
+                return makeJsonResponse(200, { id: '600' });
               }
               return makeJsonResponse(404, {});
             },
@@ -2000,6 +2019,18 @@ test.describe('McpToolService & rovoActionHandler Integration Tests', () => {
             transition: { to: { id: '500' } },
           });
           assert.strictEqual(failClosedOn500.result, false);
+
+          const malformedStatusStaysUnknown = await workflowValidatorHandler({
+            issue: { key: 'MED-42' },
+            transition: { to: { id: '600' } },
+          });
+          assert.strictEqual(malformedStatusStaysUnknown.result, false);
+
+          const unresolvedNamedTransitionStaysUnknown = await workflowValidatorHandler({
+            issue: { key: 'MED-42' },
+            transition: { id: '32' },
+          });
+          assert.strictEqual(unresolvedNamedTransitionStaysUnknown.result, false);
         }
       );
     } finally {

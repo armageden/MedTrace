@@ -6,7 +6,7 @@ The bridge does not intentionally persist compliance state locally. Tool request
 
 ## Atlassian-hosted MCP (`rovo:mcp`) — recommended
 
-The primary MCP integration is Atlassian-hosted: the `rovo:mcp` module in `manifest.yml` exposes the app's Rovo actions (`get-hazard-lineage-action`, `verify-iec-compliance-action`) to any remote MCP client — no local bridge required.
+The primary MCP integration is Atlassian-hosted: the `rovo:mcp` module in `manifest.yml` exposes the app's Rovo actions (`get-hazard-lineage-action`, `verify-iec-compliance-action`, `create-reverification-task-action`) to any remote MCP client — no local bridge required.
 
 - **Endpoint:** `https://mcp.atlassian.com/forge/<appId>` — for this app, `https://mcp.atlassian.com/forge/5e49c10e-696f-4984-9d00-4a47d0a5dd99` (the `appId` is the UUID after `ari:cloud:ecosystem::app/` in `manifest.yml`).
 - **Admin enablement:** external MCP exposure is **disabled by default**. A site or org admin enables it per app installation: Atlassian Administration → Apps → Sites → site → Connected apps → MedTrace → turn on tools.

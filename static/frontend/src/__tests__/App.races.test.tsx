@@ -283,6 +283,100 @@ describe('FE-01..FE-04 & FE-07: App races, bridge errors, confirm seed, and tran
     expect(screen.queryByText('SIGNATURE REVOKED')).not.toBeInTheDocument();
   });
 
+  it('does not overlap slow background suite polls', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const suite = makeSuite();
+    const slowPoll = createDeferred<ComplianceSummary>();
+    let suiteCalls = 0;
+
+    mockedInvokeResolver.mockImplementation(async (key) => {
+      if (key === 'getComplianceSuite') {
+        suiteCalls += 1;
+        if (suiteCalls === 2) return slowPoll.promise;
+        return suite;
+      }
+      if (key === 'queryGraphContext') return null;
+      return null;
+    });
+
+    try {
+      cleanup();
+      render(<App />);
+      await screen.findByText('PumpGuard Live');
+      expect(suiteCalls).toBe(1);
+
+      await act(async () => {
+        vi.advanceTimersByTime(30000);
+      });
+      expect(suiteCalls).toBe(2);
+
+      await act(async () => {
+        vi.advanceTimersByTime(30000);
+      });
+      expect(suiteCalls).toBe(2);
+
+      await act(async () => {
+        slowPoll.resolve(suite);
+        await slowPoll.promise;
+      });
+      await act(async () => {
+        vi.advanceTimersByTime(30000);
+      });
+      expect(suiteCalls).toBe(3);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('surfaces auth-paused background polling once and resumes it from Refresh Now', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    const suite = makeSuite();
+    let suiteCalls = 0;
+    let failAuth = true;
+
+    mockedInvokeResolver.mockImplementation(async (key) => {
+      if (key === 'getComplianceSuite') {
+        suiteCalls += 1;
+        if (failAuth && suiteCalls > 1) {
+          throw new Error('401 authentication expired');
+        }
+        return suite;
+      }
+      if (key === 'queryGraphContext') return null;
+      return null;
+    });
+
+    try {
+      cleanup();
+      render(<App />);
+      await screen.findByText('PumpGuard Live');
+      expect(suiteCalls).toBe(1);
+
+      await act(async () => {
+        vi.advanceTimersByTime(30000);
+      });
+      expect(await screen.findByRole('status')).toHaveTextContent(/Live refresh paused/i);
+      expect(suiteCalls).toBe(2);
+
+      await act(async () => {
+        vi.advanceTimersByTime(30000);
+      });
+      expect(suiteCalls).toBe(2);
+
+      failAuth = false;
+      await user.click(screen.getByRole('button', { name: 'Refresh Now' }));
+      await waitFor(() => expect(suiteCalls).toBe(3));
+
+      await act(async () => {
+        vi.advanceTimersByTime(30000);
+      });
+      expect(suiteCalls).toBe(4);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('preserves mutation error notices across focus refreshes and shows Refresh Now on malformed focus refresh', async () => {
     const suite = makeSuite();
     let nowMs = 10_000;
@@ -944,7 +1038,7 @@ describe('FE-01..FE-04 & FE-07: App races, bridge errors, confirm seed, and tran
       const callsAfterFailure = suiteCalls;
 
       await act(async () => {
-        vi.advanceTimersByTime(24000);
+        vi.advanceTimersByTime(60000);
       });
       expect(suiteCalls).toBe(callsAfterFailure);
 
@@ -994,6 +1088,64 @@ describe('FE-01..FE-04 & FE-07: App races, bridge errors, confirm seed, and tran
     // Switching to Matrix view must also show the 4-step live onboarding card
     await user.click(screen.getByRole('button', { name: /matrix/i }));
     expect(screen.getByText(/Connect Your Live Jira & Confluence Artifacts/i)).toBeInTheDocument();
+  });
+
+  it('creates a live proof chain from onboarding with the current Jira project context', async () => {
+    const user = userEvent.setup();
+    const uninitializedLive = makeSuite({
+      projectName: 'Uninitialized Live Workspace',
+      datasetMode: 'LIVE',
+      initialized: false,
+      totalHazards: 0,
+      classCCount: 0,
+      verifiedPercentage: 0,
+      releaseBlocked: true,
+      blockingReasons: ['Run Sync Live Atlassian to scan Jira & Confluence artifacts.'],
+      traceLinks: [],
+    });
+    const createdSummary = makeSuite({
+      projectName: 'Created Proof Workspace',
+      traceLinks: [
+        makeTraceLink({ id: 'proof-link', hazardKey: 'MED-101', workKey: 'MED-103', sigValid: false }),
+      ],
+    });
+
+    mockedInvokeResolver.mockImplementation(async (key) => {
+      if (key === 'getComplianceSuite') return uninitializedLive;
+      if (key === 'createLiveProofScenario') {
+        return {
+          success: true,
+          projectKey: 'MED',
+          spaceId: '555',
+          pageId: '987',
+          pageTitle: 'SRS MedTrace Live Proof MED',
+          hazardIssueKey: 'MED-101',
+          workIssueKey: 'MED-103',
+          testIssueKey: 'MED-102',
+          issueLinksCreated: ['MED-101->MED-103', 'MED-102->MED-103'],
+          remoteLinkCreated: true,
+          warnings: [],
+          summary: createdSummary,
+        };
+      }
+      if (key === 'queryGraphContext') return null;
+      return null;
+    });
+
+    cleanup();
+    render(<App />);
+    const createButton = await screen.findByRole('button', { name: /Create Live Proof Chain/i });
+    await waitFor(() => expect(createButton).toBeEnabled());
+    await user.click(createButton);
+
+    await waitFor(() => {
+      expect(mockedInvokeResolver).toHaveBeenCalledWith('createLiveProofScenario', {
+        projectKey: 'MED',
+      });
+    });
+    expect(await screen.findByText(/Created live proof chain: Confluence page 987/i)).toBeInTheDocument();
+    expect(screen.getByText(/record HTTPS test evidence and sign off/i)).toBeInTheDocument();
+    expect(await screen.findByRole('dialog')).toBeInTheDocument();
   });
 
   it('passes skipReconcile: true on window focus refresh so tab switches avoid full Confluence sweeps', async () => {

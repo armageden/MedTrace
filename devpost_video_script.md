@@ -99,10 +99,10 @@ and Export Dossier. Repeat the winning thesis.
 
 ## Part 3 — Submission checklist (final 48 hours)
 
-- [ ] Commit, push, and tag the exact submission commit, then deploy HEAD (`npm run build:all && forge deploy -e production` + `forge install --upgrade` on Jira and Confluence so `write:jira-work`, `medtrace-jira-issue-updated`, and `create-reverification-task-action` apply, then refresh the shareable install URL in `devpost_submission_draft.md`), initialize `Sync Live Atlassian` (and `Resume Sync` if truncated) on the active production partition, and verify `production` logs are free of old errors.
+- [ ] Commit, push, and tag the exact submission commit, then deploy HEAD (`npm run build:all && forge deploy -e production` + `forge install --upgrade` on Jira and Confluence so `write:jira-work`, `write:page:confluence`, `medtrace-jira-issue-updated`, `createLiveProofScenario`, and `create-reverification-task-action` apply, then refresh the shareable install URL in `devpost_submission_draft.md`), initialize `Sync Live Atlassian` (and `Resume Sync` if truncated) on the active production partition, and verify `production` logs are free of old errors. For the fastest native-artifact rehearsal path, use **Create Live Proof Chain** and [docs/00-how-to/04-live-judge-proof.md](docs/00-how-to/04-live-judge-proof.md) instead of manually assembling all five artifact relationships.
 - [ ] Verify `verify-iec-compliance-action` and `create-reverification-task-action` over `https://mcp.atlassian.com/forge/5e49c10e-696f-4984-9d00-4a47d0a5dd99` after production sync so they operate on initialized live `MEDTRACE` records.
 - [ ] Capture actual current application screenshots (replacing generic AI/crypto artwork thumbnails) and obtain genuine domain feedback from at least one medical-device QA, regulatory, or systems engineer.
 - [ ] Record the functioning app, publish it on YouTube, and add the public URL to `devpost_submission_draft.md` (currently a blocker, no URL present).
 - [ ] Confirm separate judge-facing Jira and Confluence install links on a fresh site.
 - [ ] Provide least-privilege demo accounts; never submit a production webtrigger secret.
-- [ ] Re-run `npm run test:all && npm run docs:check && npm run lint:manifest && forge lint` from a clean checkout and verify all checks pass.
+- [ ] Re-run `npm run test:all && npm run docs:check && npm run lint:manifest && forge lint --approve MAJOR_VERSION_RULE` from a clean checkout after reviewing the intentional `write:page:confluence` major-version consent change, and verify all checks pass.

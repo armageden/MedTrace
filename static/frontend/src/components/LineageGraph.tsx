@@ -22,6 +22,8 @@ interface LineageGraphProps {
   onSelectTraceLink: (linkId: string) => void;
   onSyncLive?: () => void;
   onSeedDemo?: () => void;
+  onCreateLiveProof?: () => void;
+  canCreateLiveProof?: boolean;
   isBusy?: boolean;
 }
 
@@ -143,6 +145,8 @@ export const LineageGraph: React.FC<LineageGraphProps> = ({
   onSelectTraceLink,
   onSyncLive,
   onSeedDemo,
+  onCreateLiveProof,
+  canCreateLiveProof,
   isBusy = false,
 }) => {
   const [ambiguousRefs, setAmbiguousRefs] = useState<FlowLinkRef[] | null>(null);
@@ -384,6 +388,8 @@ export const LineageGraph: React.FC<LineageGraphProps> = ({
             <LiveOnboardingCard
               onSyncLive={onSyncLive}
               onSeedDemo={onSeedDemo}
+              onCreateLiveProof={onCreateLiveProof}
+              canCreateLiveProof={canCreateLiveProof}
               isBusy={isBusy}
             />
           </div>

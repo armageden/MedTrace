@@ -148,7 +148,8 @@ export type AuditActionType =
   | 'PART11_SIGNOFF'
   | 'DEMO_SIMULATION'
   | 'CONFLUENCE_PAGE_DRIFT'
-  | 'CREATE_REVERIFICATION_TASK';
+  | 'CREATE_REVERIFICATION_TASK'
+  | 'CREATE_LIVE_PROOF_SCENARIO';
 
 export type AuditAuthMethod =
   | 'FORGE_USER_SESSION'
@@ -266,6 +267,22 @@ export interface SeedDemoResponse {
   message: string;
 }
 
+export interface CreateLiveProofScenarioResponse {
+  success: boolean;
+  projectKey: string;
+  spaceId: string;
+  pageId: string;
+  pageTitle: string;
+  pageUrl?: string;
+  hazardIssueKey: string;
+  workIssueKey: string;
+  testIssueKey: string;
+  issueLinksCreated: string[];
+  remoteLinkCreated: boolean;
+  warnings: string[];
+  summary: ComplianceSummary;
+}
+
 export interface BindIssueResponse {
   success: boolean;
   summary?: ComplianceSummary;
@@ -306,6 +323,10 @@ export interface MedTraceResolverMap {
   syncLiveSuite: {
     payload: Omit<LiveSyncOptions, 'callerMode'> | undefined;
     response: LiveSyncResult;
+  };
+  createLiveProofScenario: {
+    payload: { projectKey?: string; spaceId?: string } | undefined;
+    response: CreateLiveProofScenarioResponse;
   };
   remediateGap: {
     payload: {
