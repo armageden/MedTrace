@@ -85,3 +85,14 @@ When upgrading Forge CLI or `@forge/manifest`, future agents must:
 5. update this section and [../01-architecture/forge-modules.md](../01-architecture/forge-modules.md) with the verified schema behavior.
 
 Never force invalid manifest syntax merely to satisfy future documentation.
+
+## Verified production evidence (2026-11-25, v7.0.0)
+
+Autonomous production probes against the live v7.0.0 deployment confirmed:
+
+- Hosted MCP endpoint `https://mcp.atlassian.com/forge/5e49c10e-696f-4984-9d00-4a47d0a5dd99` returns correct `401` with RFC 9728 `WWW-Authenticate` protected-resource metadata; OAuth registration, authorization, and token endpoints live; dynamic client registration succeeds.
+- HMAC webtrigger `verify-release-gate` returns live gate decisions (HTTP 403 blocked with real violation detail).
+- Workflow validator blocked a real REST-initiated `MEDTRACE-2` → Done transition: Class C test coverage gap.
+- Confluence page edit (SRS-201, v4→v5, 5.5→5.6 mL/hr) automatically revoked signature `sig-srs-3964930` within seconds (`AUTOMATIC REVOCATION` invalidation reason, hash drift `41e2589b...` → `c56a3eee...`), flipped hazard to `ACTION_REQUIRED`, dropped suite to `verifiedPercentage: 0` with `releaseBlocked: true`.
+
+Remaining manual step: browser OAuth consent flow with an external MCP client (requires interactive Atlassian login).
