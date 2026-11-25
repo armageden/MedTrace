@@ -186,22 +186,6 @@ export function formatSourceLabel(datasetMode) {
   return 'Atlassian Forge KVS (UNSPECIFIED)';
 }
 
-function collectCanonicalLinkKeys(link) {
-  return [
-    link?.hazard?.key,
-    link?.hazard?.id,
-    link?.work?.key,
-    link?.work?.id,
-    link?.test?.testKey,
-    link?.test?.id,
-    link?.spec?.id,
-    link?.spec?.pageId,
-    link?.signature?.id,
-  ]
-    .filter((val) => typeof val === 'string' && val.trim() !== '')
-    .map((val) => val.trim().toLowerCase());
-}
-
 /**
  * Sends an HMAC-SHA256 signed, nonce-protected request to the configured Forge webtrigger.
  */

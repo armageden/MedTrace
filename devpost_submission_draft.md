@@ -34,7 +34,7 @@ In regulated medical-device software engineering (IEC 62304, ISO 14971, FDA 21 C
 * **Fallback records:** Tracked Jira issues without native Hazard or Verification Test `issuelinks` use app-managed records labeled `App-Managed` in the UI until native Jira links are added.
 
 ## Verification & Quality Bar
-* **232 automated tests pass (`0` failures):** **192** backend/MCP/script tests + **40** React/Vitest frontend tests across 7 files, covering RBAC/IDOR isolation, live sync pagination & cursor resume, cross-partition gate reconciliation, `SHARDED_V2` rollback recovery, CAS retry idempotency, and hash-chain verification.
+* **236 automated tests pass (`0` failures):** **195** backend/MCP/script tests + **41** React/Vitest frontend tests across 7 files, covering RBAC/IDOR isolation, live sync pagination & cursor resume, cross-partition gate reconciliation, `SHARDED_V2` rollback recovery, CAS retry idempotency, and hash-chain verification.
 * Strict verification gates (`npm run typecheck`, `npm run build:all`, `npm run test:coverage:all`, `npm run lint:manifest`, `npm run docs:check -- --strict-listing`, and `forge lint -e production`) pass cleanly.
 
 ## Judge Evaluation Guide
@@ -45,9 +45,10 @@ MedTrace starts fail-closed in `LIVE` mode (`UNINITIALIZED (NO DATA)`, `0 hazard
 2. Inspect the live drift on `HAZ-101` / `MED-42` (`5.0 mL/hr -> 5.5 mL/hr`), run **Blast Radius**, test **Test Human Gate**, inspect the hash-chained **Audit Log**, and export the printable **Export Dossier**.
 
 ### Option B: Live Jira & Confluence End-to-End Drift Walkthrough
-1. Follow the onboarding card: create a Confluence SRS page (e.g., `5.0 mL/hr`), link it to a Jira issue labeled `class-c` in `Under Review` status (optionally linked via native Jira `issuelinks` to `Hazard` and `Test` issues), and click **Sync Live Atlassian**.
-2. Record `PASSED` test evidence (`https://...`), complete **Sign Off Spec (Attestation)** with `"I CERTIFY THIS ELECTRONIC SIGNATURE"` -> status flips to `VERIFIED` and **Under Review -> Done** is unlocked.
-3. Edit the Confluence page (e.g., `5.0` -> `5.5 mL/hr`) -> MedTrace automatically detects SHA-256 drift across Confluence & Jira, blocks **Done** transitions, and traces the impacted work and tests in **Blast Radius** & hosted **Atlassian MCP / MedTrace Auditor** (`create-reverification-task-action`).
+1. **Create linked artifacts:** Create a Confluence SRS page containing `Bolus limit: 5.0 mL/hr`. In Jira, create a Task (e.g. `MED-1`) in **Under Review**, add label `class-c`, and attach the Confluence page via **Link -> Confluence Page** (optional: create Jira `Hazard` / `Test` issues and link via Jira **Link issue**; otherwise MedTrace manages them as `App-Managed`).
+2. **Bind the workflow validator:** In **Jira Project Settings -> Workflows**, edit the workflow transition into **Done** and add validator **MedTrace IEC 62304 Safety Gate**.
+3. **Sync, verify, and sign off:** Open **Apps -> MedTrace IEC 62304**, click **Sync Live Atlassian**, inspect the row, record `PASSED` test evidence (`https://...`), and complete **Sign Off Spec (Attestation)** with `"I CERTIFY THIS ELECTRONIC SIGNATURE"` -> status turns `VERIFIED` and transitioning `MED-1` to **Done** succeeds.
+4. **Trigger drift & Atlassian MCP:** Edit the Confluence page from `5.0` to `5.5 mL/hr` -> MedTrace automatically revokes the signature across Confluence & Jira, blocks **Done** transitions, and traces impact in **Blast Radius**. Enable **MedTrace MCP Server** under Atlassian Admin **Connected apps** (note: Forge stores Jira and Confluence KVS separately, so initialize live sync in whichever product hosts the MCP context) and invoke `verify-iec-compliance-action` + `create-reverification-task-action` to create a linked Jira re-verification task.
 
 ## Built With
 TypeScript, Node.js (`nodejs22.x`), React 18, Vite, `@xyflow/react`, Atlassian Forge (`@forge/kvs`, Jira REST v3, Confluence REST v2, Teamwork Graph, Rovo Agent & MCP), Model Context Protocol (`@modelcontextprotocol/sdk`).

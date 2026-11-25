@@ -727,6 +727,7 @@ export async function authorizeAndFilterLiveSuiteDetailed(
             auditEntryCount: suite.auditEntryCount,
             auditHeadHash: suite.auditHeadHash,
             initialized: suite.initialized,
+            lastAuditTimestamp: suite.lastAuditTimestamp,
             lastSyncedAt: suite.lastSyncedAt,
             syncIncomplete: scopedSyncIncomplete,
             ...(hasProjectIncompleteList && (!cleanScopeProject || suite.incompleteProjectKeys!.includes(cleanScopeProject))

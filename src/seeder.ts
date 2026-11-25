@@ -12,6 +12,7 @@ import {
 } from './crypto-utils';
 import { isForgeRuntime } from './runtime';
 import {
+  extractAllJiraProjectKeysFromLink,
   getActiveUserIdentityResolver,
   getPart11SigningSecret,
   mapJiraStatusToWorkStatus,
@@ -988,11 +989,8 @@ export class SeederService {
       return suite;
     }
 
-    const prefix = `${cleanProject}-`;
-    const filteredLinks = suite.traceLinks.filter(
-      (link) =>
-        (link.work?.key || '').trim().toUpperCase().startsWith(prefix) ||
-        (link.hazard?.key || '').trim().toUpperCase().startsWith(prefix)
+    const filteredLinks = suite.traceLinks.filter((link) =>
+      extractAllJiraProjectKeysFromLink(link).includes(cleanProject)
     );
     const hasProjectIncompleteList =
       Array.isArray(suite.incompleteProjectKeys) && suite.incompleteProjectKeys.length > 0;
@@ -1016,6 +1014,7 @@ export class SeederService {
         auditEntryCount: suite.auditEntryCount,
         auditHeadHash: suite.auditHeadHash,
         initialized: true,
+        lastAuditTimestamp: suite.lastAuditTimestamp,
         lastSyncedAt: suite.lastSyncedAt,
         syncIncomplete: projectSyncIncomplete,
         ...(hasProjectIncompleteList && suite.incompleteProjectKeys!.includes(cleanProject)
@@ -1661,6 +1660,9 @@ export class SeederService {
           role,
           meaning,
           signatureAlgorithm,
+          ...(evaluatedTarget.test.recordedBy && evaluatedTarget.test.recordedBy === signedByAccountId
+            ? { selfAttestedSameActor: true }
+            : {}),
         },
         authMethod,
       },

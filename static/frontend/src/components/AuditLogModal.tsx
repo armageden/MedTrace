@@ -50,7 +50,7 @@ export const AuditLogModal: React.FC<AuditLogModalProps> = ({
       setVerification(verifyRes || null);
       if (
         newestFirst.length < AUDIT_PAGE_SIZE &&
-        (!isProjectScoped || (verifyRes?.totalEntries ?? 0) <= 1000)
+        (!isProjectScoped || (verifyRes?.totalEntries ?? 0) <= 5000)
       ) {
         setHasExhaustedOlder(true);
       }

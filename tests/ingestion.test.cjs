@@ -3050,4 +3050,117 @@ test.describe('Task 1C-Ingestion: Confluence Revert Non-Resurrection & 3-Attempt
       }
     );
   });
+
+  test.it('syncFromAtlassian Resume Sync clears syncIncomplete when trailing pages hold 0 safety issues and avoids duplicating linked Hazard issues across pages', async () => {
+    const kvsMock = createFullMockForgeKvs();
+    const specBody = '<p>SRS-901</p>';
+
+    const workPage1 = {
+      id: '9001',
+      key: 'TRL-1',
+      fields: {
+        summary: 'Pump safety control',
+        status: { name: 'Done', statusCategory: { key: 'done' } },
+        assignee: { displayName: 'Alice' },
+        labels: ['class-c'],
+        issuetype: { name: 'Task' },
+        project: { key: 'TRL', name: 'TRL' },
+        issuelinks: [
+          {
+            type: { name: 'Mitigates', inward: 'mitigated by', outward: 'mitigates' },
+            outwardIssue: {
+              id: '9002',
+              key: 'TRL-2',
+              fields: {
+                summary: 'Hazard TRL-2',
+                status: { name: 'Open' },
+                issuetype: { name: 'Hazard' },
+                labels: ['class-c', 'medtrace-hazard'],
+              },
+            },
+          },
+        ],
+      },
+    };
+    const hazardPage2 = {
+      id: '9002',
+      key: 'TRL-2',
+      fields: {
+        summary: 'Hazard TRL-2',
+        status: { name: 'Open' },
+        issuetype: { name: 'Hazard' },
+        labels: ['class-c', 'medtrace-hazard'],
+        project: { key: 'TRL', name: 'TRL' },
+        issuelinks: [],
+      },
+    };
+    const plainTaskPage2 = {
+      id: '9003',
+      key: 'TRL-3',
+      fields: {
+        summary: 'Update README',
+        status: { name: 'To Do' },
+        issuetype: { name: 'Task' },
+        labels: [],
+        project: { key: 'TRL', name: 'TRL' },
+        issuelinks: [],
+      },
+    };
+
+    const mockClient = () => ({
+      requestJira: async (routeObj) => {
+        const r = String(routeObj?.value_ || routeObj?.value || routeObj);
+        if (r.includes('/rest/api/3/search/jql')) {
+          if (r.includes('nextPageToken=page-2')) {
+            return makeJsonResponse(200, { issues: [hazardPage2, plainTaskPage2], isLast: true });
+          }
+          return makeJsonResponse(200, { issues: [workPage1], nextPageToken: 'page-2', isLast: false });
+        }
+        if (r.includes('/remotelink')) {
+          if (r.includes('/TRL-1/')) {
+            return makeJsonResponse(200, [
+              { object: { url: 'https://site.atlassian.net/wiki/spaces/MED/pages/90101', title: 'SRS-901' } },
+            ]);
+          }
+          return makeJsonResponse(200, []);
+        }
+        if (r.includes('/rest/api/3/issue/TRL-1')) {
+          return makeJsonResponse(200, workPage1);
+        }
+        return makeJsonResponse(404, {});
+      },
+      requestConfluence: async (routeObj) => {
+        const r = String(routeObj?.value_ || routeObj?.value || routeObj);
+        if (r.includes('/wiki/api/v2/pages/90101')) {
+          return makeJsonResponse(200, {
+            id: '90101',
+            title: 'SRS-901',
+            version: { number: 1, createdAt: '2026-11-24T00:00:00Z' },
+            body: { storage: { value: specBody } },
+          });
+        }
+        return makeJsonResponse(200, { results: [] });
+      },
+    });
+
+    await withForgeMocks({ kvsMock, asAppImpl: mockClient }, async () => {
+      const first = await LiveIngestionService.syncFromAtlassian(
+        { projectKey: 'TRL', maxIssues: 1, callerMode: 'APP' },
+        'acc-trl'
+      );
+      assert.strictEqual(first.truncated, true);
+      assert.strictEqual(first.summary.syncIncomplete, true);
+      assert.strictEqual(first.summary.traceLinks.length, 1);
+
+      const resumed = await LiveIngestionService.syncFromAtlassian(
+        { projectKey: 'TRL', maxIssues: 50, resumeFromCursor: true, callerMode: 'APP' },
+        'acc-trl'
+      );
+      assert.strictEqual(resumed.success, true);
+      assert.strictEqual(resumed.truncated, false);
+      assert.strictEqual(resumed.summary.syncIncomplete, undefined);
+      assert.strictEqual(resumed.summary.traceLinks.length, 1, 'Linked Hazard on page 2 must not be duplicated and page 1 link must be preserved');
+      assert.strictEqual(resumed.summary.traceLinks[0].work.key, 'TRL-1');
+    });
+  });
 });

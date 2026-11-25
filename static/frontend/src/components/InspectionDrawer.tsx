@@ -705,6 +705,20 @@ export const InspectionDrawer: React.FC<InspectionDrawerProps> = ({
             <div style={{ fontSize: 11, color: 'var(--mt-text-secondary)', marginTop: 2 }}>
               Meaning: &ldquo;{link.signature.meaning}&rdquo;
             </div>
+            {link.signature.isValid &&
+              link.signature.signedByAccountId &&
+              link.test.recordedBy === link.signature.signedByAccountId && (
+                <div
+                  style={{
+                    fontSize: 10,
+                    color: 'var(--mt-warning-text)',
+                    fontWeight: 600,
+                    marginTop: 4,
+                  }}
+                >
+                  Self-attested by test recorder — independent QA review required.
+                </div>
+              )}
             {link.signature.invalidationReason && (
               <div
                 style={{

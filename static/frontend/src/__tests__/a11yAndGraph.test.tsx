@@ -9,6 +9,8 @@ import { ConfirmSeedModal } from '../components/ConfirmSeedModal';
 import { TransitionModal } from '../components/TransitionModal';
 import { TraceMatrixTable } from '../components/TraceMatrixTable';
 import { LineageGraph } from '../components/LineageGraph';
+import { AuditHeader } from '../components/AuditHeader';
+import { BlastRadiusCard } from '../components/BlastRadiusCard';
 import type { FlowNodePayload } from '../components/CustomNodes';
 import * as bridgeModule from '../bridge';
 import { ComplianceSummary, TraceLink } from '../types';
@@ -516,5 +518,75 @@ describe('FE-08..FE-10: Dialog a11y stack/focus trap/restore, table semantics, a
     } finally {
       window.matchMedia = originalMatchMedia;
     }
+  });
+
+  it('supports compact AuditHeader Actions menu keyboard navigation and renders BlastRadiusCard', async () => {
+    const summary = makeSummary([makeLink({ id: '1' })], 'LIVE');
+    const onSyncLive = vi.fn();
+    const onOpenAuditLog = vi.fn();
+
+    render(
+      <div>
+        <AuditHeader
+          summary={summary}
+          panelContext={{
+            extensionType: 'jira:issuePanel',
+            isCompactPanel: true,
+            isConfluence: false,
+            issueKey: 'PUMP-1',
+            projectKey: 'PUMP',
+          }}
+          activeView="table"
+          onToggleView={() => {}}
+          onSeed={() => {}}
+          onSyncLive={onSyncLive}
+          onOpenAuditLog={onOpenAuditLog}
+          onOpenExport={() => {}}
+          onTestTransition={() => {}}
+          onAnalyzeBlastRadius={() => {}}
+          isSeeding={false}
+          isSyncingLive={false}
+          isAnalyzingBlastRadius={false}
+        />
+        <BlastRadiusCard
+          blastRadius={{
+            triggerArtifact: {
+              type: 'SPEC',
+              id: 'srs-1',
+              key: 'SRS-1',
+              title: 'SRS-1: Bolus Limit',
+              deltaReason: '5.0 -> 5.5 mL/hr',
+            },
+            impactSeverity: 'CRITICAL_CATASTROPHIC',
+            affectedHazardKeys: ['HAZ-1'],
+            blockedWorkItemKeys: ['PUMP-1'],
+            invalidatedTestKeys: ['TEST-1'],
+            invalidatedSignatureIds: ['sig-1'],
+            traversalPath: [
+              { hop: 1, from: 'Spec [SRS-1]', edge: 'SIGNS', to: 'Signature [sig-1]', effect: 'Revoked' },
+            ],
+            transitiveActionPlan: ['Re-verify TEST-1'],
+            executionTimeMs: 1.25,
+          }}
+        />
+      </div>
+    );
+
+    expect(screen.getByText('Transitive Regulatory Blast Radius')).toBeInTheDocument();
+    expect(screen.getByText(/Re-verify TEST-1/)).toBeInTheDocument();
+
+    const user = userEvent.setup();
+    const trigger = screen.getByRole('button', { name: /Actions/i });
+    await user.click(trigger);
+
+    const menu = screen.getByRole('menu', { name: 'Compliance actions' });
+    expect(menu).toBeInTheDocument();
+    fireEvent.keyDown(window, { key: 'ArrowDown' });
+    fireEvent.keyDown(window, { key: 'Escape' });
+    expect(screen.queryByRole('menu', { name: 'Compliance actions' })).not.toBeInTheDocument();
+
+    await user.click(trigger);
+    await user.click(screen.getByRole('menuitem', { name: /Sync Live Atlassian/i }));
+    expect(onSyncLive).toHaveBeenCalledTimes(1);
   });
 });

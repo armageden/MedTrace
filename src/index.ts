@@ -324,9 +324,6 @@ defineTypedResolver('signOffPart11', async (req) => {
     );
   }
 
-  // Derive signer role server-side rather than trusting client-supplied role/signedBy fields.
-  const role = 'Authorized Atlassian User';
-
   await assertOperatorAuthorizedForTarget(req, { hazardKey, specId, linkId });
 
   const updated = await SeederService.signOffPart11({
@@ -553,9 +550,12 @@ defineTypedResolver('getAuditLog', async (req) => {
 
   const rawSuite = await SeederService.getActiveComplianceSuite();
   const collectedNewestFirst: AuditLogEntry[] = [];
-  const MAX_SCAN_PAGES = 5;
+  // shortcut: scans up to 25 pages (5,000 entries) / 8s to preserve the AuditLogEntry[] contract; switch to a cursor envelope if ledgers outgrow this.
+  const MAX_SCAN_PAGES = 25;
+  const scanDeadline = Date.now() + 8_000;
 
   for (let page = 0; page < MAX_SCAN_PAGES; page++) {
+    if (page > 0 && Date.now() >= scanDeadline) break;
     const batch = await AuditLogService.getAuditLog(MAX_AUDIT_LOG_PAGE_LIMIT, cursorBeforeSeq);
     if (batch.length === 0) break;
 

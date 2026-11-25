@@ -155,7 +155,7 @@ function normalizeIssueKey(payload?: WorkflowValidatorPayload | null): string | 
   return undefined;
 }
 
-function isMatchedInSuite(issueKey: string, suite: ComplianceSummary): boolean {
+export function isMatchedInSuite(issueKey: string, suite: ComplianceSummary): boolean {
   const clean = issueKey.trim().toUpperCase();
   if (!clean || !Array.isArray(suite?.traceLinks)) return false;
   return suite.traceLinks.some(

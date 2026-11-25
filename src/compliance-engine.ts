@@ -673,6 +673,7 @@ export class ComplianceEngine {
       auditEntryCount?: number;
       auditHeadHash?: string;
       initialized?: boolean;
+      lastAuditTimestamp?: string;
       lastSyncedAt?: string;
       syncIncomplete?: boolean;
       incompleteProjectKeys?: string[];
@@ -779,7 +780,7 @@ export class ComplianceEngine {
       blockingReasons,
       signatureDriftCount,
       traceLinks,
-      lastAuditTimestamp: new Date().toISOString(),
+      lastAuditTimestamp: metadata?.lastAuditTimestamp || new Date().toISOString(),
       ...(metadata?.lastSyncedAt ? { lastSyncedAt: metadata.lastSyncedAt } : {}),
       ...(metadata?.syncIncomplete === true ? { syncIncomplete: true } : {}),
       ...(metadata?.incompleteProjectKeys && metadata.incompleteProjectKeys.length > 0

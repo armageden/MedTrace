@@ -714,6 +714,19 @@ export class LiveIngestionService {
     // Identify Hazard/Test Jira issues already linked via `issuelinks` to a Work issue in this scan
     // so we don't fabricate duplicate standalone `HAZ-<testKey>` trace links for them.
     const linkedRoleOwners = new Set<string>();
+    if (resumedFromCursor && existingSuite.datasetMode === 'LIVE' && existingSuite.initialized !== false) {
+      for (const link of existingSuite.traceLinks) {
+        if (link.hazard?.source === 'JIRA_ISSUE' && link.hazard.key) {
+          linkedRoleOwners.add(link.hazard.key.trim().toUpperCase());
+        }
+        if (link.test?.source === 'JIRA_ISSUE' && link.test.testKey) {
+          linkedRoleOwners.add(link.test.testKey.trim().toUpperCase());
+        }
+        if (link.reverificationTaskKey) {
+          linkedRoleOwners.add(link.reverificationTaskKey.trim().toUpperCase());
+        }
+      }
+    }
     for (const iss of issues) {
       const k = typeof iss?.key === 'string' ? iss.key.trim().toUpperCase() : '';
       if (!k) continue;
@@ -1262,7 +1275,7 @@ export class LiveIngestionService {
       existingSuite.datasetMode === 'LIVE' &&
       existingSuite.initialized !== false &&
       existingSuite.traceLinks.length > 0 &&
-      traceLinks.length > 0
+      (traceLinks.length > 0 || resumedFromCursor)
     ) {
       const syncedProjectPrefix = normalized.projectKey
         ? `${normalized.projectKey.trim().toUpperCase()}-`
@@ -1428,6 +1441,7 @@ export class LiveIngestionService {
     const projectLabel =
       normalized.projectKey ||
       issues[0]?.fields?.project?.name ||
+      (existingSuite.initialized ? existingSuite.projectName : undefined) ||
       'Atlassian Cloud Live Medical Project';
 
     const syncedWorkKeys = Array.from(processedWorkKeys);

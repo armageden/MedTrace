@@ -2841,4 +2841,86 @@ test.describe('ComplianceEngine - Part 11 Key-Ring Rotation & Fast-Path Gate Com
       true
     );
   });
+
+  test.it('generateComplianceReport preserves lastAuditTimestamp and verify-release-gate honors transitionToDone', async () => {
+    const prevPart11 = process.env.MEDTRACE_PART11_SECRET;
+    const prevMcp = process.env.MEDTRACE_MCP_SECRET;
+    const part11Secret = 'gate-part11-secret';
+    const mcpSecret = 'gate-transition-secret';
+    process.env.MEDTRACE_PART11_SECRET = part11Secret;
+    process.env.MEDTRACE_MCP_SECRET = mcpSecret;
+    setNonceStore(createInMemoryNonceStore());
+
+    const fixedTs = '2026-11-20T12:34:56.000Z';
+    const inReviewWork = { ...sampleWork, key: 'REV-42', status: 'Under Review' };
+    const seal = ComplianceEngine.computePart11Seal(
+      {
+        hazardKey: sampleHazard.key,
+        specId: sampleSpec.id,
+        artifactSha256: sampleSpec.sha256Hash,
+        signedByAccountId: 'acc-gate-1',
+        signedBy: 'Dr. Signer',
+        role: 'Clinical Safety Officer',
+        meaning: 'Approved',
+        signedAt: '2026-11-15T00:00:00Z',
+        authMethod: 'PART11_ATTESTATION',
+      },
+      part11Secret
+    );
+    const sig = {
+      id: 'sig-rev-42',
+      signedBy: 'Dr. Signer',
+      signedByAccountId: 'acc-gate-1',
+      role: 'Clinical Safety Officer',
+      signedAt: '2026-11-15T00:00:00Z',
+      artifactSha256: sampleSpec.sha256Hash,
+      signatureSeal: seal,
+      signatureAlgorithm: 'HMAC-SHA256-SEAL-V1',
+      authMethod: 'PART11_ATTESTATION',
+      isValid: true,
+      meaning: 'Approved',
+    };
+    const link = ComplianceEngine.evaluateTraceLink(sampleHazard, sampleSpec, inReviewWork, sampleTest, sig, undefined, {
+      requireTestEvidence: true,
+      requireCryptographicSeal: true,
+      part11Secret,
+    });
+    const report = ComplianceEngine.generateComplianceReport([link], 'LIVE', 'Preserved Ts', {
+      initialized: true,
+      lastAuditTimestamp: fixedTs,
+    });
+    assert.strictEqual(report.lastAuditTimestamp, fixedTs);
+
+    const originalGet = SeederService.getActiveComplianceSuite;
+    SeederService.getActiveComplianceSuite = async () => report;
+    try {
+      const ts = Date.now().toString();
+      const nonce1 = 'tr-gate-' + crypto.randomUUID();
+      const body1 = JSON.stringify({ action: 'verify-release-gate', issueKey: 'REV-42' });
+      const sig1 = crypto.createHmac('sha256', mcpSecret).update(`${ts}.${nonce1}.${body1}`).digest('hex');
+      const blockedResp = await mcpWebtriggerHandler({
+        method: 'POST',
+        headers: { 'x-medtrace-timestamp': ts, 'x-medtrace-nonce': nonce1, 'x-medtrace-signature': `sha256=${sig1}` },
+        body: body1,
+      });
+      assert.strictEqual(blockedResp.statusCode, 403);
+
+      const nonce2 = 'tr-gate-' + crypto.randomUUID();
+      const body2 = JSON.stringify({ action: 'verify-release-gate', issueKey: 'REV-42', transitionToDone: true });
+      const sig2 = crypto.createHmac('sha256', mcpSecret).update(`${ts}.${nonce2}.${body2}`).digest('hex');
+      const allowedResp = await mcpWebtriggerHandler({
+        method: 'POST',
+        headers: { 'x-medtrace-timestamp': ts, 'x-medtrace-nonce': nonce2, 'x-medtrace-signature': `sha256=${sig2}` },
+        body: body2,
+      });
+      assert.strictEqual(allowedResp.statusCode, 200);
+      assert.strictEqual(JSON.parse(allowedResp.body).result, true);
+    } finally {
+      SeederService.getActiveComplianceSuite = originalGet;
+      if (prevPart11 === undefined) delete process.env.MEDTRACE_PART11_SECRET;
+      else process.env.MEDTRACE_PART11_SECRET = prevPart11;
+      if (prevMcp === undefined) delete process.env.MEDTRACE_MCP_SECRET;
+      else process.env.MEDTRACE_MCP_SECRET = prevMcp;
+    }
+  });
 });

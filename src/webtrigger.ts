@@ -3,7 +3,7 @@ import { ComplianceEngine } from './compliance-engine';
 import { SeederService } from './seeder';
 import { LiveIngestionService } from './ingestion';
 import { McpToolService } from './mcp-server';
-import { probeUnsyncedSafetyIssue, workflowValidatorHandler } from './workflow-validator';
+import { isMatchedInSuite, probeUnsyncedSafetyIssue, workflowValidatorHandler } from './workflow-validator';
 import { isForgeRuntime } from './runtime';
 import {
   MAX_TIMESTAMP_AGE_MS,
@@ -462,21 +462,23 @@ export async function mcpWebtriggerHandler(request: WebtriggerRequest): Promise<
           suite.initialized !== false &&
           Array.isArray(suite.traceLinks) &&
           !(suite.traceLinks.length === 0 && (!issueKey || (suite.totalHazards ?? 0) === 0));
-        const cleanUpper = issueKey ? issueKey.toUpperCase() : '';
-        const matchedInSuite =
-          Boolean(cleanUpper) &&
-          suite.traceLinks.some(
-            (l) =>
-              (l.work?.key || '').toUpperCase() === cleanUpper ||
-              (l.hazard?.key || '').toUpperCase() === cleanUpper ||
-              (l.test?.testKey || '').toUpperCase() === cleanUpper
-          );
+        const matchedInSuite = issueKey ? isMatchedInSuite(issueKey, suite) : false;
         const safetyProbe =
           issueKey && isInitialized && !matchedInSuite
             ? await probeUnsyncedSafetyIssue(issueKey)
             : undefined;
+        const transitionToDone = body.transitionToDone === true;
 
-        const gate = ComplianceEngine.evaluateIssueReleaseGate(issueKey, suite, safetyProbe);
+        const gate = ComplianceEngine.evaluateIssueReleaseGate(
+          issueKey,
+          suite,
+          safetyProbe || transitionToDone
+            ? {
+                ...(safetyProbe ?? {}),
+                ...(transitionToDone ? { transitionToDone: true } : {}),
+              }
+            : undefined
+        );
         return jsonResponse(gate.result ? 200 : 403, {
           ...gate,
           evaluatedIssueKey: issueKey,

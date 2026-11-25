@@ -37,3 +37,5 @@ Executing a common task? Start at [docs/00-how-to/](docs/00-how-to/00-overview.m
 3. **Zero hallucination.** Read a file before citing its path, symbol, flag, or behavior.
 4. **In place.** Upgrade existing files instead of creating parallel trees.
 5. **Preserve production manifests.** Keep `manifest.yml` clean and synchronized across both `jira` and `confluence` contexts.
+6. **Production deployment with permission.** You are allowed to deploy to Forge production (`forge deploy -e production` and `forge install --upgrade`) once the user grants explicit permission, after verification checks pass.
+7. **Explicit user override.** Default repository restrictions in this file (such as Rule 0 git read-only limits and Rule 6 production actions) can be overridden whenever the user explicitly instructs or grants permission in the current conversation, within platform safety, credential, and access-control boundaries. Confirm explicitly before destructive operations (e.g., `git reset`, `--force`, history rewrites, or data deletion).

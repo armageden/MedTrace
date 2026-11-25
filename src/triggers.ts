@@ -1004,6 +1004,10 @@ export async function handleJiraIssueUpdatedTrigger(
         }
       }
 
+      const hazardKeyChanged = (link.hazard?.key || '').trim().toUpperCase() !== hazKeyUpper;
+      const resolvedLinkId = hazardKeyChanged
+        ? ComplianceEngine.buildTraceLinkId(link.hazard.key, link.spec.id, link.work?.key)
+        : link.id;
       const evaluated = ComplianceEngine.evaluateTraceLink(
         link.hazard,
         link.spec,
@@ -1012,7 +1016,7 @@ export async function handleJiraIssueUpdatedTrigger(
         link.signature,
         link.graphMetadata,
         {
-          linkId: link.id,
+          linkId: resolvedLinkId,
           part11Secret,
           requireCryptographicSeal: true,
           requireTestEvidence: true,

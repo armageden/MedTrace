@@ -3236,4 +3236,52 @@ test.describe('SEC-01 & SEC-03: Resolver RBAC, Confused-Deputy, Part 11 & Webtri
       }
     );
   });
+
+  test.it('getAuditLog scans past 1,000 cross-project entries to return older project-scoped entries', async () => {
+    const { AuditLogService } = require('../dist/audit-log.js');
+    await withForgeMocks(
+      {
+        requestJira: async (routeObj) => {
+          const r = routeToString(routeObj);
+          if (r.includes('/rest/api/3/myself')) {
+            return makeHttpResponse(200, { accountId: 'reader-med', active: true });
+          }
+          if (r.includes('/rest/api/3/mypermissions')) {
+            return makeHttpResponse(200, {
+              permissions: { BROWSE_PROJECTS: { havePermission: true } },
+            });
+          }
+          return makeHttpResponse(200, {});
+        },
+        requestConfluence: async () => makeHttpResponse(200, { accountId: 'reader-med' }),
+      },
+      async () => {
+        await AuditLogService.append({
+          actorAccountId: 'u1',
+          action: 'SYNC_LIVE',
+          targetKey: 'MED-1',
+          details: { projectKey: 'MED', issueKey: 'MED-1' },
+          authMethod: 'FORGE_USER_SESSION',
+        });
+        for (let i = 0; i < 1050; i++) {
+          await AuditLogService.append({
+            actorAccountId: 'u2',
+            action: 'SYNC_LIVE',
+            targetKey: `OTHER-${i + 1}`,
+            details: { projectKey: 'OTHER', issueKey: `OTHER-${i + 1}` },
+            authMethod: 'FORGE_USER_SESSION',
+          });
+        }
+        const logs = await resolverHandler(
+          {
+            call: { functionKey: 'getAuditLog', payload: { limit: 20 } },
+            context: { extension: { type: 'jira:projectPage', project: { key: 'MED' } } },
+          },
+          { principal: { accountId: 'reader-med' } }
+        );
+        assert.strictEqual(logs.length, 1);
+        assert.strictEqual(logs[0].targetKey, 'MED-1');
+      }
+    );
+  });
 });
