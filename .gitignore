@@ -16,4 +16,5 @@ static/frontend/dist/
 # Local tool state
 .commandcode/
 .mimosa/
+.zcode/
 CODEGEIST_WINNING_PLAN.md

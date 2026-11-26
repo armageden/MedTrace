@@ -385,6 +385,7 @@ export const AuditHeader: React.FC<AuditHeaderProps> = ({
                 type="button"
                 onClick={onAnalyzeBlastRadius}
                 disabled={mutationBusy || isAnalyzingBlastRadius}
+                title="Impact analysis: trace which downstream hazards, work items, and tests a spec change affects."
                 className="mt-btn"
                 style={{
                   border: '1.5px solid var(--mt-warning-border)',
@@ -402,6 +403,7 @@ export const AuditHeader: React.FC<AuditHeaderProps> = ({
             type="button"
             onClick={onTestTransition}
             disabled={mutationBusy || isTestingTransition}
+            title="Simulate a Jira release transition to preview whether the safety gate blocks or allows it."
             className="mt-btn"
             style={{
               border: '1.5px solid var(--mt-danger-bold)',
@@ -493,6 +495,7 @@ export const AuditHeader: React.FC<AuditHeaderProps> = ({
                     role="menuitem"
                     disabled={mutationBusy || isAnalyzingBlastRadius}
                     onClick={() => runMenuAction(onAnalyzeBlastRadius)}
+                    title="Impact analysis: trace which downstream hazards, work items, and tests a spec change affects."
                     className="mt-btn"
                     style={menuItemStyle}
                   >

@@ -1173,4 +1173,72 @@ describe('FE-01..FE-04 & FE-07: App races, bridge errors, confirm seed, and tran
       dateNowSpy.mockRestore();
     }
   });
+
+  it('renders the onboarding card for a zero-link non-LIVE suite instead of a dead end', async () => {
+    const user = userEvent.setup();
+    const emptyDemo = makeSuite({
+      projectName: 'Empty Demo Workspace',
+      datasetMode: 'DEMO',
+      initialized: false,
+      totalHazards: 0,
+      classCCount: 0,
+      verifiedPercentage: 0,
+      releaseBlocked: true,
+      blockingReasons: ['No artifacts synced yet.'],
+      traceLinks: [],
+    });
+
+    mockedInvokeResolver.mockImplementation(async (key) => {
+      if (key === 'getComplianceSuite') return emptyDemo;
+      if (key === 'queryGraphContext') return null;
+      return null;
+    });
+
+    cleanup();
+    render(<App />);
+    await screen.findByText('Empty Demo Workspace');
+
+    // Graph view (default) must show the guided onboarding card, not a blank canvas
+    expect(screen.getByText(/Connect Your Live Jira & Confluence Artifacts/i)).toBeInTheDocument();
+
+    // Matrix view must not fall back to a button-less "no records" dead end
+    await user.click(screen.getByRole('button', { name: /matrix/i }));
+    expect(screen.getByText(/Connect Your Live Jira & Confluence Artifacts/i)).toBeInTheDocument();
+  });
+
+  it('posts a success notice after a clean live sync with no warnings', async () => {
+    const user = userEvent.setup();
+    const suite = makeSuite();
+
+    mockedInvokeResolver.mockImplementation(async (key) => {
+      if (key === 'getComplianceSuite') return suite;
+      if (key === 'queryGraphContext') return null;
+      if (key === 'syncLiveSuite') {
+        return {
+          success: true,
+          datasetMode: 'LIVE',
+          jiraIssuesScanned: 3,
+          confluencePagesScanned: 2,
+          linkedPairsFound: 1,
+          driftDetectedCount: 0,
+          truncated: false,
+          warnings: [],
+          skippedUntaggedCount: 0,
+          summary: suite,
+        };
+      }
+      return null;
+    });
+
+    cleanup();
+    render(<App />);
+    await screen.findByText('PumpGuard Live');
+
+    await user.click(screen.getByRole('button', { name: /Sync Live Atlassian/i }));
+
+    const notice = await screen.findByRole('status');
+    expect(notice).toHaveTextContent(
+      /Live sync scanned 3 Jira issue\(s\) and 2 Confluence page\(s\): 1 trace link\(s\) active/i
+    );
+  });
 });

@@ -84,6 +84,11 @@ export const LiveOnboardingCard: React.FC<LiveOnboardingCardProps> = ({
       ))}
     </ol>
 
+    <div style={{ fontSize: 12, color: 'var(--mt-text-muted, #505f79)', marginTop: 10 }}>
+      In the matrix or graph, click a row or node to open the inspection drawer, where you record
+      evidence, sign off, and create re-verification tasks.
+    </div>
+
     {(onSyncLive || onSeedDemo || onCreateLiveProof) && (
       <div style={{ marginTop: 18, display: 'flex', gap: 10, flexWrap: 'wrap' }}>
         {onCreateLiveProof && (

@@ -228,8 +228,8 @@ lookup_webtrigger_url() {
   local err_file="$TMP_DIR/wt-err-${target_env}.log"
   local raw_out=""
   if ! raw_out="$("$FORGE_BIN" "${args[@]}" </dev/null 2>"$err_file")"; then
-    echo "⚠️  forge webtrigger list returned non-zero for environment '$target_env' (continuing)." >&2
-    return 0
+    echo "❌ forge webtrigger list failed for environment '$target_env' (cannot resolve its webtrigger URL; set FORGE_SITE/FORGE_PRODUCT if the CLI prompts)." >&2
+    return 1
   fi
 
   WT_RAW="$raw_out" ALLOW_INSECURE="$MEDTRACE_ALLOW_INSECURE_LOCALHOST" MCP_MJS="$MCP_SERVER_MJS" node --input-type=module -e '
@@ -451,7 +451,7 @@ verify_target_url() {
   local env_fail=0
   local body_file="$TMP_DIR/resp.json"
 
-  echo "== 6/6 Live verification [$label] against $url =="
+  echo "== Live verification [$label] against $url =="
 
   echo -n "   a. OLD secret (leaked)     -> expect 401: "
   if [ -n "${OLD_SECRET:-}" ]; then
@@ -572,33 +572,7 @@ MISSING_URL_ENVS=()
 if [ "$SKIP_ROTATE" != "1" ]; then
   require_forge_auth
 
-  echo "== 1/6 Linting manifest =="
-  if [ "$FORGE_APPROVE_MAJOR" = "1" ]; then
-    run_forge_with_retry "$FORGE_BIN" lint --approve MAJOR_VERSION_RULE
-  else
-    run_forge_with_retry "$FORGE_BIN" lint
-  fi
-
-  echo "== 2/6 Generating new 256-bit secret =="
-  NEW_SECRET="$(node -e 'process.stdout.write(require("node:crypto").randomBytes(32).toString("hex"));')"
-
-  for ENV in $ENVIRONMENTS; do
-    echo "== 3/6 Setting MEDTRACE_MCP_SECRET in environment: $ENV =="
-    run_forge_with_retry "$FORGE_BIN" variables set MEDTRACE_MCP_SECRET "$NEW_SECRET" --environment "$ENV" --encrypt
-
-    if [ "${SKIP_DEPLOY:-0}" != "1" ]; then
-      echo "== 4/6 Deploying manifest to $ENV =="
-      if [ "$FORGE_APPROVE_MAJOR" = "1" ]; then
-        run_forge_with_retry "$FORGE_BIN" deploy --environment "$ENV" --non-interactive --approve MAJOR_VERSION_RULE
-      else
-        run_forge_with_retry "$FORGE_BIN" deploy --environment "$ENV" --non-interactive
-      fi
-    else
-      echo "== 4/6 SKIP_DEPLOY=1 — skipping deploy for $ENV (note: Forge snapshots variables on deploy) =="
-    fi
-  done
-
-  echo "== 5/6 Discovering webtrigger URLs and updating $ENV_FILE atomically =="
+  echo "== 1/5 Resolving webtrigger URLs (before rotation) =="
   PRIMARY_URL=""
   for ENV in $ENVIRONMENTS; do
     ENV_URL="$(lookup_webtrigger_url "$ENV")"
@@ -640,6 +614,38 @@ if [ "$SKIP_ROTATE" != "1" ]; then
     fi
   fi
 
+  if [ "${#TARGET_URLS[@]}" -eq 0 ] && [ "$FORCE" != "1" ]; then
+    echo "❌ No webtrigger URL resolved before rotation — aborting so no secret is rotated without a verification target (use --force to override)."
+    exit 1
+  fi
+
+  echo "== 2/5 Linting manifest =="
+  if [ "$FORGE_APPROVE_MAJOR" = "1" ]; then
+    run_forge_with_retry "$FORGE_BIN" lint --approve MAJOR_VERSION_RULE
+  else
+    run_forge_with_retry "$FORGE_BIN" lint
+  fi
+
+  echo "== 3/5 Generating new 256-bit secret =="
+  NEW_SECRET="$(node -e 'process.stdout.write(require("node:crypto").randomBytes(32).toString("hex"));')"
+
+  for ENV in $ENVIRONMENTS; do
+    echo "== 4/5 Setting MEDTRACE_MCP_SECRET in environment: $ENV =="
+    run_forge_with_retry "$FORGE_BIN" variables set MEDTRACE_MCP_SECRET "$NEW_SECRET" --environment "$ENV" --encrypt
+
+    if [ "${SKIP_DEPLOY:-0}" != "1" ]; then
+      echo "== 4/5 Deploying manifest to $ENV =="
+      if [ "$FORGE_APPROVE_MAJOR" = "1" ]; then
+        run_forge_with_retry "$FORGE_BIN" deploy --environment "$ENV" --non-interactive --approve MAJOR_VERSION_RULE
+      else
+        run_forge_with_retry "$FORGE_BIN" deploy --environment "$ENV" --non-interactive
+      fi
+    else
+      echo "== 4/5 SKIP_DEPLOY=1 — skipping deploy for $ENV (note: Forge snapshots variables on deploy) =="
+    fi
+  done
+
+  echo "== 5/5 Updating $ENV_FILE atomically =="
   if [ -n "$PRIMARY_URL" ] || [ -f "$ENV_FILE" ]; then
     upsert_dotenv_atomic "$ENV_FILE" "$NEW_SECRET" "$PRIMARY_URL"
     echo "   $ENV_FILE updated atomically (mode 0600, git-ignored)."
@@ -647,7 +653,7 @@ if [ "$SKIP_ROTATE" != "1" ]; then
     echo "⚠️  Could not auto-detect webtrigger URL — skipped creating $ENV_FILE."
   fi
 else
-  echo "== 1-4/6 SKIP_ROTATE=1 — read-only verification mode (skipping forge lint, rotation, deploy) =="
+  echo "== SKIP_ROTATE=1 — read-only verification mode (skipping forge lint, rotation, deploy) =="
   NEW_SECRET="${MEDTRACE_MCP_SECRET:-}"
   if [ -z "$NEW_SECRET" ] && [ -f "$ENV_FILE" ]; then
     NEW_SECRET="$(parse_dotenv_key "$ENV_FILE" "MEDTRACE_MCP_SECRET")"
@@ -657,7 +663,7 @@ else
     exit 1
   fi
 
-  echo "== 5/6 Resolving target webtrigger URLs (read-only on $ENV_FILE) =="
+  echo "== Resolving target webtrigger URLs (read-only on $ENV_FILE) =="
   RAW_CONFIGURED_URL="${MEDTRACE_WEBTRIGGER_URL:-}"
   if [ -z "$RAW_CONFIGURED_URL" ] && [ -f "$ENV_FILE" ]; then
     RAW_CONFIGURED_URL="$(parse_dotenv_key "$ENV_FILE" "MEDTRACE_WEBTRIGGER_URL")"

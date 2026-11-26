@@ -35,7 +35,7 @@ Source: [Codegeist 2026 Official Rules](https://codegeist2026.devpost.com/rules)
 | Project operators could overwrite a LIVE suite with demo data | `seedDemoSuite` (`src/index.ts`) now requires `confirmOverwriteLive: true` and Jira site-administrator (`ADMINISTER`) permission, and writes a pre-overwrite backup. |
 | Rovo output used certification/authorization wording | Removed. Passing checks return "Configured traceability checks passed; independent regulatory assessment is still required." |
 | "Zero Egress" and "<1.5ms" marketing claims | Removed from README and thumbnails. The only performance claim is the test-enforced `<20 ms` ceiling on a synthetic 500-node graph. |
-| MCP secret committed in Git history (`e48253e`) | Rotated. A signed GET using the historical value returned HTTP 401 on both the production and development webtriggers on 2026-11-15; the current secret returned 200. The value remains in public Git history but is no longer accepted. |
+| MCP secret committed in Git history (`e48253e`) | Rotated. A signed GET using the historical value returned HTTP 401 on both the production and development webtriggers on 2026-11-15; the current secret returned 200. The historical value is no longer accepted and is not recoverable from the repository's reachable Git history. |
 
 ## Verification Performed (2026-11-15)
 

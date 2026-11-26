@@ -36,7 +36,7 @@ In regulated medical-device software engineering (IEC 62304, ISO 14971, FDA 21 C
 * **Live proof bootstrap boundary:** **Create Live Proof Chain** is explicit and non-idempotent, writes real evaluation artifacts, and never deletes partial artifacts automatically after a failed link/write step. It requires the added `write:page:confluence` installation consent and suitable Jira/Confluence permissions; use an evaluation project/space.
 
 ## Verification & Quality Bar
-* **271 automated tests pass (`0` failures):** **222** backend/MCP/script tests + **49** React/Vitest frontend tests across 7 files, covering RBAC/IDOR isolation, live sync pagination & cursor resume, live proof bootstrap partial-write/ingestion-failure behavior, cross-partition gate reconciliation, `SHARDED_V2` rollback recovery, CAS retry idempotency, and hash-chain verification.
+* **273 automated tests pass (`0` failures):** **222** backend/MCP/script tests + **51** React/Vitest frontend tests across 7 files, covering RBAC/IDOR isolation, live sync pagination & cursor resume, live proof bootstrap partial-write/ingestion-failure behavior, cross-partition gate reconciliation, `SHARDED_V2` rollback recovery, CAS retry idempotency, zero-link onboarding empty states, clean-sync success feedback, and hash-chain verification.
 * Strict verification gates (`npm run typecheck`, `npm run build:all`, `npm run test:all`, `npm run lint:manifest`, `npm run docs:check`, and `forge lint --approve MAJOR_VERSION_RULE`) pass cleanly. Plain `forge lint` reports the intentional `write:page:confluence` major-version approval decision (0 errors / 0 warnings); pre-Marketplace listing validation uses `node scripts/docs-check.mjs --strict-listing`.
 
 ## Judge Evaluation Guide

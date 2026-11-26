@@ -94,5 +94,13 @@ Autonomous production probes against the live v7.0.0 deployment confirmed:
 - HMAC webtrigger `verify-release-gate` returns live gate decisions (HTTP 403 blocked with real violation detail).
 - Workflow validator blocked a real REST-initiated `MEDTRACE-2` → Done transition: Class C test coverage gap.
 - Confluence page edit (SRS-201, v4→v5, 5.5→5.6 mL/hr) automatically revoked signature `sig-srs-3964930` within seconds (`AUTOMATIC REVOCATION` invalidation reason, hash drift `41e2589b...` → `c56a3eee...`), flipped hazard to `ACTION_REQUIRED`, dropped suite to `verifiedPercentage: 0` with `releaseBlocked: true`.
+- Workflow validator **blocked** `MEDTRACE-2` into the release status `10002` (5 occurrences) at the same target as the row below.
+- A `MEDTRACE-6` transition was also **approved** into the same target status `10002` at `2026-11-25T19:27:51Z`, but this is **not** proof of the compliant path: a signed `get-hazard-lineage` probe reports `found: false` for `MEDTRACE-6`, i.e. it is an **untracked, non-safety-tagged** issue, so the approval exercised the fail-open untracked-issue path. The compliant positive path — a **tracked** chain member transitioning to `Done` with a valid signed baseline — remains **unproven** and must be demonstrated with a `get-hazard-lineage`-visible issue key.
+- Live Teamwork Graph spec-owner lookup returned `status=OK` with `1 owner(s)` for Confluence pages `3964930` and `3964950` (`fetchSpecOwnersFromTeamworkGraph`).
+- Live Rovo/MCP `verify-iec-compliance-action` executed against `MEDTRACE-2` on an initialized `LIVE` suite and correctly reported `signatureDriftDetected: true` with `configuredChecksPassed: false`.
 
-Remaining manual step: browser OAuth consent flow with an external MCP client (requires interactive Atlassian login).
+Remaining manual steps (each requires an interactive Atlassian browser session, not this runbook's signed probes):
+
+1. Re-prove the compliant positive path with a `get-hazard-lineage`-visible tracked issue: record `PASSED` evidence, sign off, transition to `Done` in the real Jira UI, then capture the same key's lineage as `VERIFIED`.
+2. Re-establish a signed compliant baseline: the production suite is currently fully drifted (`verifiedPercentage: 0`, `releaseBlocked: true`), so no compliant demo path exists until a chain member is re-signed.
+3. Complete the browser OAuth consent flow with an external MCP client.

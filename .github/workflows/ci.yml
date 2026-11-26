@@ -123,7 +123,7 @@ jobs:
             echo "Skipping online Forge CLI lint (FORGE_API_TOKEN / FORGE_EMAIL secrets not configured)."
             exit 0
           fi
-          npx --yes @forge/cli@15.0.0 lint --approve MAJOR_VERSION_RULE
+          npx --yes @forge/cli@16.0.0 lint --approve MAJOR_VERSION_RULE
 
   # Production release gate on PRs and pushes to main. Skipped (not failed) when the
   # repository secrets are unavailable, e.g. on fork PRs.

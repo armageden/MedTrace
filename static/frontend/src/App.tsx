@@ -525,6 +525,12 @@ export const App: React.FC = () => {
             source: 'sync',
             message: `Live sync scanned ${jiraIssuesScanned} Jira issue(s) and ${confluencePagesScanned} Confluence page(s) (${skippedUntaggedCount} untagged issue(s) skipped).`,
           });
+        } else {
+          setNotice({
+            kind: 'success',
+            source: 'sync',
+            message: `Live sync scanned ${jiraIssuesScanned} Jira issue(s) and ${confluencePagesScanned} Confluence page(s): ${nextSummary.traceLinks.length} trace link(s) active.`,
+          });
         }
       },
       formatError: (detail) =>
@@ -605,6 +611,13 @@ export const App: React.FC = () => {
           setSelectedLinkId(firstAffected.id);
         } else if (currentSelected) {
           setSelectedLinkId(currentSelected.id);
+        }
+        if (typedReport.affectedHazardKeys.length === 0) {
+          setNotice({
+            kind: 'info',
+            source: 'info',
+            message: 'Blast radius complete: no downstream hazards are affected by this spec.',
+          });
         }
       } else {
         setBlastRadius(null);

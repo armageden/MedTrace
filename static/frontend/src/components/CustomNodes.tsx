@@ -370,7 +370,7 @@ const SignatureNodeInner: React.FC<NodeProps<Node<FlowNodePayload<Part11Signatur
     <div
       role="button"
       tabIndex={0}
-      aria-label={`Electronic Attestation: ${sig.isValid ? 'Certified' : 'Invalidated'} by ${signerLabel}`}
+      aria-label={`Electronic Attestation: ${sig.isValid ? 'Signed' : 'Invalidated'} by ${signerLabel}`}
       onKeyDown={(e) => handleNodeKeyDown(e, data)}
       style={{
         padding: '12px 14px',
@@ -415,7 +415,7 @@ const SignatureNodeInner: React.FC<NodeProps<Node<FlowNodePayload<Part11Signatur
                 ? 'var(--mt-danger-text, #bf2600)'
                 : 'var(--mt-warning-text, #974f0c)';
             const badgeLabel = sig.isValid
-              ? 'CERTIFIED'
+              ? 'SIGNED'
               : hasPriorSignOff
                 ? 'INVALIDATED'
                 : 'UNSIGNED';

@@ -159,7 +159,7 @@ export const FdaExportModal: React.FC<FdaExportModalProps> = ({
     };
     const stamp = new Date().toISOString().replace(/[:.]/g, '-');
     triggerDownload(
-      `${modePrefix}-medtrace-fda-dossier-${stamp}.json`,
+      `${modePrefix}-medtrace-evidence-dossier-${stamp}.json`,
       JSON.stringify(payload, null, 2),
       'application/json'
     );
@@ -374,7 +374,7 @@ export const FdaExportModal: React.FC<FdaExportModalProps> = ({
             <button
               type="button"
               onClick={onClose}
-              aria-label="Close FDA export modal"
+              aria-label="Close evidence export modal"
               className="mt-icon-btn"
             >
               <X size={18} />

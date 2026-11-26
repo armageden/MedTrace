@@ -263,7 +263,7 @@ describe('FE-06: FdaExportModal CSV injection neutralization, audit evidence, an
       expect(downloadedFiles).toHaveLength(2);
       const [jsonFile, csvFile] = downloadedFiles;
 
-      expect(jsonFile.filename).toMatch(/^demo-medtrace-fda-dossier-.*\.json$/);
+      expect(jsonFile.filename).toMatch(/^demo-medtrace-evidence-dossier-.*\.json$/);
       const parsedJson = JSON.parse(jsonFile.content) as {
         exportMetadata: { datasetMode: string; releaseBlocked: boolean; blockingReasons: string[] };
         verifyAuditChain: AuditChainVerification;

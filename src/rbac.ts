@@ -9,7 +9,6 @@ import {
   extractJiraProjectKeyFromRawKey,
   hasJiraBrowsePermissionForCaller,
 } from './seeder-identity';
-import { resolveTraceLinkByHazard } from './seeder-storage';
 import { isForgeRuntime } from './runtime';
 import { isHttpOk, JIRA_ISSUE_KEY_RE, JIRA_PROJECT_KEY_RE } from './crypto-utils';
 import { AuditLogEntry, ComplianceSummary, TraceLink } from './types';

@@ -369,9 +369,7 @@ export const LineageGraph: React.FC<LineageGraphProps> = ({
         <Controls />
         {!compact && <MiniMap nodeColor={minimapNodeColor} style={{ height: 100, width: 140 }} />}
       </ReactFlow>
-      {summary.datasetMode === 'LIVE' &&
-        summary.initialized === false &&
-        summary.traceLinks.length === 0 && (
+      {summary.traceLinks.length === 0 && (
           <div
             style={{
               position: 'absolute',

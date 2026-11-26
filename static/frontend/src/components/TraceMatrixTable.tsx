@@ -146,7 +146,7 @@ export const TraceMatrixTable: React.FC<TraceMatrixTableProps> = ({
             {filteredLinks.length === 0 ? (
               <tr>
                 <td colSpan={7} style={{ padding: '48px 24px', textAlign: 'center' }}>
-                  {hasNoLinksAtAll && !isDemoMode && summary.initialized === false ? (
+                  {hasNoLinksAtAll ? (
                     <LiveOnboardingCard
                       onSyncLive={onSyncLive}
                       onSeedDemo={onSeedDemo}
@@ -246,6 +246,7 @@ export const TraceMatrixTable: React.FC<TraceMatrixTableProps> = ({
                           onSelectTraceLink(link.id);
                         }}
                         aria-label={`Inspect ${link.hazard.key} lineage`}
+                        title="Open inspection: record evidence, sign off, create re-verification task"
                         className="mt-row-inspect-btn"
                       >
                         {link.hazard.key}

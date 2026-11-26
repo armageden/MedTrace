@@ -1000,7 +1000,7 @@ export const InspectionDrawer: React.FC<InspectionDrawerProps> = ({
                 fontSize: 13,
               }}
             >
-              <CheckCircle2 size={16} /> Unbroken IEC 62304 Regulatory Compliance
+              <CheckCircle2 size={16} /> Verified trace (configured checks passed)
             </div>
           ) : datasetMode === 'DEMO' ? (
             <DemoSimulationForm
