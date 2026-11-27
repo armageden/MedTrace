@@ -1149,9 +1149,17 @@ test.describe('McpToolService & rovoActionHandler Integration Tests', () => {
       },
     });
     try {
-      const res = await McpToolService.getHazardLineage(
+      const defaultRes = await McpToolService.getHazardLineage(
         { hazardKey: 'HAZ-MN' },
         { suite, cloudId: '12345678-1234-1234-1234-1234567890ab' }
+      );
+      assert.strictEqual(defaultRes.found, true);
+      assert.strictEqual(queriedAris.length, 0);
+      assert.strictEqual(defaultRes.specOwners, undefined);
+
+      const res = await McpToolService.getHazardLineage(
+        { hazardKey: 'HAZ-MN' },
+        { suite, cloudId: '12345678-1234-1234-1234-1234567890ab', includeSpecOwners: true }
       );
       assert.strictEqual(res.found, true);
       assert.strictEqual(res.teamworkGraphStatus, 'OK');

@@ -470,7 +470,6 @@ defineTypedResolver('queryGraphContext', async (req) => {
 
   return TeamworkGraphService.queryIssueGraphContext(issueKey, {
     callerMode: 'USER',
-    includeSpecOwners: true,
   });
 });
 

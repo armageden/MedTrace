@@ -784,7 +784,7 @@ export const InspectionDrawer: React.FC<InspectionDrawerProps> = ({
             />
           </div>
 
-          {/* Atlassian Lineage Metadata (Jira REST + Teamwork Graph) */}
+          {/* Atlassian Lineage Metadata (Jira REST + Confluence Links) */}
           <div
             style={{
               ...sectionStyle,
@@ -795,7 +795,7 @@ export const InspectionDrawer: React.FC<InspectionDrawerProps> = ({
             <div style={sectionHeader}>
               <Share2 size={15} color="var(--mt-brand-text)" />
               <span style={{ color: 'var(--mt-brand-text)' }}>
-                Atlassian Lineage Metadata (Jira REST + Teamwork Graph)
+                Atlassian Lineage Metadata (Jira REST + Confluence Links)
               </span>
             </div>
             {link.graphMetadata ? (

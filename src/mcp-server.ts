@@ -475,7 +475,12 @@ export class McpToolService {
       issueKey?: string;
       hazardKey?: string;
     },
-    options?: { suite?: ComplianceSummary; cloudId?: string; includeAvailableKeys?: boolean }
+    options?: {
+      suite?: ComplianceSummary;
+      cloudId?: string;
+      includeAvailableKeys?: boolean;
+      includeSpecOwners?: boolean;
+    }
   ): Promise<HazardLineageResponse> {
     let suite = options?.suite ?? (await SeederService.getActiveComplianceSuite());
     const rawIssueKey = typeof inputs?.issueKey === 'string' ? inputs.issueKey.trim() : '';
@@ -528,7 +533,7 @@ export class McpToolService {
           .map((m) => (typeof m.spec.pageId === 'string' ? m.spec.pageId.trim() : ''))
           .filter(Boolean);
         const cloudId = typeof options?.cloudId === 'string' ? options.cloudId.trim() : '';
-        if (isForgeRuntime() && cloudId && pageIds.length > 0) {
+        if (options?.includeSpecOwners === true && isForgeRuntime() && cloudId && pageIds.length > 0) {
           try {
             const { owners, status } = await fetchSpecOwnersFromTeamworkGraph(
               api.asUser(),

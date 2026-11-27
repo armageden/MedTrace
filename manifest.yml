@@ -163,9 +163,8 @@ permissions:
     - read:jira-work
     - write:jira-work
     - read:jira-user
-    # Teamwork Graph curated query confluencePageOwners for spec owners
-    - read:graph:page:confluence
-    - read:graph:user:atlassian
+    # Teamwork Graph Preview scopes (read:graph:page:confluence, read:graph:user:atlassian) are intentionally omitted:
+    # Forge's token service fails fresh user OAuth consent (401 atlassian-token-service-key) when declared in this bundle.
     # Granular Confluence REST v2 + current-user + avi:confluence:updated:page trigger scopes (required for /wiki/api/v2/pages, /spaces, /*/operations, and /wiki/rest/api/user/current)
     # write:page:confluence is used only to create the opt-in live proof SRS page; MedTrace does not modify existing pages.
     - read:page:confluence

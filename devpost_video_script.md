@@ -14,86 +14,42 @@ platform; public YouTube link.
 > affected. MedTrace tracks that chain on live Atlassian data, revokes stale approvals, enforces
 > the release gate, and creates linked re-verification tasks without leaving Atlassian."
 
-### Shot 2 — Live Data & Sync (0:20–0:50) · screen: Jira project + Confluence space → MedTrace
-**Action:** Show real `MEDTRACE` Jira issues (in `Under Review`, labeled `class-c`, linked via
-Confluence remote links and native `issuelinks`) and Confluence SRS pages. Open MedTrace in
-empty `LIVE` mode (`RELEASE BLOCKED`) and click `Sync Live Atlassian` to ingest live artifacts.
-> **NARRATION:** "LIVE mode starts fail-closed with zero hazards. One click on Sync Live
-> Atlassian ingests real Jira issues, Confluence remote links, and native issue links—with no
-> fabricated risk metrics."
+### Shot 2 — Live Data & Proof Chain (`SMK` on `farhantanvir277.atlassian.net`) (0:20–0:50) · screen: Jira `SMK` → MedTrace
+**Action:** Open MedTrace in `SMK` in empty `LIVE` mode (`RELEASE BLOCKED`) and show **Create Live Proof Chain** (creating Confluence SRS page `4620289` with `5.0 mL/hr`, native Hazard `SMK-1`, Verification Test `SMK-2`, and Work `SMK-3`) or the live synced `SMK` matrix.
+> **NARRATION:** "LIVE mode starts fail-closed with zero hazards. Create Live Proof Chain creates real native Jira issues and a Confluence SRS page—with no fabricated test evidence or approvals."
 
-### Shot 3 — Compliant Path: `Under Review → Done` (0:50–1:30) · screen: Inspection Drawer → Jira board
-**Action:** On a `MEDTRACE` issue in `Under Review`, record `PASSED` test evidence (`https://...`),
-execute `Sign Off Spec (Attestation)`, then transition the issue in Jira from `Under Review → Done`
-with the live `jira:workflowValidator` attached. Transition succeeds.
-> **NARRATION:** "Recording passing test evidence and signing the Confluence spec's SHA-256 hash
-> satisfies the release gate—so the real Jira workflow validator allows moving this compliant
-> issue from Under Review to Done."
+### Shot 3 — Compliant Path: `SMK-3 → Done` (0:50–1:30) · screen: Inspection Drawer → Jira board
+**Action:** Record `SMK-2` as `PASSED` (`https://...`), complete `Sign Off Spec (Attestation)`, then transition `SMK-3` to `Done` (`Mark as done`) in Jira with `MedTrace IEC 62304 Safety Gate` (`medtrace-safety-validator`) attached. Transition succeeds (`100% VERIFIED`).
+> **NARRATION:** "Recording passing test evidence and signing the Confluence spec's SHA-256 hash satisfies the release gate—so the real Jira workflow validator allows moving SMK-3 to Done."
 
-### Shot 4 — Confluence Drift & Blast Radius (1:30–2:10) · screen: Confluence edit → MedTrace graph
-**Action:** Edit `SRS-201` in Confluence (`5.0` → `5.5` mL/hr) and publish. Return to MedTrace:
-cross-partition Confluence hash reconciliation (complementing `avi:confluence:updated:page`)
-automatically revokes the signature (`SIGNATURE_DRIFT`). Run
-`Blast Radius` to highlight the full transitive impact path across shared hazards and work items.
-> **NARRATION:** "Now SRS-201 changes from 5.0 to 5.5. Live Confluence hash reconciliation recomputes the digest,
-> revokes the stale signature automatically, and traces the complete transitive blast radius."
+### Shot 4 — Confluence Drift & Blast Radius (1:30–2:10) · screen: Confluence `4620289` edit → MedTrace graph
+**Action:** Edit page `4620289` in Confluence (`5.0` → `5.5` mL/hr, `v2`) and publish. Return to MedTrace: cross-partition Confluence hash reconciliation automatically revokes the signature (`INVALIDATED`). Run `Blast Radius` to highlight all 4 hops (`SMK-1`, `SMK-3`, `SMK-2`, revoked `PART11_ATTESTATION`).
+> **NARRATION:** "Now the Confluence SRS changes from 5.0 to 5.5. Live hash reconciliation recomputes the SHA-256 digest, revokes the stale signature automatically, and traces the complete 4-hop blast radius."
 
-### Shot 5 — Gate Enforcement Alongside Compliant Case (2:10–2:40) · screen: Jira transition blocked
-**Action:** Attempt to transition an affected/incomplete Jira issue to `Done` using the real Jira
-workflow validator—transition is blocked with the exact missing-evidence / signature-drift reason,
-contrasted alongside the earlier `Done` issue.
-> **NARRATION:** "With approval drifted or evidence missing, the same Jira workflow validator blocks
-> the transition to Done—contrasted directly with our compliant issue."
+### Shot 5 — Live Gate Block & Re-Verification Closeout (2:10–2:40) · screen: Jira `SMK-4` transition blocked → approved
+**Action:** Create linked re-verification task `SMK-4` (`medtrace-reverification`), attempt `Mark as done` on `SMK-4` in Jira while drifted -> blocked live by the workflow validator. Re-record `SMK-2` `PASSED`, re-sign `SMK-1` (`v2`), and transition `SMK-4` to `Done` (`APPROVED`).
+> **NARRATION:** "While drifted, the Jira workflow validator blocks SMK-4 from Done. Once re-tested and re-signed for v2, SMK-4 transitions cleanly to Done."
 
-### Shot 6 — Hosted Atlassian MCP Read + Write (2:40–3:20) · screen: MCP client over OAuth 2.1
-**Action:** Show the MCP client connected to
-`https://mcp.atlassian.com/forge/5e49c10e-696f-4984-9d00-4a47d0a5dd99` over OAuth 2.1. Run
-`verify-iec-compliance-action` (`configuredChecksPassed: false`), then invoke
-`create-reverification-task-action` to create and link the Jira re-verification task under user permissions.
-> **NARRATION:** "Through hosted Atlassian MCP over OAuth, verify-iec-compliance flags the drift,
-> and create-reverification-task creates and links the Jira follow-up task—invoked by the user,
-> never silently auto-created."
+### Shot 6 — Ask Rovo (`MedTrace Auditor`) & Hosted Atlassian MCP (2:40–3:20) · screen: Jira Ask Rovo + Claude Code OAuth MCP
+**Action:** In Jira **Ask Rovo** (`MedTrace Auditor`), run `get-hazard-lineage-action` and `verify-iec-compliance-action` (`MEDTRACE-4` verified, `MEDTRACE-1` flagged), and show Claude Code connected over OAuth 2.1 to `https://mcp.atlassian.com/forge/5e49c10e-696f-4984-9d00-4a47d0a5dd99` invoking live hosted MCP tools (failing closed on uninitialized partitions).
+> **NARRATION:** "Inside Jira Ask Rovo and over hosted Atlassian MCP with OAuth 2.1, MedTrace Auditor verifies live lineage and fails closed whenever a product partition is uninitialized."
 
 ### Shot 7 — Evidence & Close (3:20–3:50) · screen: Jira link + Audit Log + Export Dossier
-**Action:** Briefly show the linked re-verification task inside Jira, the hash-chained Audit Log,
-and Export Dossier. Repeat the winning thesis.
-> **NARRATION:** "The Jira issue link and hash-chained audit record close the loop. A Confluence
-> requirement changes; MedTrace proves the impact, revokes stale approvals, and creates linked
-> re-verification work without leaving Atlassian."
+**Action:** Briefly show the linked re-verification task inside Jira, the hash-chained Audit Log, and Export Dossier. Repeat the winning thesis.
+> **NARRATION:** "The Jira issue link and hash-chained audit record close the loop. A Confluence requirement changes; MedTrace proves the impact, revokes stale approvals, and gates unsafe releases without leaving Atlassian."
 
 **Recording notes:** 1080p minimum, zoom to 125% in Jira, cut all dead time, captions on
 (YouTube auto-captions + manual fix of IEC/62304/14971 terms).
 
 ---
 
-## Part 2 — 60-minute judge dress rehearsal (do this the day before recording)
+## Part 2 — Rehearsal checklist (SMK on farhantanvir277 + Ask Rovo on MEDTRACE)
 
-1. **Confirm the live dataset on MEDTRACE (10 min):** open the `MEDTRACE` Jira project (six
-   issues, correct labels) and the `MEDTRACE` Confluence space (four SRS pages, status current).
-   Open the MedTrace project page in `MEDTRACE` → confirm clean uninitialized `LIVE` state →
-   click `Sync Live Atlassian` → confirm hazards, tests, and the four SRS links populate,
-   MEDTRACE-5 shows the missing-SRS flag, and MEDTRACE-6 is skipped.
-2. **Close-the-loop path + real Jira `Under Review → Done` (10 min):** on MEDTRACE-1 (in
-   `Under Review`) use `Record Test Result` (`PASSED` + an `https://` evidence URL) →
-   `Sign Off Spec (Attestation)` → link flips to `VERIFIED` (and any sibling work sharing the
-   same `(hazardKey, specId)` baseline updates too), then transition MEDTRACE-1 to `Done` in Jira
-   with `MedTrace IEC 62304 Safety Gate` (`medtrace-safety-validator`) attached.
-3. **Confluence drift trigger (10 min):** edit SRS-201 (`5.0` → `5.5` mL/hr) and publish →
-   return to the MedTrace tab (a window `focus` refresh auto-reconciles without `skipReconcile`, complementing `avi:confluence:updated:page`; reload if needed) and confirm the signature is revoked → run `Blast Radius`.
-   Check `forge logs -e production` for the trigger/reconciliation event if nothing changes.
-4. **Negative gate check (5 min):** attempt to transition an affected/incomplete Jira issue to
-   `Done` using the live Jira workflow validator and verify it blocks with the exact violation
-   alongside the earlier `Done` issue.
-5. **Atlassian MCP (10 min):** a site or org admin enables external MCP exposure (Atlassian
-   Administration → Apps → Sites → site → Connected apps → MedTrace → turn on tools). Connect an
-   MCP client to `https://mcp.atlassian.com/forge/5e49c10e-696f-4984-9d00-4a47d0a5dd99` via the
-   OAuth consent screen, run `verify-iec-compliance-action` referencing `MEDTRACE-1` / `SRS-201` → expect
-   `configuredChecksPassed: false`, and run `create-reverification-task-action` (confirming task creation,
-   honest link reporting, and reuse of any open linked task).
-6. **Demo fallback + install smoke (10 min):** on a scratch site, install via the judge-facing
-   link → `Seed Demo Suite` → confirm the `DEMO DATASET` badge path still works for evaluators
-   with no tenant data.
-7. **Recording prep (5 min):** 1080p, zoom 125%, cut dead time, keep under 5:00.
+1. **Confirm live `SMK` proof chain (`farhantanvir277.atlassian.net`):** `SMK-1` (Hazard `CLASS C`), `SMK-2` (Test), `SMK-3` (Work), `SMK-4` (`medtrace-reverification`), and Confluence SRS `4620289` (`v2`, `5.5 mL/hr`).
+2. **Confirm Jira workflow validator binding:** `MedTrace IEC 62304 Safety Gate` (`medtrace-safety-validator`) bound on `Mark as done` in `SMK`.
+3. **Ask Rovo (`MedTrace Auditor` on `one-atlas-feur.atlassian.net`):** Query `MEDTRACE-4` (passes) and `MEDTRACE-1` (flagged).
+4. **Hosted MCP (`rovo:mcp`):** `claude mcp` connected to `https://mcp.atlassian.com/forge/5e49c10e-696f-4984-9d00-4a47d0a5dd99` over OAuth 2.1 (`verify-iec-compliance-action`, `get-hazard-lineage-action`).
+5. **Recording prep:** 1080p, zoom 125%, cut dead time, keep under 5:00.
 
 ---
 

@@ -58,7 +58,7 @@ forge install -e production --site <your-site>.atlassian.net --product jira
 forge install -e production --site <your-site>.atlassian.net --product confluence
 ```
 
-When updating scopes (including `read:graph:page:confluence` and `read:graph:user:atlassian` for Teamwork Graph `confluencePageOwners`, or `write:page:confluence` for the explicit live proof SRS page) or manifest modules on an existing installation, pass `--upgrade` to `forge install` for both `--product jira` and `--product confluence`; added write scopes require user/admin major-version consent before the corresponding feature can execute. Because Forge partitions `@forge/kvs` storage per installed product/context and Atlassian-hosted `rovo:mcp` exposure is enabled per product in Connected apps, ensure live sync is initialized on the product partition you expose via `rovo:mcp`.
+When updating scopes (such as `write:page:confluence` for the explicit live proof SRS page) or manifest modules on an existing installation, pass `--upgrade` to `forge install` for both `--product jira` and `--product confluence`; added write scopes require user/admin major-version consent before the corresponding feature can execute. Because Forge partitions `@forge/kvs` storage per installed product/context and Atlassian-hosted `rovo:mcp` exposure is enabled per product in Connected apps, ensure live sync is initialized on the product partition you expose via `rovo:mcp`.
 
 Do not add future `app.rovo` metadata until the installed `@forge/manifest` schema accepts it; `@forge/manifest` `13.9.0` rejects unknown `app.rovo` properties. Follow [../03-mcp-integration/hosted-mcp-verification.md](../03-mcp-integration/hosted-mcp-verification.md) before changing that metadata.
 
