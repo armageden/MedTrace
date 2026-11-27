@@ -18,6 +18,7 @@ import {
   getActiveUserIdentityResolver,
   getPart11SigningSecret,
   mapJiraStatusToWorkStatus,
+  resolveCreatemetaIssueTypeRef,
 } from './seeder-identity';
 import {
   BATCH_CHUNK_SIZE,
@@ -1838,35 +1839,10 @@ export class SeederService {
     }
 
     // 2. Resolve a valid non-subtask Jira issueType for the target project (prefer Task)
-    let issueTypeRef: { id?: string; name?: string } = { name: 'Task' };
-    try {
-      const metaResp = await requester.requestJira(
-        route`/rest/api/3/issue/createmeta/${targetProjectKey}/issuetypes`
-      );
-      if (metaResp.status === 200) {
-        const metaJson = (await metaResp.json().catch(() => ({}))) as {
-          issueTypes?: Array<{ id?: string; name?: string; subtask?: boolean }>;
-          values?: Array<{ id?: string; name?: string; subtask?: boolean }>;
-        };
-        const list = Array.isArray(metaJson.issueTypes)
-          ? metaJson.issueTypes
-          : Array.isArray(metaJson.values)
-            ? metaJson.values
-            : [];
-        const candidates = list.filter((it) => it && it.subtask !== true);
-        const preferred =
-          candidates.find((it) => String(it.name || '').toLowerCase() === 'task') ||
-          candidates.find((it) => String(it.name || '').toLowerCase() === 'story') ||
-          candidates[0];
-        if (preferred?.id) {
-          issueTypeRef = { id: String(preferred.id) };
-        } else if (preferred?.name) {
-          issueTypeRef = { name: String(preferred.name) };
-        }
-      }
-    } catch {
-      // Fall back to { name: 'Task' }
-    }
+    const issueTypeRef = await resolveCreatemetaIssueTypeRef(
+      (r) => requester.requestJira(r),
+      targetProjectKey
+    );
 
     const customSummary = typeof params.summary === 'string' ? params.summary.trim() : '';
     const issueSummary = (

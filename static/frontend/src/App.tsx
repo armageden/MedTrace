@@ -217,7 +217,7 @@ export const App: React.FC = () => {
 
       try {
         const result: unknown =
-          (await (mode === 'poll' || mode === 'focus'
+          (await (mode === 'poll'
             ? invokeResolver('getComplianceSuite', { skipReconcile: true })
             : invokeResolver('getComplianceSuite'))) ?? null;
         if (
@@ -917,6 +917,9 @@ export const App: React.FC = () => {
         onSyncLive={() => {
           void handleSyncLive();
         }}
+        onCreateLiveProof={() => {
+          void handleCreateLiveProof();
+        }}
         onResumeSync={() => {
           void handleSyncLive({ resumeFromCursor: true });
         }}
@@ -930,6 +933,7 @@ export const App: React.FC = () => {
         }}
         isSeeding={isSeeding}
         isSyncingLive={isSyncingLive}
+        isCreatingLiveProof={isCreatingLiveProof}
         isAnalyzingBlastRadius={isAnalyzingBlastRadius}
         isTestingTransition={isTestingTransition}
         isMutating={isMutating}
@@ -1005,6 +1009,7 @@ export const App: React.FC = () => {
             }}
             canCreateLiveProof={Boolean(panelContext.projectKey)}
             isBusy={isBusy}
+            isConfluence={Boolean(panelContext.isConfluence)}
           />
         ) : (
           <TraceMatrixTable
@@ -1019,6 +1024,7 @@ export const App: React.FC = () => {
             }}
             canCreateLiveProof={Boolean(panelContext.projectKey)}
             isBusy={isBusy}
+            isConfluence={Boolean(panelContext.isConfluence)}
           />
         )}
       </main>

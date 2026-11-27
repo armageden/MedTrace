@@ -155,7 +155,12 @@ export function buildMetaAndShardItems(
   summary.traceLinks.forEach((link, idx) => {
     const kvsKey = linkKeys[idx];
     if (!kvsKey) return;
-    for (const rawKey of [link.work?.key, link.hazard?.key, link.test?.testKey]) {
+    for (const rawKey of [
+      link.work?.key,
+      link.hazard?.key,
+      link.test?.testKey,
+      link.reverificationTaskKey,
+    ]) {
       const normalized = rawKey?.trim().toUpperCase();
       if (!normalized) continue;
       const existing = issueKeyIndex[normalized];

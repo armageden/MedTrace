@@ -25,6 +25,7 @@ interface LineageGraphProps {
   onCreateLiveProof?: () => void;
   canCreateLiveProof?: boolean;
   isBusy?: boolean;
+  isConfluence?: boolean;
 }
 
 const nodeTypes: NodeTypes = {
@@ -148,6 +149,7 @@ export const LineageGraph: React.FC<LineageGraphProps> = ({
   onCreateLiveProof,
   canCreateLiveProof,
   isBusy = false,
+  isConfluence = false,
 }) => {
   const [ambiguousRefs, setAmbiguousRefs] = useState<FlowLinkRef[] | null>(null);
   const popoverRef = useRef<HTMLDivElement | null>(null);
@@ -389,6 +391,7 @@ export const LineageGraph: React.FC<LineageGraphProps> = ({
               onCreateLiveProof={onCreateLiveProof}
               canCreateLiveProof={canCreateLiveProof}
               isBusy={isBusy}
+              isConfluence={isConfluence}
             />
           </div>
         )}

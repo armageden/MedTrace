@@ -79,7 +79,7 @@ and Export Dossier. Repeat the winning thesis.
    same `(hazardKey, specId)` baseline updates too), then transition MEDTRACE-1 to `Done` in Jira
    with `MedTrace IEC 62304 Safety Gate` (`medtrace-safety-validator`) attached.
 3. **Confluence drift trigger (10 min):** edit SRS-201 (`5.0` → `5.5` mL/hr) and publish →
-   reload MedTrace (cross-partition `reconcileConfluenceSpecs`, complementing `avi:confluence:updated:page`) and confirm the signature is revoked → run `Blast Radius`.
+   return to the MedTrace tab (a window `focus` refresh auto-reconciles without `skipReconcile`, complementing `avi:confluence:updated:page`; reload if needed) and confirm the signature is revoked → run `Blast Radius`.
    Check `forge logs -e production` for the trigger/reconciliation event if nothing changes.
 4. **Negative gate check (5 min):** attempt to transition an affected/incomplete Jira issue to
    `Done` using the live Jira workflow validator and verify it blocks with the exact violation

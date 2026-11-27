@@ -245,16 +245,6 @@ export class ComplianceEngine {
   }
 
   /**
-   * Computes a non-secret 12-hex-character key fingerprint for identifying active or retired Part 11 HMAC keys.
-   */
-  public static computePart11KeyFingerprint(secret: string): string {
-    if (typeof secret !== 'string' || secret.trim() === '') {
-      throw new Error('MEDTRACE_PART11_SECRET must be non-empty to compute a Part 11 key fingerprint.');
-    }
-    return `sha256:${sha256Hex(secret.trim()).slice(0, 12)}`;
-  }
-
-  /**
    * Resolves the ordered, deduplicated Part 11 verification key ring (active secret followed by retired secrets).
    * Only reads `MEDTRACE_PART11_PREVIOUS_SECRETS` when `previousSecretsCsv` is supplied, `primarySecret` is omitted,
    * or `primarySecret` matches the active `MEDTRACE_PART11_SECRET` so explicit wrong-secret checks fail closed.
@@ -554,7 +544,8 @@ export class ComplianceEngine {
     return (
       (link.work?.key || '').trim().toUpperCase() === cleanUpperKey ||
       (link.hazard?.key || '').trim().toUpperCase() === cleanUpperKey ||
-      (link.test?.testKey || '').trim().toUpperCase() === cleanUpperKey
+      (link.test?.testKey || '').trim().toUpperCase() === cleanUpperKey ||
+      (link.reverificationTaskKey || '').trim().toUpperCase() === cleanUpperKey
     );
   }
 
@@ -605,9 +596,14 @@ export class ComplianceEngine {
         }
         const matchesWork = (link.work?.key || '').trim().toUpperCase() === cleanIssueKey;
         const matchesHazard = (link.hazard?.key || '').trim().toUpperCase() === cleanIssueKey;
+        const matchesReverificationTask =
+          !matchesWork &&
+          !matchesHazard &&
+          (link.reverificationTaskKey || '').trim().toUpperCase() === cleanIssueKey;
         const matchesTestOnly =
           !matchesWork &&
           !matchesHazard &&
+          !matchesReverificationTask &&
           (link.test?.testKey || '').trim().toUpperCase() === cleanIssueKey;
 
         if (matchesTestOnly) {
@@ -621,11 +617,13 @@ export class ComplianceEngine {
           };
         }
 
-        // Transition-aware check: when moving the linked work item INTO Done, evaluate with status 'Done'
-        // so compliant issues in Under Review / In Progress can transition without already being Done.
+        // Transition-aware check: when moving the linked work item (or its re-verification task) INTO Done,
+        // evaluate with status 'Done' so compliant issues in Under Review / In Progress can transition
+        // without already being Done. Closing a re-verification task therefore succeeds once the parent
+        // chain is re-verified, without requiring link.work.status to already be 'Done'.
         if (
           options?.transitionToDone === true &&
-          matchesWork &&
+          (matchesWork || matchesReverificationTask) &&
           link.hazard &&
           link.spec &&
           link.work &&

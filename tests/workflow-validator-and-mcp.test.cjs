@@ -527,6 +527,138 @@ test.describe('Workflow Validator Handler - Typed Release Gate & Fail-Closed Beh
     assert.match(proxyFailRes.errorMessage || '', /Unable to verify IEC 62304 compliance integrity/);
   });
 
+  test.it('blocks reverificationTaskKey transition to Done while the parent chain is drifted/unsigned and allows it once re-verified', async () => {
+    const prevSecret = process.env.MEDTRACE_PART11_SECRET;
+    const secret = 'reverification-gate-secret-001';
+    process.env.MEDTRACE_PART11_SECRET = secret;
+
+    const buildReverificationLink = ({
+      taskKey,
+      specHash,
+      signedHash,
+      sigValid,
+      invalidated,
+    }) => {
+      const signature = {
+        id: `sig-${taskKey}`,
+        signedBy: 'Dr. Signer',
+        signedByAccountId: 'acc-signer',
+        signedAt: '2026-11-20T00:00:00Z',
+        role: 'Clinical Safety Officer',
+        meaning: 'Approved safety specification',
+        artifactSha256: signedHash,
+        isValid: sigValid,
+        authMethod: 'PART11_ATTESTATION',
+        signatureAlgorithm: 'HMAC-SHA256-SEAL-V1',
+      };
+      signature.signatureSeal = ComplianceEngine.computePart11Seal(
+        {
+          hazardKey: `HAZ-${taskKey}`,
+          specId: `srs-${taskKey}`,
+          artifactSha256: signedHash,
+          signedByAccountId: 'acc-signer',
+          signedBy: 'Dr. Signer',
+          role: 'Clinical Safety Officer',
+          meaning: 'Approved safety specification',
+          signedAt: '2026-11-20T00:00:00Z',
+          authMethod: 'PART11_ATTESTATION',
+        },
+        secret
+      );
+      return ComplianceEngine.evaluateTraceLink(
+        {
+          id: `haz-${taskKey}`,
+          key: `HAZ-${taskKey}`,
+          title: `Hazard ${taskKey}`,
+          riskClass: 'CLASS_C',
+          severity: 'CRITICAL',
+          probability: 'REMOTE',
+          mitigationRequirementId: `srs-${taskKey}`,
+          status: 'MITIGATED',
+        },
+        {
+          id: `srs-${taskKey}`,
+          pageId: '99001',
+          title: `SRS ${taskKey}`,
+          version: 1,
+          sha256Hash: specHash,
+          lastSignedHash: signedHash,
+          isSignatureInvalidated: invalidated,
+          contentSnippet: 'spec',
+          lastUpdated: '2026-11-20T00:00:00Z',
+        },
+        // Parent work item intentionally NOT Done; closing the re-verification task must not depend on it.
+        { id: `w-${taskKey}`, key: `MED-${taskKey}`, title: `Work ${taskKey}`, status: 'In Progress', assignee: 'QA' },
+        {
+          id: `t-${taskKey}`,
+          testKey: `TST-${taskKey}`,
+          title: `Test ${taskKey}`,
+          testType: 'Unit Test',
+          status: 'PASSED',
+          evidenceUrl: 'https://ci.example.internal/runs/1',
+          executionDate: '2026-11-20T00:00:00Z',
+        },
+        signature,
+        undefined,
+        { linkId: `link-${taskKey}`, reverificationTaskKey: taskKey }
+      );
+    };
+
+    try {
+      const verifiedParent = buildReverificationLink({
+        taskKey: 'REV-PASS',
+        specHash: 'a'.repeat(64),
+        signedHash: 'a'.repeat(64),
+        sigValid: true,
+        invalidated: false,
+      });
+      const driftedParent = buildReverificationLink({
+        taskKey: 'REV-DRIFT',
+        specHash: 'b'.repeat(64),
+        signedHash: 'a'.repeat(64),
+        sigValid: true,
+        invalidated: false,
+      });
+      const unsignedParent = buildReverificationLink({
+        taskKey: 'REV-UNSIGNED',
+        specHash: 'a'.repeat(64),
+        signedHash: 'a'.repeat(64),
+        sigValid: false,
+        invalidated: true,
+      });
+      assert.strictEqual(driftedParent.work.status, 'In Progress');
+
+      const suite = ComplianceEngine.generateComplianceReport(
+        [verifiedParent, driftedParent, unsignedParent],
+        'LIVE',
+        'Reverification Gate Suite',
+        { initialized: true }
+      );
+      SeederService.getActiveComplianceSuite = async () => suite;
+
+      const doneTransition = (key) => ({ issue: { key }, transition: { name: 'Done' } });
+
+      const driftedRes = await workflowValidatorHandler(doneTransition('REV-DRIFT'));
+      assert.strictEqual(driftedRes.result, false);
+      assert.match(driftedRes.errorMessage || '', /Human-initiated transition blocked for REV-DRIFT/);
+
+      const unsignedRes = await workflowValidatorHandler(doneTransition('REV-UNSIGNED'));
+      assert.strictEqual(unsignedRes.result, false);
+      assert.match(unsignedRes.errorMessage || '', /Human-initiated transition blocked for REV-UNSIGNED/);
+
+      const verifiedRes = await workflowValidatorHandler(doneTransition('REV-PASS'));
+      assert.strictEqual(
+        verifiedRes.result,
+        true,
+        `Re-verification task must close to Done once the parent chain is re-verified, got: ${verifiedRes.errorMessage}`
+      );
+      assert.strictEqual(verifiedRes.errorMessage, undefined);
+    } finally {
+      if (prevSecret === undefined) delete process.env.MEDTRACE_PART11_SECRET;
+      else process.env.MEDTRACE_PART11_SECRET = prevSecret;
+    }
+  });
+
   test.it('maintains policy parity with ComplianceEngine.evaluateIssueReleaseGate and webtrigger verify-release-gate', async () => {
     const prevSecret = process.env.MEDTRACE_MCP_SECRET;
     const prevNonceStore = getNonceStore();

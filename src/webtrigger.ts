@@ -171,12 +171,6 @@ function getHeader(
   return undefined;
 }
 
-function timingSafeSecretEquals(provided: string, expected: string): boolean {
-  const hashA = crypto.createHash('sha256').update(provided).digest();
-  const hashB = crypto.createHash('sha256').update(expected).digest();
-  return crypto.timingSafeEqual(hashA, hashB);
-}
-
 function jsonResponse(
   statusCode: number,
   payload: unknown,
@@ -249,11 +243,6 @@ export async function mcpWebtriggerHandler(request: WebtriggerRequest): Promise<
     return jsonResponse(401, {
       error: 'Unauthorized: Missing or invalid x-medtrace-signature header.',
     });
-  }
-
-  const suppliedKey = getHeader(request.headers, 'x-medtrace-key');
-  if (suppliedKey !== undefined && !timingSafeSecretEquals(suppliedKey, configuredSecret)) {
-    return jsonResponse(401, { error: 'Unauthorized: Invalid MedTrace MCP key.' });
   }
 
   const reqTime = Number(timestampHeader);

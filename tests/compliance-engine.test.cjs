@@ -235,7 +235,6 @@ test.describe('Webtrigger Cryptographic Security - HMAC-SHA256 & Replay Protecti
       const liveResp = await mcpWebtriggerHandler({
         method: 'POST',
         headers: {
-          'x-medtrace-key': secret,
           'x-medtrace-timestamp': tsLive,
           'x-medtrace-nonce': nonceLive,
           'x-medtrace-signature': `sha256=${sigLive}`,
@@ -268,7 +267,6 @@ test.describe('Webtrigger Cryptographic Security - HMAC-SHA256 & Replay Protecti
       const resp = await mcpWebtriggerHandler({
         method: 'POST',
         headers: {
-          'x-medtrace-key': secret,
           'x-medtrace-timestamp': ts,
           'x-medtrace-nonce': nonce,
           'x-medtrace-signature': `sha256=${sig}`,
@@ -296,7 +294,6 @@ test.describe('Webtrigger Cryptographic Security - HMAC-SHA256 & Replay Protecti
     const req = {
       method: 'POST',
       headers: {
-        'x-medtrace-key': mcpSecret,
         'x-medtrace-timestamp': ts,
         'x-medtrace-nonce': testNonce,
         'x-medtrace-signature': `sha256=${sig}`,
@@ -322,7 +319,6 @@ test.describe('Webtrigger Cryptographic Security - HMAC-SHA256 & Replay Protecti
     const resUnknown = await mcpWebtriggerHandler({
       method: 'POST',
       headers: {
-        'x-medtrace-key': mcpSecret,
         'x-medtrace-timestamp': ts,
         'x-medtrace-nonce': unknownNonce,
         'x-medtrace-signature': `sha256=${unknownSig}`,
@@ -349,7 +345,7 @@ test.describe('Webtrigger Cryptographic Security - HMAC-SHA256 & Replay Protecti
   test.it('fails closed with HTTP 500 when MEDTRACE_MCP_SECRET is unset in environment', async () => {
     delete process.env.MEDTRACE_MCP_SECRET;
     try {
-      const resp = await mcpWebtriggerHandler({ method: 'GET', headers: { 'x-medtrace-key': 'anything' } });
+      const resp = await mcpWebtriggerHandler({ method: 'GET', headers: {} });
       assert.strictEqual(resp.statusCode, 500);
       assert.match(resp.body, /fail-closed/);
     } finally {
@@ -365,7 +361,6 @@ test.describe('Webtrigger Cryptographic Security - HMAC-SHA256 & Replay Protecti
     const resp = await mcpWebtriggerHandler({
       method: 'POST',
       headers: {
-        'x-medtrace-key': secret,
         'x-medtrace-timestamp': ts,
         'x-medtrace-nonce': nonce,
         'x-medtrace-signature': `sha256=${sig}`,
@@ -419,7 +414,6 @@ test.describe('Webtrigger Cryptographic Security - HMAC-SHA256 & Replay Protecti
       const resp = await mcpWebtriggerHandler({
         method: 'POST',
         headers: {
-          'x-medtrace-key': secret,
           'x-medtrace-timestamp': ts,
           'x-medtrace-nonce': nonce,
           'x-medtrace-signature': `sha256=${sig}`,
@@ -481,7 +475,6 @@ test.describe('Webtrigger Cryptographic Security - HMAC-SHA256 & Replay Protecti
       const resp = await mcpWebtriggerHandler({
         method: 'POST',
         headers: {
-          'x-medtrace-key': secret,
           'x-medtrace-timestamp': ts,
           'x-medtrace-nonce': nonce,
           'x-medtrace-signature': `sha256=${sig}`,
@@ -517,7 +510,6 @@ test.describe('Webtrigger Cryptographic Security - HMAC-SHA256 & Replay Protecti
         return mcpWebtriggerHandler({
           method: 'POST',
           headers: {
-            'x-medtrace-key': secret,
             'x-medtrace-timestamp': ts,
             'x-medtrace-nonce': nonce,
             'x-medtrace-signature': `sha256=${sig}`,
@@ -2602,12 +2594,6 @@ test.describe('ComplianceEngine - Part 11 Key-Ring Rotation & Fast-Path Gate Com
   test.it('rotates MEDTRACE_PART11_SECRET via MEDTRACE_PART11_PREVIOUS_SECRETS without rejecting valid historical seals', () => {
     const oldSecret = 'retired-part11-secret-v1';
     const newSecret = 'active-part11-secret-v2';
-
-    const fpOld = ComplianceEngine.computePart11KeyFingerprint(oldSecret);
-    const fpNew = ComplianceEngine.computePart11KeyFingerprint(newSecret);
-    assert.match(fpOld, /^sha256:[0-9a-f]{12}$/);
-    assert.notStrictEqual(fpOld, fpNew);
-    assert.throws(() => ComplianceEngine.computePart11KeyFingerprint('   '), /non-empty/i);
 
     const sealPayload = {
       hazardKey: 'HAZ-501',

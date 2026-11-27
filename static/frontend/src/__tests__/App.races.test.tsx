@@ -1148,7 +1148,8 @@ describe('FE-01..FE-04 & FE-07: App races, bridge errors, confirm seed, and tran
     expect(await screen.findByRole('dialog')).toBeInTheDocument();
   });
 
-  it('passes skipReconcile: true on window focus refresh so tab switches avoid full Confluence sweeps', async () => {
+  it('reconciles Confluence on window focus without skipReconcile while interval polling stays cache-only', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
     const suite = makeSuite();
     mockedInvokeResolver.mockImplementation(async (key) => {
       if (key === 'getComplianceSuite') return suite;
@@ -1161,16 +1162,31 @@ describe('FE-01..FE-04 & FE-07: App races, bridge errors, confirm seed, and tran
       cleanup();
       render(<App />);
       await screen.findByText('PumpGuard Live');
+      await waitFor(() => expect(mockedInvokeResolver).toHaveBeenCalledWith('getComplianceSuite'));
+
+      mockedInvokeResolver.mockClear();
 
       await act(async () => {
         fireEvent(window, new Event('focus'));
       });
 
+      // Returning from editing Confluence must trigger a full reconcile, so focus must NOT skip it.
       await waitFor(() => {
-        expect(mockedInvokeResolver).toHaveBeenCalledWith('getComplianceSuite', { skipReconcile: true });
+        expect(mockedInvokeResolver).toHaveBeenCalledWith('getComplianceSuite');
       });
+      expect(mockedInvokeResolver).not.toHaveBeenCalledWith('getComplianceSuite', { skipReconcile: true });
+
+      mockedInvokeResolver.mockClear();
+
+      await act(async () => {
+        vi.advanceTimersByTime(30000);
+      });
+
+      // Interval polling remains cache-only to avoid a Confluence sweep every 30s.
+      expect(mockedInvokeResolver).toHaveBeenCalledWith('getComplianceSuite', { skipReconcile: true });
     } finally {
       dateNowSpy.mockRestore();
+      vi.useRealTimers();
     }
   });
 

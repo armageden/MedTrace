@@ -3212,6 +3212,66 @@ test.describe('Task 1C-Ingestion: Confluence Revert Non-Resurrection & 3-Attempt
     );
   });
 
+  test.it('reconcileConfluenceSpecs invalidates a VERIFIED link when its Confluence spec returns HTTP 404, persists it, and logs an audit entry', async () => {
+    const kvsMock = createFullMockForgeKvs();
+    const specBody = '<p>signed spec body</p>';
+    const shaOrig = sha256Hex(specBody);
+    const verifiedLink = ComplianceEngine.evaluateTraceLink(
+      { id: 'haz-404', key: 'HAZ-404-1', title: 'Deleted Spec Hazard', riskClass: 'CLASS_C', mitigationRequirementId: 'srs-8404', status: 'MITIGATED' },
+      { id: 'srs-8404', pageId: '8404', title: 'SRS-8404', version: 1, sha256Hash: shaOrig, lastSignedHash: shaOrig, isSignatureInvalidated: false, contentSnippet: 'signed spec', lastUpdated: '2026-11-24T00:00:00Z' },
+      { id: 'w-404', key: 'MED-404', title: 'Work 404', status: 'Done', assignee: 'Alice' },
+      { id: 't-404', testKey: 'TST-404', title: 'Test 404', testType: 'Unit Test', status: 'PASSED', evidenceUrl: 'https://ci.example/1', executionDate: '2026-11-24T00:00:00Z' },
+      { id: 'sig-404', signedBy: 'Alice', signedByAccountId: 'acc-1', signedAt: '2026-11-24T00:00:00Z', role: 'QA', meaning: 'Approved', artifactSha256: shaOrig, isValid: true },
+      undefined,
+      { linkId: 'link-404' }
+    );
+    assert.strictEqual(verifiedLink.complianceState, 'VERIFIED', 'Test precondition: link must start VERIFIED');
+    const suite = ComplianceEngine.generateComplianceReport([verifiedLink], 'LIVE', 'Deleted Spec Suite', { initialized: true });
+
+    const notFoundResponse = async () => makeJsonResponse(404, { message: 'Page does not exist' });
+    await withForgeMocks(
+      {
+        kvsMock,
+        asUserImpl: () => ({ requestJira: async () => makeJsonResponse(404, {}), requestConfluence: notFoundResponse }),
+        asAppImpl: () => ({ requestJira: async () => makeJsonResponse(404, {}), requestConfluence: notFoundResponse }),
+      },
+      async () => {
+        await SeederService.saveComplianceSuite(suite, 0);
+
+        const reconciled = await LiveIngestionService.reconcileConfluenceSpecs(suite, {
+          allowAppFallback: true,
+          actorAccountId: 'notfound-reconcile',
+        });
+
+        const link = reconciled.traceLinks.find((l) => l.spec.pageId === '8404');
+        assert.ok(link, 'Link for the deleted spec page must remain in the suite');
+        assert.strictEqual(link.spec.isSignatureInvalidated, true);
+        assert.strictEqual(link.signature.isValid, false);
+        assert.notStrictEqual(link.complianceState, 'VERIFIED');
+
+        const reloaded = await SeederService.getActiveComplianceSuite();
+        const persisted = reloaded.traceLinks.find((l) => l.spec.pageId === '8404');
+        assert.ok(persisted, 'Invalidated link must be persisted to KVS');
+        assert.strictEqual(persisted.spec.isSignatureInvalidated, true);
+        assert.strictEqual(persisted.signature.isValid, false);
+
+        const entries = await AuditLogService.getAuditLog(20);
+        const notFoundEntry = entries.find(
+          (e) => e.action === 'CONFLUENCE_PAGE_DRIFT' && e.details && e.details.reason === 'CONFLUENCE_PAGE_NOT_FOUND'
+        );
+        assert.ok(
+          notFoundEntry,
+          `Expected CONFLUENCE_PAGE_NOT_FOUND audit entry, saw actions ${JSON.stringify(entries.map((e) => e.action))}`
+        );
+        assert.deepStrictEqual(notFoundEntry.details.notFoundPageIds, ['8404']);
+
+        // Release gate must now block the affected Jira work item.
+        const gate = ComplianceEngine.evaluateIssueReleaseGate('MED-404', reconciled);
+        assert.strictEqual(gate.result, false);
+      }
+    );
+  });
+
   test.it('syncFromAtlassian sets syncIncomplete: true when truncated with 0 safety matches on uninitialized workspace', async () => {
     const kvsMock = createFullMockForgeKvs();
     const plainTask = {
@@ -3596,5 +3656,29 @@ test.describe('Task 1C-Ingestion: Confluence Revert Non-Resurrection & 3-Attempt
         assert.strictEqual(prunedB.summary.traceLinks.length, 0);
       }
     );
+  });
+
+  test.it('syncFromAtlassian clears synthetic DEMO suite into uninitialized LIVE onboarding when 0 live safety issues match', async () => {
+    const kvsMock = createFullMockForgeKvs();
+    const mockClient = () => ({
+      requestJira: async () => makeJsonResponse(200, { issues: [], isLast: true }),
+      requestConfluence: async () => makeJsonResponse(200, { results: [] }),
+    });
+
+    await withForgeMocks({ kvsMock, asUserImpl: mockClient, asAppImpl: mockClient }, async () => {
+      await SeederService.seedEnterpriseDemoSuite('acc-demo');
+      const res = await LiveIngestionService.syncFromAtlassian({ projectKey: 'SMK', callerMode: 'USER' }, 'acc-demo');
+      assert.strictEqual(res.success, true);
+      assert.strictEqual(res.datasetMode, 'LIVE');
+      assert.strictEqual(res.summary.datasetMode, 'LIVE');
+      assert.strictEqual(res.summary.initialized, false);
+      assert.strictEqual(res.summary.traceLinks.length, 0);
+      assert.ok(res.warnings.some((w) => /Cleared synthetic DEMO dataset/i.test(w)));
+
+      const persisted = await SeederService.getActiveComplianceSuite({ projectKey: 'SMK' });
+      assert.strictEqual(persisted.datasetMode, 'LIVE');
+      assert.strictEqual(persisted.initialized, false);
+      assert.strictEqual(persisted.traceLinks.length, 0);
+    });
   });
 });

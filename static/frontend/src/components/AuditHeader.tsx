@@ -19,6 +19,7 @@ export interface AuditHeaderProps {
   onToggleView: (view: 'graph' | 'table') => void;
   onSeed: () => void;
   onSyncLive: () => void;
+  onCreateLiveProof?: () => void;
   onResumeSync?: () => void;
   onOpenAuditLog: () => void;
   onOpenExport: () => void;
@@ -26,6 +27,7 @@ export interface AuditHeaderProps {
   onAnalyzeBlastRadius: () => void;
   isSeeding: boolean;
   isSyncingLive: boolean;
+  isCreatingLiveProof?: boolean;
   isAnalyzingBlastRadius: boolean;
   isTestingTransition?: boolean;
   isMutating?: boolean;
@@ -40,6 +42,7 @@ export const AuditHeader: React.FC<AuditHeaderProps> = ({
   onToggleView,
   onSeed,
   onSyncLive,
+  onCreateLiveProof,
   onResumeSync,
   onOpenAuditLog,
   onOpenExport,
@@ -47,6 +50,7 @@ export const AuditHeader: React.FC<AuditHeaderProps> = ({
   onAnalyzeBlastRadius,
   isSeeding,
   isSyncingLive,
+  isCreatingLiveProof = false,
   isAnalyzingBlastRadius,
   isTestingTransition = false,
   isMutating = false,
@@ -59,7 +63,9 @@ export const AuditHeader: React.FC<AuditHeaderProps> = ({
   const actionsMenuRef = useRef<HTMLDivElement>(null);
 
   const compact = isCompactPanel ?? panelContext.isCompactPanel;
-  const mutationBusy = Boolean(isBusy || isMutating || isSeeding || isSyncingLive);
+  const mutationBusy = Boolean(
+    isBusy || isMutating || isSeeding || isSyncingLive || isCreatingLiveProof
+  );
   const isLive = summary.datasetMode === 'LIVE';
   const isSyncIncomplete = isLive && summary.syncIncomplete === true;
   const isUninitialized = summary.initialized === false || summary.totalHazards === 0;
@@ -380,6 +386,23 @@ export const AuditHeader: React.FC<AuditHeaderProps> = ({
                 <Sparkles size={14} />
                 {isSeeding ? 'Seeding Demo...' : 'Seed Demo Suite'}
               </button>
+
+              {!isLive && onCreateLiveProof && Boolean(panelContext.projectKey) && (
+                <button
+                  type="button"
+                  onClick={onCreateLiveProof}
+                  disabled={mutationBusy}
+                  className="mt-btn"
+                  style={{
+                    border: '1.5px solid var(--mt-success-bold)',
+                    background: 'var(--mt-success-bold)',
+                    color: '#ffffff',
+                  }}
+                >
+                  <Sparkles size={14} />
+                  {isCreatingLiveProof ? 'Creating Live Proof...' : 'Create Live Proof Chain'}
+                </button>
+              )}
 
               <button
                 type="button"

@@ -2,7 +2,9 @@ import api, { route } from '@forge/api';
 import { AuditLogService } from './audit-log';
 import { JIRA_PROJECT_KEY_RE } from './crypto-utils';
 import { LiveIngestionService } from './ingestion';
+import { hasConfluencePageCreatePermission } from './rbac';
 import { isForgeRuntime } from './runtime';
+import { resolveCreatemetaIssueTypeRef } from './seeder-identity';
 import { CreateLiveProofScenarioResponse } from './types';
 
 const CONFLUENCE_ID_RE = /^\d+$/;
@@ -117,15 +119,7 @@ async function assertConfluencePageCreatePermission(client: ForgeUserClient, spa
   const json = (await res.json().catch(() => null)) as {
     operations?: Array<{ operation?: unknown; targetType?: unknown }>;
   } | null;
-  const canCreatePage = (Array.isArray(json?.operations) ? json.operations : []).some((op) => {
-    const operation = typeof op?.operation === 'string' ? op.operation.trim().toLowerCase() : '';
-    const targetType = typeof op?.targetType === 'string' ? op.targetType.trim().toLowerCase() : '';
-    return (
-      (operation === 'create' && (targetType === 'page' || targetType === 'space' || targetType === '')) ||
-      (operation === 'administer' && (targetType === 'page' || targetType === 'space' || targetType === ''))
-    );
-  });
-  if (!canCreatePage) {
+  if (!hasConfluencePageCreatePermission(json?.operations)) {
     throw new Error(`Forbidden: Requires Confluence page-create permission in space ${spaceId}.`);
   }
 }
@@ -158,6 +152,10 @@ export class LiveProofScenarioService {
       ...(params.spaceId?.trim() ? { spaceId: params.spaceId.trim() } : {}),
     });
     await assertConfluencePageCreatePermission(client, spaceId);
+    const issueTypeRef = await resolveCreatemetaIssueTypeRef(
+      (r) => client.requestJira(r),
+      projectKey
+    );
 
     const createdArtifacts: string[] = [];
     let pageId = '';
@@ -206,7 +204,7 @@ export class LiveProofScenarioService {
             body: JSON.stringify({
               fields: {
                 project: { key: projectKey },
-                issuetype: { name: 'Task' },
+                issuetype: issueTypeRef,
                 summary,
                 labels,
                 description: adfParagraphs(description),
@@ -343,6 +341,15 @@ export class LiveProofScenarioService {
         authMethod: 'FORGE_USER_SESSION',
       });
 
+      // Reflect the just-appended CREATE_LIVE_PROOF_SCENARIO entry so callers never receive
+      // pre-append audit counts/hashes that would misrepresent the persisted chain state.
+      const auditHead = await AuditLogService.getHead();
+      const summary = {
+        ...syncResult.summary,
+        auditEntryCount: auditHead.lastSeq,
+        auditHeadHash: auditHead.headHash,
+      };
+
       return {
         success: true,
         projectKey,
@@ -356,7 +363,7 @@ export class LiveProofScenarioService {
         issueLinksCreated,
         remoteLinkCreated,
         warnings,
-        summary: syncResult.summary,
+        summary,
       };
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);

@@ -632,9 +632,10 @@ export async function reconcileConfluenceSpecsTrigger(
 
   const fetchPage = async (
     pageId: string
-  ): Promise<{ pageData?: ConfluencePageData; hardError?: boolean }> => {
+  ): Promise<{ pageData?: ConfluencePageData; hardError?: boolean; notFound?: boolean }> => {
     const pageRoute = route`/wiki/api/v2/pages/${pageId}?body-format=storage`;
     let lastNon404Failure = false;
+    let sawNotFound = false;
     try {
       const userResp = await api.asUser().requestConfluence(pageRoute);
       if (userResp && isHttpOk(userResp)) {
@@ -647,7 +648,9 @@ export async function reconcileConfluenceSpecsTrigger(
       ) {
         options?.userPageAccessCache?.set(pageId, false);
       }
-      if (userResp && userResp.status !== 404) {
+      if (userResp && userResp.status === 404) {
+        sawNotFound = true;
+      } else {
         lastNon404Failure = true;
       }
     } catch {
@@ -658,18 +661,25 @@ export async function reconcileConfluenceSpecsTrigger(
       try {
         const appClient = api.asApp();
         if (typeof appClient?.requestConfluence !== 'function') {
-          return { hardError: false };
+          return { hardError: false, notFound: sawNotFound && !lastNon404Failure };
         }
         const appResp = await appClient.requestConfluence(pageRoute);
         if (appResp && isHttpOk(appResp)) {
           return { pageData: (await appResp.json()) as ConfluencePageData };
         }
-        return { hardError: Boolean(appResp && appResp.status !== 404) };
+        if (appResp && appResp.status === 404) {
+          // Resolved (app) fetch confirms the page no longer exists; treat as authoritative 404.
+          return { notFound: true, hardError: false };
+        }
+        if (!appResp) {
+          return { hardError: false, notFound: sawNotFound && !lastNon404Failure };
+        }
+        return { hardError: true, notFound: false };
       } catch {
-        return { hardError: true };
+        return { hardError: true, notFound: false };
       }
     }
-    return { hardError: lastNon404Failure };
+    return { hardError: lastNon404Failure, notFound: sawNotFound && !lastNon404Failure };
   };
 
   const driftedPages: Array<{
@@ -684,6 +694,7 @@ export async function reconcileConfluenceSpecsTrigger(
   let budgetExhausted = false;
   let checkedPageCount = prioritizedEntries.length;
   const unreachablePages: string[] = [];
+  const notFoundPages: string[] = [];
   for (let i = 0; i < prioritizedEntries.length; i += CONFLUENCE_RECONCILE_BATCH_SIZE) {
     if (i > 0 && Date.now() - reconcileStartedAt >= CONFLUENCE_RECONCILE_BUDGET_MS) {
       budgetExhausted = true;
@@ -696,9 +707,11 @@ export async function reconcileConfluenceSpecsTrigger(
     const batch = prioritizedEntries.slice(i, i + CONFLUENCE_RECONCILE_BATCH_SIZE);
     await Promise.all(
       batch.map(async ([pageId, links]) => {
-        const { pageData, hardError } = await fetchPage(pageId);
+        const { pageData, hardError, notFound } = await fetchPage(pageId);
         if (!pageData || typeof pageData?.body?.storage?.value !== 'string') {
-          if (hardError) {
+          if (notFound) {
+            notFoundPages.push(pageId);
+          } else if (hardError) {
             unreachablePages.push(pageId);
           }
           return;
@@ -740,13 +753,28 @@ export async function reconcileConfluenceSpecsTrigger(
     }
   };
 
+  // A deleted Confluence spec (HTTP 404) can never be a valid signed baseline; invalidate linked
+  // approvals immediately so release gates block instead of evaluating stale VERIFIED state.
+  let updatedAny = false;
+  if (notFoundPages.length > 0) {
+    await invalidateSpecsForNotFoundPages(notFoundPages, {
+      ...(options?.actorAccountId ? { actorAccountId: options.actorAccountId } : {}),
+    });
+    updatedAny = true;
+  }
+
   if (driftedPages.length === 0) {
     assertBudgetCompleted();
-    return suite;
+    if (!updatedAny) {
+      return suite;
+    }
+    return SeederService.getActiveComplianceSuite({
+      ...(options?.projectKey ? { projectKey: options.projectKey } : {}),
+      ...(options?.issueKeyFilter ? { issueKeyFilter: options.issueKeyFilter } : {}),
+    });
   }
 
   const dispatchDrift = options?.onDriftDetected || handleConfluencePageUpdatedTrigger;
-  let updatedAny = false;
   let lastDriftError: unknown;
   for (const item of driftedPages) {
     try {
@@ -783,6 +811,94 @@ export async function reconcileConfluenceSpecsTrigger(
   return SeederService.getActiveComplianceSuite({
     ...(options?.projectKey ? { projectKey: options.projectKey } : {}),
     ...(options?.issueKeyFilter ? { issueKeyFilter: options.issueKeyFilter } : {}),
+  });
+}
+
+/**
+ * Invalidates Part 11 signatures on trace links whose Confluence spec page returned HTTP 404,
+ * persists the mutation, and appends an immutable audit entry so release gates block immediately.
+ * Fails closed (propagates the error) if the invalidation cannot be committed.
+ */
+async function invalidateSpecsForNotFoundPages(
+  pageIds: string[],
+  options?: { actorAccountId?: string }
+): Promise<void> {
+  const notFoundSet = new Set(pageIds.map((p) => p.trim()).filter(Boolean));
+  if (notFoundSet.size === 0) {
+    return;
+  }
+
+  const { summary: current, version } = await SeederService.getSuiteWithVersion();
+  const updatedLinks = current.traceLinks.map(cloneJsonValue);
+  const affectedHazards: string[] = [];
+  const affectedPageIds: string[] = [];
+  const eventNowIso = new Date().toISOString();
+  let mutated = false;
+
+  updatedLinks.forEach((link, idx) => {
+    const pid = typeof link.spec?.pageId === 'string' ? link.spec.pageId.trim() : '';
+    if (!pid || !notFoundSet.has(pid)) {
+      return;
+    }
+
+    const hasPriorSignature = Boolean(
+      link.signature?.artifactSha256 ||
+        link.signature?.signedAt ||
+        link.signature?.signedBy ||
+        link.spec?.lastSignedHash
+    );
+    const signedMs = link.signature?.signedAt ? Date.parse(link.signature.signedAt) : NaN;
+    const invalidatedAt =
+      Number.isFinite(signedMs) && Date.now() <= signedMs
+        ? new Date(signedMs + 1).toISOString()
+        : eventNowIso;
+
+    link.spec.isSignatureInvalidated = true;
+    link.signature.isValid = false;
+    if (hasPriorSignature) {
+      link.signature.invalidatedAt = link.signature.invalidatedAt || invalidatedAt;
+      link.signature.invalidationReason =
+        `AUTOMATIC REVOCATION: Confluence specification page ${pid} no longer exists (HTTP 404); Part 11 signature invalidated and release blocked.`;
+    }
+
+    const evaluated = ComplianceEngine.reEvaluateLink(link, current.datasetMode);
+    updatedLinks[idx] = evaluated;
+    affectedHazards.push(evaluated.hazard.key);
+    affectedPageIds.push(pid);
+    mutated = true;
+  });
+
+  if (!mutated) {
+    return;
+  }
+
+  const updated = ComplianceEngine.generateComplianceReport(
+    updatedLinks,
+    current.datasetMode,
+    current.projectName,
+    {
+      initialized: current.initialized ?? true,
+      lastSyncedAt: current.lastSyncedAt,
+      syncIncomplete: current.syncIncomplete,
+      incompleteProjectKeys: current.incompleteProjectKeys,
+    }
+  );
+
+  await commitSuiteMutation({
+    summary: updated,
+    expectedVersion: version ?? 0,
+    previousSuite: current,
+    auditEntry: {
+      actorAccountId: options?.actorAccountId || 'confluence-spec-not-found',
+      action: 'CONFLUENCE_PAGE_DRIFT',
+      targetKey: `page:${affectedPageIds[0]}`,
+      details: {
+        reason: 'CONFLUENCE_PAGE_NOT_FOUND',
+        notFoundPageIds: Array.from(new Set(affectedPageIds)),
+        affectedHazards: Array.from(new Set(affectedHazards)),
+      },
+      authMethod: 'FORGE_USER_SESSION',
+    },
   });
 }
 

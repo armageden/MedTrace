@@ -17,14 +17,16 @@ Use this runbook to demonstrate MedTrace's central live workflow with real Jira 
 
 ## 2. Create the real proof chain
 
-1. In the uninitialized `LIVE` workspace, click **Create Live Proof Chain**.
+1. In the uninitialized `LIVE` workspace (or directly from the header when in `DEMO` mode with a Jira `projectKey`), click **Create Live Proof Chain**. Clicking **Sync Live Atlassian** while in `DEMO` mode with 0 live safety issues also clears synthetic `DEMO` data into uninitialized `LIVE` onboarding instead of trapping the workspace in `DEMO`.
 2. The `createLiveProofScenario` resolver calls [src/live-proof-scenario.ts](../../src/live-proof-scenario.ts) under `api.asUser()` and creates:
    - one Confluence SRS page titled `SRS MedTrace Live Proof <PROJECT> <timestamp>` containing `Bolus delivery threshold: 5.0 mL/hr`;
-   - one native Jira hazard Task labeled `medtrace-live-proof`, `medtrace-hazard`, and `class-c`;
-   - one native Jira verification-test Task labeled `medtrace-live-proof`, `medtrace-test`, `hil-test`, and `class-c`;
-   - one native Jira implementation Task labeled `medtrace-live-proof` and `class-c`;
+   - one native Jira hazard issue labeled `medtrace-live-proof`, `medtrace-hazard`, and `class-c`;
+   - one native Jira verification-test issue labeled `medtrace-live-proof`, `medtrace-test`, `hil-test`, and `class-c`;
+   - one native Jira implementation issue labeled `medtrace-live-proof` and `class-c`;
    - two Jira `Relates` issue links (hazard-to-work and test-to-work);
    - one Jira remote link from the implementation issue to the Confluence page.
+
+   All three Jira issues use the project's real issue type resolved from `createmeta` (preferring `Task`, then `Story`, then the first non-subtask type; falling back to `Task` only when the lookup fails), so the bootstrap works in projects that do not expose a `Task` issue type.
 3. The backend immediately runs a bounded live ingestion scoped to the three exact created Jira keys. If Jira indexing is still settling, the response warning tells the user to click **Sync Live Atlassian** once; do not create a second chain.
 4. On success, MedTrace auto-selects the created implementation trace link and displays the artifact keys. The bootstrap does **not** record test evidence, sign approvals, mark work done, or fabricate compliance.
 
@@ -42,7 +44,7 @@ If creation, linking, initial ingestion, or audit recording fails partway throug
 1. Open the created Confluence SRS page.
 2. Edit only the requirement value from `5.0` to `5.5 mL/hr` and publish the page.
 3. Return to MedTrace and click **Blast Radius** for the affected chain. `analyzeBlastRadius` reconciles Confluence content before computing impact, so the report reflects live drift even when the visible matrix has not yet refreshed.
-4. If the matrix still shows the pre-edit state, click **Sync Live Atlassian** once or reload the MedTrace page. This is a UI refresh limitation, not a missing invalidation: server-side gates reconcile Confluence content before making release decisions.
+4. Windows that lose and regain focus auto-reconcile: returning from the Confluence editor to the MedTrace tab fires a debounced `focus` refresh that calls `getComplianceSuite` **without** `{ skipReconcile: true }`, so the matrix picks up the drift automatically. Background 30-second interval polling stays cache-only (`{ skipReconcile: true }`) to avoid a Confluence sweep every cycle. If the matrix still shows the pre-edit state, click **Sync Live Atlassian** once or reload the page; server-side gates always reconcile Confluence content before making release decisions.
 5. Expected proof points:
    - the prior electronic attestation is invalid/revoked and cannot be resurrected by reverting the page;
    - blast radius shows the connected hazard, specification, implementation work item, verification test, and approval record;
@@ -75,3 +77,5 @@ Avoid relying on app-managed `HAZ-*` or `TEST-*` fallback records for the main j
 ## 7. Cross-product KVS caveat
 
 Forge partitions app KVS state by installed product context. The bootstrap normally initializes the **Jira** partition because it is launched from a Jira project page. If demonstrating hosted MCP or the Confluence workspace against the Confluence partition, run **Sync Live Atlassian** in that product context before invoking tools. Do not assume evidence or signatures written in one product partition are already replicated to the other; MedTrace reconciles Confluence drift on demand, but it does not provide a single cross-product evidence database.
+
+The MedTrace Confluence view surfaces this directly: when `panelContext.isConfluence` is true, `LiveOnboardingCard` renders a notice explaining that Forge partitions storage per product (Jira vs Confluence), that this surface reads Confluence's own partition, and that the user should either open MedTrace from a Jira project page (for Jira's compliance suite) or click **Sync Live Atlassian** here to populate Confluence's local partition.

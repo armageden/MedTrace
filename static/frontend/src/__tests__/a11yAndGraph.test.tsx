@@ -11,6 +11,7 @@ import { TraceMatrixTable } from '../components/TraceMatrixTable';
 import { LineageGraph } from '../components/LineageGraph';
 import { AuditHeader } from '../components/AuditHeader';
 import { BlastRadiusCard } from '../components/BlastRadiusCard';
+import { LiveOnboardingCard } from '../components/LiveOnboardingCard';
 import { AppErrorBoundary } from '../main';
 import type { FlowNodePayload } from '../components/CustomNodes';
 import * as bridgeModule from '../bridge';
@@ -641,6 +642,73 @@ describe('FE-08..FE-10: Dialog a11y stack/focus trap/restore, table semantics, a
     expect(screen.getByText('COMPLIANCE RELEASE GATE')).toBeInTheDocument();
     const testingBtn = screen.getByRole('button', { name: /Testing Gate/i });
     expect(testingBtn).toBeDisabled();
+  });
+
+  it('shows the Confluence KVS partition notice only in the Confluence surface', () => {
+    const { rerender } = render(<LiveOnboardingCard isConfluence={true} onSyncLive={() => {}} />);
+
+    const notice = screen.getByRole('note', { name: 'Confluence partition notice' });
+    expect(notice).toHaveTextContent(/Forge partitions storage per product/i);
+    expect(notice).toHaveTextContent(/Jira/);
+    expect(notice).toHaveTextContent(/Sync Live Atlassian/);
+
+    rerender(<LiveOnboardingCard isConfluence={false} onSyncLive={() => {}} />);
+    expect(
+      screen.queryByRole('note', { name: 'Confluence partition notice' })
+    ).not.toBeInTheDocument();
+  });
+
+  it('shows Create Live Proof Chain in AuditHeader when in DEMO mode with a Jira projectKey and hides it in LIVE mode', () => {
+    const demoSuite = { ...makeSummary([]), datasetMode: 'DEMO' as const, initialized: true };
+    const jiraCtx = {
+      extensionType: 'jira:projectPage',
+      isCompactPanel: false,
+      isConfluence: false,
+      projectKey: 'SMK',
+    };
+    const onCreateLiveProof = vi.fn();
+    const { rerender } = render(
+      <AuditHeader
+        summary={demoSuite}
+        panelContext={jiraCtx}
+        activeView="graph"
+        onToggleView={() => {}}
+        onSeed={() => {}}
+        onSyncLive={() => {}}
+        onCreateLiveProof={onCreateLiveProof}
+        onOpenAuditLog={() => {}}
+        onOpenExport={() => {}}
+        onTestTransition={() => {}}
+        onAnalyzeBlastRadius={() => {}}
+        isSeeding={false}
+        isSyncingLive={false}
+        isAnalyzingBlastRadius={false}
+      />
+    );
+
+    const btn = screen.getByRole('button', { name: /Create Live Proof Chain/i });
+    fireEvent.click(btn);
+    expect(onCreateLiveProof).toHaveBeenCalledTimes(1);
+
+    rerender(
+      <AuditHeader
+        summary={{ ...makeSummary([]), datasetMode: 'LIVE' as const, initialized: true }}
+        panelContext={jiraCtx}
+        activeView="graph"
+        onToggleView={() => {}}
+        onSeed={() => {}}
+        onSyncLive={() => {}}
+        onCreateLiveProof={onCreateLiveProof}
+        onOpenAuditLog={() => {}}
+        onOpenExport={() => {}}
+        onTestTransition={() => {}}
+        onAnalyzeBlastRadius={() => {}}
+        isSeeding={false}
+        isSyncingLive={false}
+        isAnalyzingBlastRadius={false}
+      />
+    );
+    expect(screen.queryByRole('button', { name: /Create Live Proof Chain/i })).not.toBeInTheDocument();
   });
 
   it('handles ReactFlow node/edge clicks, shared-node popover selection, and AppErrorBoundary fallback', async () => {

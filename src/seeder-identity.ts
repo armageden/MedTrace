@@ -2,6 +2,7 @@ import api, { route } from '@forge/api';
 import { AuditLogService } from './audit-log';
 import { ComplianceEngine } from './compliance-engine';
 import { isHttpOk, JIRA_ISSUE_KEY_RE, JIRA_PROJECT_KEY_RE, safeParseJson } from './crypto-utils';
+import { hasConfluenceEditorPermission } from './rbac';
 import { isForgeRuntime } from './runtime';
 import {
   AuthorizedUserIdentity,
@@ -52,28 +53,6 @@ const localFallbackIdentityResolver: UserIdentityResolver = {
     };
   },
 };
-
-function hasConfluenceEditorPermission(operations: Array<{ operation?: string; targetType?: string }>): {
-  canEdit: boolean;
-  isAdmin: boolean;
-} {
-  let canEdit = false;
-  let isAdmin = false;
-  for (const op of operations) {
-    const operation = String(op?.operation || '').toLowerCase();
-    const targetType = String(op?.targetType || '').toLowerCase();
-    if (operation === 'administer') {
-      canEdit = true;
-      isAdmin = true;
-    } else if (
-      (operation === 'create' || operation === 'update' || operation === 'delete') &&
-      (targetType === 'page' || targetType === 'space' || targetType === '')
-    ) {
-      canEdit = true;
-    }
-  }
-  return { canEdit, isAdmin };
-}
 
 async function resolveJiraSignerIdentity(ctx: UserIdentityResolverContext): Promise<AuthorizedUserIdentity> {
   const myselfResp = await api.asUser().requestJira(route`/rest/api/3/myself?expand=groups`);
@@ -379,6 +358,58 @@ export function extractPrimaryJiraProjectKeyFromLink(link: TraceLink): string | 
     extractJiraProjectKeyFromRawKey(link.test?.testKey, link.test?.source) ||
     extractJiraProjectKeyFromRawKey(link.reverificationTaskKey, 'JIRA_ISSUE')
   );
+}
+
+export interface JiraIssueTypeRef {
+  id?: string;
+  name?: string;
+}
+
+/**
+ * Resolves a valid non-subtask Jira issue type for a project via `createmeta`, preferring `Task`
+ * then `Story` and falling back to `{ name: 'Task' }`. Shared by live sync task creation and the
+ * live proof scenario so neither hardcodes `issuetype: { name: 'Task' }`.
+ */
+export async function resolveCreatemetaIssueTypeRef(
+  requestJira: (
+    routeObj: ReturnType<typeof route>
+  ) => Promise<{ status: number; json(): Promise<unknown> }>,
+  projectKey: string
+): Promise<JiraIssueTypeRef> {
+  const fallback: JiraIssueTypeRef = { name: 'Task' };
+  const cleanProjectKey = (projectKey || '').trim().toUpperCase();
+  if (!cleanProjectKey) {
+    return fallback;
+  }
+  try {
+    const metaResp = await requestJira(route`/rest/api/3/issue/createmeta/${cleanProjectKey}/issuetypes`);
+    if (metaResp.status !== 200) {
+      return fallback;
+    }
+    const metaJson = (await metaResp.json().catch(() => ({}))) as {
+      issueTypes?: Array<{ id?: string; name?: string; subtask?: boolean }>;
+      values?: Array<{ id?: string; name?: string; subtask?: boolean }>;
+    };
+    const list = Array.isArray(metaJson?.issueTypes)
+      ? metaJson.issueTypes
+      : Array.isArray(metaJson?.values)
+        ? metaJson.values
+        : [];
+    const candidates = list.filter((it) => it && it.subtask !== true);
+    const preferred =
+      candidates.find((it) => String(it.name || '').toLowerCase() === 'task') ||
+      candidates.find((it) => String(it.name || '').toLowerCase() === 'story') ||
+      candidates[0];
+    if (preferred?.id) {
+      return { id: String(preferred.id) };
+    }
+    if (preferred?.name) {
+      return { name: String(preferred.name) };
+    }
+  } catch {
+    // Transient/failed createmeta lookup falls back to { name: 'Task' }
+  }
+  return fallback;
 }
 
 export interface JiraBrowsePermissionResult {

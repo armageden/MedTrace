@@ -1140,6 +1140,37 @@ test.describe('Task 1B-Seeder: bindIssueToHazard & recordTestResult Hardening (C
     });
   });
 
+  test.it('indexes reverificationTaskKey in issueKeyIndex and resolves the parent link via issueKeyFilter', async () => {
+    const kvsMock = createFullMockForgeKvs();
+    const links = makeSyntheticLinks(3);
+    const targetLink = { ...links[0], reverificationTaskKey: 'REV-100' };
+
+    await withForgeMocks({ kvsMock }, async () => {
+      const suite = ComplianceEngine.generateComplianceReport(
+        [targetLink, links[1], links[2]],
+        'LIVE',
+        'Reverification Index Suite',
+        { initialized: true }
+      );
+      await SeederService.saveComplianceSuite(suite, 0);
+
+      const storedMeta = kvsMock.store.get('medtrace:compliance:suite_meta');
+      const inlineIndex = storedMeta.issueKeyIndex;
+      assert.ok(
+        inlineIndex && Array.isArray(inlineIndex['REV-100']) && inlineIndex['REV-100'].length > 0,
+        `Expected issueKeyIndex to index reverificationTaskKey REV-100, got ${JSON.stringify(inlineIndex)}`
+      );
+
+      const hit = await SeederService.getActiveComplianceSuite({ issueKeyFilter: 'rev-100' });
+      assert.strictEqual(hit.traceLinks.length, 1);
+      assert.strictEqual(hit.traceLinks[0].work.key, 'MED-1');
+      assert.strictEqual(hit.traceLinks[0].reverificationTaskKey, 'REV-100');
+
+      const miss = await SeederService.getActiveComplianceSuite({ issueKeyFilter: 'REV-999' });
+      assert.strictEqual(miss.traceLinks.length, 0);
+    });
+  });
+
   test.it('shards issueKeyIndex into meta_index:* when suite_meta exceeds 128 KiB while keeping fast-path O(1) lookup', async () => {
     const links1200 = makeSyntheticLinks(1200);
     const kvsMock = createFullMockForgeKvs();

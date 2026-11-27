@@ -7,6 +7,7 @@ export interface LiveOnboardingCardProps {
   onCreateLiveProof?: () => void;
   canCreateLiveProof?: boolean;
   isBusy?: boolean;
+  isConfluence?: boolean;
 }
 
 const ONBOARDING_STEPS = [
@@ -22,6 +23,7 @@ export const LiveOnboardingCard: React.FC<LiveOnboardingCardProps> = ({
   onCreateLiveProof,
   canCreateLiveProof = true,
   isBusy = false,
+  isConfluence = false,
 }) => (
   <div
     style={{
@@ -88,6 +90,28 @@ export const LiveOnboardingCard: React.FC<LiveOnboardingCardProps> = ({
       In the matrix or graph, click a row or node to open the inspection drawer, where you record
       evidence, sign off, and create re-verification tasks.
     </div>
+
+    {isConfluence && (
+      <div
+        role="note"
+        aria-label="Confluence partition notice"
+        style={{
+          marginTop: 12,
+          padding: '10px 12px',
+          fontSize: 12,
+          lineHeight: '18px',
+          color: 'var(--mt-text-primary, #172b4d)',
+          background: 'var(--mt-brand-subtle-bg, #deebff)',
+          border: '1px solid var(--mt-border, #dfe1e6)',
+          borderRadius: 8,
+        }}
+      >
+        This is the Confluence view. Forge partitions storage per product (<strong>Jira</strong> vs{' '}
+        <strong>Confluence</strong>), so this surface reads Confluence&apos;s own compliance partition.
+        Open MedTrace from a Jira project page to see Jira&apos;s compliance suite, or click{' '}
+        <strong>Sync Live Atlassian</strong> here to populate Confluence&apos;s local partition.
+      </div>
+    )}
 
     {(onSyncLive || onSeedDemo || onCreateLiveProof) && (
       <div style={{ marginTop: 18, display: 'flex', gap: 10, flexWrap: 'wrap' }}>

@@ -279,29 +279,83 @@ interface ConfluenceSpaceSummary {
   type?: unknown;
 }
 
-function hasConfluencePageWriteOps(operations: ConfluenceOperation[]): boolean {
-  return operations.some((op) => {
-    const opName = typeof op.operation === 'string' ? op.operation.trim().toLowerCase() : '';
-    const targetType = typeof op.targetType === 'string' ? op.targetType.trim().toLowerCase() : '';
-    return (
-      targetType === 'page' &&
-      (opName === 'update' || opName === 'delete' || opName === 'administer')
+export type ConfluenceOperationAction = 'create' | 'update' | 'delete' | 'administer';
+
+/**
+ * Normalizes a Confluence `/operations` payload into trimmed, lowercase `{ operation, targetType }` entries.
+ * Single parsing point shared by every Confluence permission check in `rbac`, `seeder-identity`, and
+ * `live-proof-scenario` so the `/operations` semantics never drift between call sites.
+ */
+export function normalizeConfluenceOperations(
+  operations: ReadonlyArray<ConfluenceOperation> | undefined | null
+): Array<{ operation: string; targetType: string }> {
+  return (Array.isArray(operations) ? operations : [])
+    .map((op) => ({
+      operation: typeof op?.operation === 'string' ? op.operation.trim().toLowerCase() : '',
+      targetType: typeof op?.targetType === 'string' ? op.targetType.trim().toLowerCase() : '',
+    }))
+    .filter((op) => op.operation !== '');
+}
+
+/**
+ * Returns true when `operations` grants any of `actions` on any of `targetTypes`.
+ * An empty `targetTypes` matches every target type.
+ */
+export function hasConfluenceWriteOperation(
+  operations: ReadonlyArray<ConfluenceOperation> | undefined | null,
+  actions: ReadonlyArray<ConfluenceOperationAction>,
+  targetTypes: ReadonlyArray<string> = []
+): boolean {
+  const actionSet = new Set(actions);
+  const targetSet = new Set(targetTypes.map((t) => t.trim().toLowerCase()));
+  return normalizeConfluenceOperations(operations).some(
+    (op) =>
+      actionSet.has(op.operation as ConfluenceOperationAction) &&
+      (targetSet.size === 0 || targetSet.has(op.targetType))
+  );
+}
+
+/**
+ * Resolves Confluence content-editing capability (`canEdit`) and space-administration capability (`isAdmin`)
+ * from a `/operations` payload. Shared by Part 11 Confluence sign-off identity resolution.
+ */
+export function hasConfluenceEditorPermission(
+  operations: ReadonlyArray<ConfluenceOperation> | undefined | null
+): { canEdit: boolean; isAdmin: boolean } {
+  const normalized = normalizeConfluenceOperations(operations);
+  const isAdmin = normalized.some((op) => op.operation === 'administer');
+  const canEdit =
+    isAdmin ||
+    normalized.some(
+      (op) =>
+        (op.operation === 'create' || op.operation === 'update' || op.operation === 'delete') &&
+        (op.targetType === 'page' || op.targetType === 'space' || op.targetType === '')
     );
-  });
+  return { canEdit, isAdmin };
+}
+
+/**
+ * Returns true when a `/operations` payload permits creating Confluence pages in a space.
+ */
+export function hasConfluencePageCreatePermission(
+  operations: ReadonlyArray<ConfluenceOperation> | undefined | null
+): boolean {
+  return normalizeConfluenceOperations(operations).some(
+    (op) =>
+      (op.operation === 'create' || op.operation === 'administer') &&
+      (op.targetType === 'page' || op.targetType === 'space' || op.targetType === '')
+  );
+}
+
+function hasConfluencePageWriteOps(operations: ConfluenceOperation[]): boolean {
+  return hasConfluenceWriteOperation(operations, ['update', 'delete', 'administer'], ['page']);
 }
 
 function hasConfluenceSpaceWriteOps(operations: ConfluenceOperation[]): boolean {
-  return operations.some((op) => {
-    const opName = typeof op.operation === 'string' ? op.operation.trim().toLowerCase() : '';
-    const targetType = typeof op.targetType === 'string' ? op.targetType.trim().toLowerCase() : '';
-    if (opName === 'administer' && (targetType === 'space' || targetType === 'page' || targetType === '')) {
-      return true;
-    }
-    return (
-      (opName === 'create' || opName === 'update' || opName === 'delete') &&
-      (targetType === 'page' || targetType === 'space')
-    );
-  });
+  return (
+    hasConfluenceWriteOperation(operations, ['administer'], ['space', 'page', '']) ||
+    hasConfluenceWriteOperation(operations, ['create', 'update', 'delete'], ['page', 'space'])
+  );
 }
 
 async function verifyConfluenceIdentity(expectedAccountId: string): Promise<void> {

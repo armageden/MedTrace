@@ -1529,17 +1529,23 @@ export class LiveIngestionService {
       let summaryToReturn = existingSuite;
       const incompleteProjectsOnEmpty = mergeIncompleteProjects([]);
       const incompleteOnEmpty = truncated || incompleteProjectsOnEmpty.length > 0;
-      const shouldPruneClearedLiveSuite =
-        !truncated &&
-        !normalized.hasCustomJql &&
-        !resumedFromCursor &&
+      const isLiveWithStaleLinks =
         existingSuite.datasetMode === 'LIVE' &&
         existingSuite.initialized !== false &&
         existingSuite.traceLinks.length > 0;
+      const isSyntheticDemo = existingSuite.datasetMode === 'DEMO';
+      const shouldResetToUninitializedLive =
+        !truncated &&
+        !normalized.hasCustomJql &&
+        !resumedFromCursor &&
+        (isLiveWithStaleLinks || isSyntheticDemo);
 
-      if (shouldPruneClearedLiveSuite) {
+      if (shouldResetToUninitializedLive) {
         const prunedAt = new Date().toISOString();
-        const prunedSummary = ComplianceEngine.generateComplianceReport([], 'LIVE', existingSuite.projectName, {
+        const nextProjectName = isSyntheticDemo
+          ? normalized.projectKey || 'Atlassian Cloud Live Medical Project'
+          : existingSuite.projectName;
+        const prunedSummary = ComplianceEngine.generateComplianceReport([], 'LIVE', nextProjectName, {
           initialized: false,
           lastSyncedAt: prunedAt,
           syncIncomplete: incompleteOnEmpty,
@@ -1552,10 +1558,11 @@ export class LiveIngestionService {
           auditEntry: {
             actorAccountId,
             action: 'SYNC_LIVE',
-            targetKey: normalized.projectKey || existingSuite.projectName,
+            targetKey: normalized.projectKey || nextProjectName,
             details: {
               projectKey: normalized.projectKey || null,
               prunedToUninitialized: true,
+              clearedDemoMode: isSyntheticDemo,
               previousTraceLinkCount: existingSuite.traceLinks.length,
               jiraIssuesScanned: issues.length,
               confluencePagesScanned,
@@ -1565,7 +1572,9 @@ export class LiveIngestionService {
           },
         });
         warnings.push(
-          `No safety-tracked Jira issues remain in ${normalized.projectKey ? `project ${normalized.projectKey}` : 'the synced scope'}; pruned stale trace link(s) from KVS.`
+          isSyntheticDemo
+            ? `Cleared synthetic DEMO dataset into uninitialized LIVE mode (${issues.length} Jira issue(s) scanned, 0 safety-tracked); click Create Live Proof Chain or label a Jira issue with class-a / class-b / class-c or medtrace-hazard.`
+            : `No safety-tracked Jira issues remain in ${normalized.projectKey ? `project ${normalized.projectKey}` : 'the synced scope'}; pruned stale trace link(s) from KVS.`
         );
         return {
           success: true,

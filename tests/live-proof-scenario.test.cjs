@@ -40,6 +40,7 @@ async function withLiveProofMocks(handlers, fn) {
   const origTopAsUser = forgeApi.asUser;
   const origSync = LiveIngestionService.syncFromAtlassian;
   const origAuditAppend = AuditLogService.append;
+  const origAuditGetHead = AuditLogService.getHead;
   const hadRuntime = Object.prototype.hasOwnProperty.call(globalThis, '__forge_runtime__');
   const oldRuntime = globalThis.__forge_runtime__;
 
@@ -142,8 +143,13 @@ async function withLiveProofMocks(handlers, fn) {
   };
   AuditLogService.append = async (entry) => {
     calls.auditEntries.push(entry);
-    return { ...entry, seq: 1, entryHash: 'hash' };
+    const seq = calls.auditEntries.length;
+    return { ...entry, seq, entryHash: `hash-${seq}` };
   };
+  AuditLogService.getHead = async () => ({
+    lastSeq: calls.auditEntries.length,
+    headHash: calls.auditEntries.length > 0 ? `hash-${calls.auditEntries.length}` : '0'.repeat(64),
+  });
 
   try {
     return await fn(calls);
@@ -152,6 +158,7 @@ async function withLiveProofMocks(handlers, fn) {
     forgeApi.asUser = origTopAsUser;
     LiveIngestionService.syncFromAtlassian = origSync;
     AuditLogService.append = origAuditAppend;
+    AuditLogService.getHead = origAuditGetHead;
     if (hadRuntime) {
       globalThis.__forge_runtime__ = oldRuntime;
     } else {
@@ -479,6 +486,63 @@ test('live proof scenario reports partial real artifacts when remote linking fai
       );
       assert.equal(calls.syncOptions, null);
       assert.equal(calls.auditEntries.length, 0);
+    }
+  );
+});
+
+test('live proof scenario uses the createmeta issue type and reports the post-append audit head', async () => {
+  let createdCount = 0;
+  const createdIssues = [];
+  await withLiveProofMocks(
+    {
+      requestJira: async (url, opts) => {
+        if (url.startsWith('/rest/api/3/mypermissions')) {
+          return makeHttpResponse(200, {
+            permissions: {
+              CREATE_ISSUES: { havePermission: true },
+              EDIT_ISSUES: { havePermission: true },
+              LINK_ISSUES: { havePermission: true },
+              ADMINISTER_PROJECTS: { havePermission: false },
+            },
+          });
+        }
+        if (url === '/rest/api/3/issue/createmeta/MED/issuetypes') {
+          // Only non-Task issue types are available in this project.
+          return makeHttpResponse(200, { issueTypes: [{ id: '10007', name: 'Story', subtask: false }] });
+        }
+        if (url === '/rest/api/3/issue' && opts?.method === 'POST') {
+          createdIssues.push(parseBody(opts));
+          const sequence = ['MED-101', 'MED-102', 'MED-103'];
+          const key = sequence[createdCount++] || `MED-${100 + createdCount}`;
+          return makeHttpResponse(201, { key, self: `https://medtrace.atlassian.net/rest/api/3/issue/${key}` });
+        }
+        if (url === '/rest/api/3/issueLink') return makeHttpResponse(204, {});
+        if (url.includes('/remotelink')) return makeHttpResponse(201, { id: 44 });
+        return makeHttpResponse(404, {});
+      },
+    },
+    async (calls) => {
+      const result = await LiveProofScenarioService.createScenario({
+        projectKey: 'MED',
+        actorAccountId: 'user-1',
+      });
+
+      assert.equal(createdIssues.length, 3);
+      for (const create of createdIssues) {
+        assert.deepEqual(
+          create.fields.issuetype,
+          { id: '10007' },
+          'Every proof issue must use the resolved createmeta issue type, not a hardcoded Task'
+        );
+      }
+
+      // The returned summary must reflect the appended CREATE_LIVE_PROOF_SCENARIO entry, not pre-append state.
+      assert.equal(calls.auditEntries.length, 1);
+      assert.equal(calls.auditEntries[0].action, 'CREATE_LIVE_PROOF_SCENARIO');
+      assert.ok(result.summary.auditEntryCount >= 1, 'auditEntryCount must include the proof audit entry');
+      const head = await AuditLogService.getHead();
+      assert.equal(result.summary.auditEntryCount, head.lastSeq);
+      assert.equal(result.summary.auditHeadHash, head.headHash);
     }
   );
 });

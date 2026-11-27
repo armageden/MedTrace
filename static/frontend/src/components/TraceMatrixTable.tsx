@@ -12,6 +12,7 @@ interface TraceMatrixTableProps {
   onCreateLiveProof?: () => void;
   canCreateLiveProof?: boolean;
   isBusy?: boolean;
+  isConfluence?: boolean;
 }
 
 export const TraceMatrixTable: React.FC<TraceMatrixTableProps> = ({
@@ -22,6 +23,7 @@ export const TraceMatrixTable: React.FC<TraceMatrixTableProps> = ({
   onCreateLiveProof,
   canCreateLiveProof,
   isBusy = false,
+  isConfluence = false,
 }) => {
   const [searchTerm, setSearchTerm] = useState('');
   const [onlyOpenGaps, setOnlyOpenGaps] = useState(false);
@@ -153,6 +155,7 @@ export const TraceMatrixTable: React.FC<TraceMatrixTableProps> = ({
                       onCreateLiveProof={onCreateLiveProof}
                       canCreateLiveProof={canCreateLiveProof}
                       isBusy={isBusy}
+                      isConfluence={isConfluence}
                     />
                   ) : (
                   <div style={{ display: 'inline-flex', flexDirection: 'column', alignItems: 'center', gap: 12 }}>
